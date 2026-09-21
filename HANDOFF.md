@@ -13,11 +13,13 @@
 | USB 烧录 COM19（S3 原生 CDC） | 通 |
 | SoftAP `FF-debug` / `ffdebug1`，UDP `192.168.4.1:4210` | 通 |
 | OLED 0.42" 72×40 I2C `0x3C` | 通 |
-| STEP/DIR 绝对位置（曾经转过） | 软件在；若轴不动先查 VS、EN、滑条/Jog |
-| TMC2209 UART 读寄存器 | **不通**（卡在这里） |
+| STEP/DIR 绝对位置（已实测） | **通**：TX/RX 全拆掉时，Flutter → AP → UDP → 电机 可正常控制旋转 |
+| TMC2209 UART 读寄存器 | **不通**（卡在这里，硬件） |
 | iOS LiDAR | 代码有；Windows 编不出，需 Mac + iPhone Pro |
 
-**不要再靠扫波特率/对调引脚 magically 修好 UART。** ESP 侧已经能发报文、能听到自己的回声。芯片 TX 焊盘量到 **约 1.2V**，不是 UART 空闲（应约 3.3V）。先把这根脚和 VIO 弄对。
+**关键阴性对照（2026-09-22）：不接 TMC 的 TX/RX，Flutter 仍能正常控制电机旋转。** 说明 AP、UDP、协议、EN、STEP/DIR、限位、加减速全部正常，问题被限定在 UART 单线这一条硬件路径上，与固件/App 无关。UART 未通时电流由模块上的 VREF 电位器决定。
+
+**不要再靠扫波特率/对调引脚 magically 修好 UART。** ESP 侧已经能发报文、能听到自己的回声。芯片 TX 焊盘量到 **约 1.2V**，不是 UART 空闲（应约 3.3V）——悬空脚才会是这个值，说明该焊盘可能**根本没连到芯片**（BTT V1.2 的 TX/RX 就是空焊盘，V1.3 才引出）。先把这根脚和 VIO 弄对。
 
 ## 硬件
 
@@ -148,13 +150,16 @@ TMC keys：1 rms mA，2 细分，3 stealth，4 toff，5 ihold，6 irun。
 
 ## 下一刀该干什么
 
+0. **先做这个（比软件更容易出结果）：把能跑那块模块换过来。**  
+   `esp32s3-tb6600-stepper` 用的那块是 UART 已验证可用的。同一套接线（GPIO12 同脚半双工 或 GPIO11 --R--+-- TMC TX）换到它上面试；如果立刻出 `05 FF`，就证明跟焦器这块板子的 TX 焊盘是空的（BTT V1.2 通病），软件一行都不用改。
 1. **万用表**（优先于再写固件）  
    - TMC **VDD 对 GND = 3.3V**  
-   - 确认 1.2V 的点是不是 **VREF**  
-   - 断开 ESP 11/12 后 TX/PDN 空闲是否 **3.3V**  
-   - 通断：该焊盘 ↔ Super Mini 丝印 **12**（不是丝印 TX）
-2. VDD 和 TX 空闲都是 3.3V 之后，复位，串口应出现 `tmc ok ver=0x21 rx=12 tx=12`，OLED `U r12 t12 a0`。
-3. UART 通了再让 Flutter TMC 面板改电流/StealthChop。STEP/DIR 跟焦不依赖 UART。
+   - **拆掉 ESP 的 10k 和 GPIO12**，只留 3.3V/GND/VM，再量 TX/PDN 对 GND：仍 ~1.2V → 焊盘没连芯片；变 ~3.3V → 是 ESP 在拉低  
+   - 在**能跑那块**模块上同样量一次做对照  
+   - 通断：该焊盘 ↔ Super Mini 丝印 **12**（不是丝印 TX）  
+   - 确认 1.2V 那个点不是 **VREF**（电位器本来就是 ~1V）
+2. TX 空闲 3.3V 之后，复位，串口应出现 `tmc ok ver=0x21 rx=12 tx=12`，OLED `U r12 t12 a0`。  
+3. UART 通了再让 Flutter TMC 面板改电流/StealthChop。**STEP/DIR 跟焦不依赖 UART，已实测可用。**
 4. 不要把主控改成 `VACTUAL`。不要为 UART 再引入 TMCStepper。
 
 ## 关键文件
