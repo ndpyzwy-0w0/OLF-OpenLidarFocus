@@ -3,7 +3,8 @@
 #include <stdint.h>
 
 // Super Mini header is GPIO0–13 (+ USB 19/20, LED 48). Avoid 0 BOOT.
-// Single-wire UART (TX/RX not crossed): GPIO11 TX --1k--+-- TMC PDN/UART, GPIO12 RX --+
+// TMC2209 single-wire UART: GPIO12 (same-pin half-duplex) -> module RX pad.
+// GPIO11 unused; no series resistor. Verified: "U r12 t12 a0".
 static const int PIN_STEP = 5;
 static const int PIN_DIR = 6;
 static const int PIN_EN = 7;

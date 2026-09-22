@@ -124,7 +124,7 @@ class TmcDump {
 
   String logLine() {
     if (!uartOk) {
-      return 'UART 不通。单线：GPIO11(TX)--1k--+--TMC PDN/UART，GPIO12(RX)--+，VDD=3.3V，VM 先上电';
+      return 'UART 不通。单线：GPIO12 → TMC 模块 RX 脚（不是 TX），VDD=3.3V，VM 先上电';
     }
     final warn = <String>[
       if (ot) 'OT',

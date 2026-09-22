@@ -226,16 +226,17 @@ static bool tmcTryPair(int rx, int tx, uint32_t baud) {
 }
 
 static bool tmcBringUp() {
-  // GPIO12 is wired straight to TMC TX; talk on that pin like the working IO17 setup.
-  Serial.println("tmc: half-duplex on GPIO12 (direct TMC TX), GPIO11 Hi-Z");
+  // GPIO12 is wired to the module's RX pad (verified); talk on that pin like the
+  // working IO17 setup in esp32s3-tb6600-stepper. GPIO11 stays Hi-Z.
+  Serial.println("tmc: half-duplex on GPIO12 -> module RX pad, GPIO11 unused");
   if (tmcTryPair(PIN_TMC_RX, PIN_TMC_RX, 115200)) return true;
   if (tmcTryPair(PIN_TMC_TX, PIN_TMC_TX, 115200)) return true;
   if (tmcTryPair(PIN_TMC_RX, PIN_TMC_TX, 19200)) return true;
   Serial2.end();
   pinMode(PIN_TMC_TX, INPUT);
   pinMode(PIN_TMC_RX, INPUT);
-  snprintf(uartHint, sizeof(uartHint), "chk TX");
-  Serial.println("tmc uart fail");
+  snprintf(uartHint, sizeof(uartHint), "chk RX");
+  Serial.println("tmc uart fail: GPIO12 to module RX, VDD=3.3V, VM on");
   return false;
 }
 

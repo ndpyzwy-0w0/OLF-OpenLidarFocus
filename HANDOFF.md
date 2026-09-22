@@ -13,20 +13,55 @@
 | USB 烧录 COM19（S3 原生 CDC） | 通 |
 | SoftAP `FF-debug` / `ffdebug1`，UDP `192.168.4.1:4210` | 通 |
 | OLED 0.42" 72×40 I2C `0x3C` | 通 |
-| STEP/DIR 绝对位置（已实测） | **通**：TX/RX 全拆掉时，Flutter → AP → UDP → 电机 可正常控制旋转 |
-| TMC2209 UART 读寄存器 | **不通**（卡在这里，硬件） |
+| STEP/DIR 绝对位置（已实测） | **通**：Flutter → AP → UDP → 电机 可正常控制旋转 |
+| TMC2209 UART 读写寄存器 | **通**（2026-09-22 解决，见下） |
 | iOS LiDAR | 代码有；Windows 编不出，需 Mac + iPhone Pro |
 
-**关键阴性对照（2026-09-22）：不接 TMC 的 TX/RX，Flutter 仍能正常控制电机旋转。** 说明 AP、UDP、协议、EN、STEP/DIR、限位、加减速全部正常，问题被限定在 UART 单线这一条硬件路径上，与固件/App 无关。UART 未通时电流由模块上的 VREF 电位器决定。
+### UART 是怎么通
 
-**不要再靠扫波特率/对调引脚 magically 修好 UART。** ESP 侧已经能发报文、能听到自己的回声。芯片 TX 焊盘量到 **约 1.2V**，不是 UART 空闲（应约 3.3V）——悬空脚才会是这个值，说明该焊盘可能**根本没连到芯片**（BTT V1.2 的 TX/RX 就是空焊盘，V1.3 才引出）。先把这根脚和 VIO 弄对。
+**接了模块上标 `RX` 的那个脚，不是 `TX`。** 这是唯一的原因。
+
+```text
+GPIO12 ---- 模块 RX 脚          ← 就这一根
+GPIO11 空着（不要接，不要 10k）
+3.3V → VDD      GND 共地      VM 先上电
+模块 TX 空着
+```
+
+固件按 **GPIO12 同脚半双工**（`r12 t12`，115200，`RS485_HALF_DUPLEX`）握手成功：
+
+```text
+tmc try r12 t12 115200
+tmc ok ver=0x21 rx=12 tx=12 addr=0 baud=115200
+uart U r12 t12 a0 ok=1
+```
+
+`ver=0x21` 是 TMC2209 真实版本，整帧通过 CRC 校验，不是回声。UDP 端到端也验证过：
+
+```text
+STATUS   pos=0 target=0  en=0 run=0 uart=1
+uart_ok=1 stealth=1  rms=800mA  1/16  toff=4 ihold=6 irun=13 ver=0x21 cs_actual=6
+drv_status=0xC0060000  sg=0  tstep=65535  flags=0xC0   (stst, stealth；无 OT/OLA/OLB/S2G)
+```
+
+**踩过的坑，别重犯：**
+
+- 接 **TX** 脚时：双脚模式下只能收到**自己发出的 4 字节** `05 00 06 6f`（及各地址对应 CRC）——那是 ESP 自己的回声，不是芯片应答；改成 GPIO12 同脚半双工后是 **0 字节**。两种都**不是**波特率问题，不要再扫波特率或对调引脚。
+- TX 脚对地量到 **约 1.2V**（不是 UART 空闲的 3.3V），说明那根脚不是这根单线 UART。**1.2V 是故障特征，不是要修的目标。**
+- 参考工程 `esp32s3-tb6600-stepper` 的 README 写的是接「模块 TX」；**在同一块 V1.1 模块上实测，跟焦器这边要接 RX 才通**。两块板子走线不同，以实测为准。
+
+**电流来源已切换：** UART 通之前由模块 **VREF 电位器**决定；通之后 `tmcApply()` 会写 `GCONF`（`I_scale_analog=0`）+ `IHOLD_IRUN`，电流改由**寄存器**决定，**默认 800 mA RMS、16 细分、stealthChop**。所以：
+
+- 电机**变热或变强是正常的**，是寄存器在接管，不是故障。
+- 要调就在 Flutter 的 TMC 面板改 mA（参考工程用的是 400 mA），或改 `motor.cpp` 里的 `kRmsMa`。
+- 此时拧 VREF 电位器**不再起作用**。
 
 ## 硬件
 
 - 板：**ESP32-S3 Super Mini**（排针 GPIO0–13 + USB 19/20 + LED 48）。**没有 GPIO17/18。**
-- 驱动：用户还有一套已跑通的 TMC 工程（见下）。模块多半是 **BIGTREETECH TMC2209**，UART **单线**。
-- 电机电源 **VS/VM**（常见 12V）与逻辑 **VDD/VIO=3.3V** 分开，**共地**。VS 不要接到 3.3V。UART 也要 VM 先有电。
-- CLK / MS1 / MS2 在已通工程里可以悬空（地址 0）。
+- 驱动：**BIGTREETECH TMC2209 V1.1**（与参考工程同一块/同款），UART **单线**。
+- 电机电源 **VS/VM**（常见 12V）与逻辑 **VDD/VIO=3.3V** 分开，**共地**。VS 不要接到 3.3V。**先上 VM，再插 USB**。
+- CLK / MS1 / MS2 悬空即可（地址 0）。
 
 ### 引脚（当前固件）
 
@@ -37,30 +72,22 @@
 | DIR | 6 |
 | EN（低有效） | 7 |
 | OLED SDA / SCL | 8 / 9 |
-| TMC UART TX（ESP 发） | 11 |
-| TMC UART RX（ESP 收） | 12 |
+| TMC UART（同脚半双工） | **12 → 模块 RX 脚** |
+| （未使用） | 11 |
 | WS2812 | 48 |
 | USB D−/D+ | 19/20 |
 
 Super Mini 丝印 **TX/RX 是 GPIO43/44**（USB 串口），**不要**接到 TMC。
 
-### UART 接线（用户最后的说法）
+### UART 接线（实测可用）
 
 ```text
-GPIO11 ----10k----+---- TMC TX
-GPIO12 -----------┘
+GPIO12 ---- 模块 RX 脚
 3.3V → VDD     GND 共地     VM 先上电
+GPIO11 空着     模块 TX 空着     不要 10k
 ```
 
-标准是 **1k** 不是 10k。11 只能经过电阻到焊点，**不要**再直连 TX。
-
-用户量 **TMC TX ≈ 1.2V**。可能：
-
-1. 探笔在 **VREF**（电位器本来就是 ~1V），不是 TX/PDN。
-2. **VIO 实际不是 3.3V**，芯片没逻辑电，ESP 经 10k 把脚拉在中间。
-3. 拔掉 11/12 再量 TX：到 3.3V = ESP 在拉总线；仍 1.2V = 脚不是 UART 或没电。
-
-BTT 左边常见顺序：EN、MS1、MS2、**TX/RX（同一脚）**、CLK、STEP、DIR。要接 **TX/RX 那根**，不是空焊盘。
+参考工程那套（`esp32s3-tb6600-stepper`）走的是 DevKitC 的 IO17 单线、接的是模块 TX。**跟随焦器这套不同，以实测的 `U r12 t12 a0` 为准**：同一块模块，这边必须接 **RX** 脚。
 
 ### 已跑通 UART 的参考工程（复用这个，不要再引入 TMCStepper）
 
@@ -73,7 +100,19 @@ BTT 左边常见顺序：EN、MS1、MS2、**TX/RX（同一脚）**、CLK、STEP�
 - 读 IOIN `0x06`，回包 `05 FF 06`，version `0x21`/`0x20`
 - 原始 4 字节读 / 8 字节写 + CRC，**不用 TMCStepper 库**
 
-跟焦器 Super Mini 没有 17，应对齐到 **直连 TMC TX 的那根脚（现在是 GPIO12）** 做同样的同脚半双工。
+跟焦器 Super Mini 没有 17，已对齐成 **GPIO12 同脚半双工、接模块 RX 脚**（见「UART 是怎么通」）。
+
+## 下一刀该干什么
+
+UART 已通，硬件排查结束。剩下的都是软件/产品：
+
+1. **先按审查画布修那两个真问题**（都不依赖硬件）：
+   - 软限位默认值 `±1,000,000` → 与 App 的 `±20000` 一致（`motor.cpp` 两行）
+   - iOS 预览 `.resizeAspectFill` 与点击坐标的换算（标定精度前提）
+2. **确认电流合适**：现在寄存器默认 **800 mA RMS**。若镜头环发烫或丢步，在 Flutter TMC 面板调（参考工程用 400 mA）。
+3. 在 Flutter 里跑一遍 TMC 面板：改 mA / toff / 细分 / StealthChop，看日志是否有异常位。
+4. 上 Mac 编 iOS 真机包，测 LiDAR 距离与人脸跟踪，再做镜头标定。
+5. 不要把主控改成 `VACTUAL`。不要为 UART 再引入 TMCStepper。
 
 ## 固件要点
 
@@ -100,12 +139,14 @@ TMC 报文（和 [这篇](https://blog.csdn.net/m0_64386340/article/details/1414
 - 写：`05 addr (reg|0x80) d3 d2 d1 d0 crc`
 - 回包从机地址 `0xFF`；跟焦 **不要**写 `VACTUAL 0x22` 当主控（那是内部脉冲，破坏绝对位置）
 
-当前 `tmcBringUp()`：先 `r12 t12` 115200 半双工，再 `r11 t11`，再双脚 19200。失败串口 `tmc uart fail`，OLED `chk TX`。
+当前 `tmcBringUp()`：先 `r12 t12` 115200 半双工，再 `r11 t11`，再双脚 19200。失败串口 `tmc uart fail`，OLED `chk RX`。
 
-**已观察的串口现象（不要当“波特率错”）：**
+**排查期的串口现象（当时的线是接在模块 `TX` 脚上，已废弃，仅作对照）：**
 
-- 双脚模式常收到 **正好 4 字节** `05 00 06 6f`（及 addr1–3 对应 CRC）→ **自己的读 IOIN 回声**，没有 `05 FF …`
-- GPIO12 同脚半双工：**0 字节**（半双工抑制回声，芯片仍不回）
+- 双脚模式常收到 **正好 4 字节** `05 00 06 6f`（及 addr1–3 对应 CRC）→ 那是 **ESP 自己的回声**，不是芯片应答
+- GPIO12 同脚半双工：**0 字节**
+
+结论是那根脚不对。**换到模块 `RX` 脚后，同样的 `r12 t12` 立刻握手成功**，说明固件和波特率一直是对的，不用改。
 
 TMCStepper 已从 `platformio.ini` 拿掉。CRC 在 `motor.cpp` 里。
 
@@ -147,20 +188,6 @@ TMC keys：1 rms mA，2 细分，3 stealth，4 toff，5 ihold，6 irun。
 - 不要改 plan 文件。
 - 未要求不要 commit。
 - 懒：能复用 `esp32s3-tb6600-stepper` 的 UART 就复用，不要再造 GUI。
-
-## 下一刀该干什么
-
-0. **先做这个（比软件更容易出结果）：把能跑那块模块换过来。**  
-   `esp32s3-tb6600-stepper` 用的那块是 UART 已验证可用的。同一套接线（GPIO12 同脚半双工 或 GPIO11 --R--+-- TMC TX）换到它上面试；如果立刻出 `05 FF`，就证明跟焦器这块板子的 TX 焊盘是空的（BTT V1.2 通病），软件一行都不用改。
-1. **万用表**（优先于再写固件）  
-   - TMC **VDD 对 GND = 3.3V**  
-   - **拆掉 ESP 的 10k 和 GPIO12**，只留 3.3V/GND/VM，再量 TX/PDN 对 GND：仍 ~1.2V → 焊盘没连芯片；变 ~3.3V → 是 ESP 在拉低  
-   - 在**能跑那块**模块上同样量一次做对照  
-   - 通断：该焊盘 ↔ Super Mini 丝印 **12**（不是丝印 TX）  
-   - 确认 1.2V 那个点不是 **VREF**（电位器本来就是 ~1V）
-2. TX 空闲 3.3V 之后，复位，串口应出现 `tmc ok ver=0x21 rx=12 tx=12`，OLED `U r12 t12 a0`。  
-3. UART 通了再让 Flutter TMC 面板改电流/StealthChop。**STEP/DIR 跟焦不依赖 UART，已实测可用。**
-4. 不要把主控改成 `VACTUAL`。不要为 UART 再引入 TMCStepper。
 
 ## 关键文件
 

@@ -46,7 +46,7 @@ static const char kPage[] = R"html(
  pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}
 </style>
 <h1>跟焦器</h1>
-<p>UDP 4210。STEP5 DIR6 EN7 UART GPIO11 TX--1k--PDN GPIO12 RX OLED SDA8 SCL9</p>
+<p>UDP 4210。STEP5 DIR6 EN7 UART GPIO12→TMC RX OLED SDA8 SCL9</p>
 <button onclick="ping()">测延迟</button>
 <pre id="out">点按钮测 HTTP 往返。</pre>
 <script>
