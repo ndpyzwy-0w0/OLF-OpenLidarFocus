@@ -23,6 +23,7 @@ CMD_STOP = 0x03
 CMD_ENABLE = 0x04
 CMD_SET_LIMITS = 0x05
 CMD_QUERY = 0x06
+CMD_SET_SPEED = 0x07
 CMD_HOME = 0x0A
 CMD_STATUS = 0x81
 CMD_STATUS_V2 = 0x83
@@ -318,6 +319,48 @@ class MotionAcceptance:
         self.expect(status["result"] == "completed",
                     "latched move reported result %r" % status["result"])
 
+    def test_jog_single_shot_modes(self):
+        """App「走圈」路径：单发 JOG 16000 步（1/16 细分 = 5 圈）的两种模式对照。
+
+        流式（flags=0）单发必须被通信看门狗截断——这是失联安全的本意；锁存
+        （flags=REQ_LATCH）单发必须跑满——App 的一次性长行程靠它。两条合起来就是
+        「点一次走圈、中途不保活」的验收：必须显式选一种模式，没有默认的正确值。
+        """
+        self.command(CMD_SET_LIMITS, -20000, 20000)
+        # 固件默认速度（不持久化）：保证 16000 步明显长于 1 s 看门狗阈值。
+        self.command(CMD_SET_SPEED, 8000, 20000)
+        self.home()
+        self.move_to(0)
+
+        status = self.command(CMD_JOG, 16000)
+        self.expect(status["target"] == 16000, "streaming JOG target was not 16000")
+        _, v2 = self.query_v2()
+        self.expect(bool(v2["v2_bits"] & V2_WATCHDOG_ARMED),
+                    "streaming JOG did not arm the communication watchdog")
+        time.sleep(1.25)
+        status = self.query()
+        self.expect(not status["moving"], "silent streaming JOG was not stopped")
+        self.expect(0 < status["pos"] < 16000,
+                    "streaming JOG reached %d steps instead of being truncated"
+                    % status["pos"])
+        self.expect(status["result"] == "stopped",
+                    "truncated streaming JOG reported result %r" % status["result"])
+
+        self.home()
+        self.move_to(0)
+        status = self.command(CMD_JOG, 16000, flags=REQ_LATCH)
+        self.expect(status["target"] == 16000, "latched JOG target was not 16000")
+        _, v2 = self.query_v2()
+        self.expect(not (v2["v2_bits"] & V2_WATCHDOG_ARMED),
+                    "latched JOG armed the communication watchdog")
+        time.sleep(1.25)  # 同样静默，且 QUERY 不刷新看门狗
+        status = self.query()
+        self.expect(status["moving"], "latched JOG stopped after 1.25 s of silence")
+        status = self.wait_for(
+            lambda s: s["pos"] == 16000 and not s["moving"], "latched JOG completion")
+        self.expect(status["result"] == "completed",
+                    "latched JOG reported result %r" % status["result"])
+
     def run(self):
         tests = (
             ("ENABLE and JOG +/-8/+/-80", self.test_enable_and_jogs),
@@ -328,9 +371,17 @@ class MotionAcceptance:
             ("standby wakeup", self.test_standby_wakeup),
             ("communication timeout", self.test_communication_timeout),
             ("latched single-shot move", self.test_latched_single_shot_move),
+            ("single-shot JOG: streaming vs latched", self.test_jog_single_shot_modes),
         )
         failures = 0
         try:
+            # 先软件置零：所有用例都是相对行程，起始位置不该影响结果。否则上一次
+            # 停在离 0 很远的地方时，第一组的 move_to(0) 自己就会被看门狗截断，
+            # 报出一个跟被测行为无关的超时。
+            start = self.home()
+            self.expect(start["pos"] == 0 and not start["moving"],
+                        "axis was not idle at suite start (HOME reported pos=%d "
+                        "moving=%s)" % (start["pos"], start["moving"]))
             for name, test in tests:
                 print("\n== %s ==" % name)
                 try:

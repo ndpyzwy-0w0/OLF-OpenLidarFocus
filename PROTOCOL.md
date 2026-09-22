@@ -7,7 +7,7 @@
 - 协议版本：`protocol = 1`（`kFfProtocolVersion`）
 - 固件版本：`fw 1.0.0`（[device.h](firmware/include/device.h) 的 `kFwMajor/Minor/Patch`，与
   [pubspec.yaml](pubspec.yaml) 的 `version: 1.0.0+1` 保持一致）
-- 验收状态：`test/udp_motion_acceptance.py` 真机 8/8 通过（含本轮新增的“单次锁存”用例）
+- 验收状态：`test/udp_motion_acceptance.py` 真机 9/9 通过（含"单次锁存"和"单发 JOG 流式/锁存对照"用例）
 
 ---
 
@@ -176,7 +176,7 @@ AP 允许多台客户端，但固件不区分命令来源：**最后到达的命
 | 3 | `sequence` | u8 | 回显请求的 `pad` |
 | 4-7 | `pos` | int32 | 当前步数 |
 | 8-11 | `target` | int32 | 目标步数 |
-| 12 | `position_trusted` | u8 | 见 §7.1 |
+| 12 | `position_trusted` | u8 | 见 §8 |
 | 13 | `fault` | u8 | **当前恒为 0（占位）**，不要据此判断故障 |
 | 14-15 | `reserved` | u16 | 位定义见下 |
 
@@ -294,15 +294,49 @@ motorCommunicationTick()（主循环每轮）：
 | 上位机「点一下就移动到某位置」（一次性的长行程） | **锁存**（`flags` 位 0 = 1），发一次即可，不必为了防截断而空转发包 |
 | 上位机自己就是唯一的控制者且保证不断线 | 两种都行；锁存更省电、更省带宽 |
 
-> 已知问题（上位机侧）：Windows/Dart 版目前只在**目标变化**时才发 `SET_POS`，且没有保活定时器
-> （[ff_protocol.dart](lib/ff_protocol.dart) 的 `setPos` 是纯单发）。结果是任何超过 1 s 的行程会被看门狗
-> 截断在半路 —— 这正是「控制有时候不灵 / 松手后镜头停在半路」的根因。上位机要么加保活，要么改用锁存位。
+### 7.2 上位机必须改的地方（「点一次走圈，走到一半就停」的根因）
 
-### 7.2 真机验证过的证据
+`lib/` 目前两条发送路径都是**流式**（`FfPacket.flags` 默认 0）：[ff_protocol.dart](lib/ff_protocol.dart)
+的 `setPos()` / `jog()` 是纯单发，而 [main.dart](lib/main.dart) 的 `_jog()`（"走步"/"走圈"按钮）
+发完就不再发。于是任何超过 1 s 的行程都在 **1.0 s 处**被看门狗刹停 —— 截断位置只由
+"速度 × 1 s"决定，跟行程总长无关：
+
+| 速度设置 | 5 圈（16000 步，1/16 细分）在 1.0 s 处被截断的位置 |
+| --- | --- |
+| 8000 脉冲/秒（固件默认） | `pos = 6455` 步 ≈ **2.0 圈**（40%） |
+| 3200 脉冲/秒（App 默认 1.2 圈/秒） | `pos = 3379` 步 ≈ **1.06 圈**（21%） |
+| 8000 脉冲/秒 + 锁存 | `pos = 16000` 步 = **5.00 圈**，`result = completed` |
+
+两个改法任选一个；"点一次就走"的按钮用锁存更合适（省电、省带宽）：
+
+```dart
+// ff_protocol.dart：让单发命令能带锁存位
+void setPos(int steps, {bool latch = false}) =>
+    _send(FfPacket(cmd: kFfSetPos, a: steps, flags: latch ? 0x01 : 0));
+void jog(int delta, {bool latch = false}) =>
+    _send(FfPacket(cmd: kFfJog, a: delta, flags: latch ? 0x01 : 0));
+
+// main.dart：走步/走圈是一次性长行程 → 用锁存
+_link.jog(delta, latch: true);
+```
+
+```dart
+// 或者：保持流式，在运动未完成期间每 200–500 ms 重发当前目标（幂等，见上）
+if (_moving) _link.setPos(_targetSteps);
+```
+
+自动跟焦**不要**用锁存：它必须靠保活，失联时要能自动停（见 §7.1）。改完之后可以用
+`test/udp_motion_acceptance.py` 里的 `single-shot JOG: streaming vs latched` 组核对两种模式
+都还符合契约。
+
+### 7.3 真机验证过的证据
 
 - 流式 `SET_POS 19000` 后静默 1.25 s → 停在 `pos = 6202`，`result = stopped`（应到 19000）
 - 锁存 `SET_POS 12000` 后静默 1.25 s → 仍在运动（`pos ≈ 8606 → 12000`），最终 `result = completed`
-- 两条都在 `test/udp_motion_acceptance.py` 里成为固定用例（`communication timeout` / `latched single-shot move`）
+- 单发 `JOG 16000`（= 5 圈）8000 脉冲/秒：流式停在 `pos = 6455` / `stopped`，锁存跑满
+  `pos = 16000` / `completed`
+- 三条都在 `test/udp_motion_acceptance.py` 里成为固定用例（`communication timeout` /
+  `latched single-shot move` / `single-shot JOG: streaming vs latched`）
 
 ---
 
@@ -439,7 +473,7 @@ motorCommunicationTick()（主循环每轮）：
 | --- | --- |
 | `python firmware/tools/discover.py` | 逐网卡广播发现，打印 device_id / fw / mac / IP（多网卡机器必须用它，别用普通 socket 广播） |
 | `python firmware/tools/jog.py status|enable|pos N|jog N|stop|limits MIN MAX|speed HZ ACCEL` | 手工点动；加 `--latch` 走单次锁存 |
-| `python test/udp_motion_acceptance.py [--host 192.168.4.1]` | 黑盒运动验收，8 组用例，`exit 0` = 全过 |
+| `python test/udp_motion_acceptance.py [--host 192.168.4.1]` | 黑盒运动验收，9 组用例，`exit 0` = 全过 |
 
 验收覆盖：发现/状态、使能前置与拒绝、限位夹紧、点动、停止、通信看门狗超时、**单次锁存**、
 待机断电。
