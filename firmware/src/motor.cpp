@@ -418,7 +418,7 @@ void motorJog(int32_t delta) {
   if (needsRecovery) {
     recoverRunningAtTarget();
   }
-  const int32_t requested = target + delta;
+  const int32_t requested = stepper->getCurrentPosition() + delta;
   target = clampLim(requested);
   limitHit = target != requested;
   commandResult = limitHit ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_ACCEPTED;
