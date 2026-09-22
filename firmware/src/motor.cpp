@@ -4,7 +4,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <string.h>
-#include <FastAccelStepper.h>
+#include <math.h>
+#include "esp_arduino_version.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
@@ -16,8 +17,6 @@ static const uint16_t kMicrosteps = 16;
 static const uint32_t kDefaultHz = 8000;
 static const int32_t kDefaultAccel = 20000;
 
-static FastAccelStepperEngine engine;
-static FastAccelStepper *stepper = nullptr;
 static char uartHint[24] = "UART ?";
 
 // 软限位默认按“圈”算，随细分自动缩放。
@@ -318,15 +317,110 @@ static int32_t clampLim(int32_t v) {
   return v;
 }
 
-static void applyEnable() {
-  bool on = enabled && !standbyOff;
-  digitalWrite(PIN_EN, on ? LOW : HIGH);
-  if (!stepper) return;
-  if (on) stepper->enableOutputs();
-  else stepper->disableOutputs();
+// Hardware timer pulse generator.  The ISR owns the actual position: one
+// position unit is consumed only after a STEP pulse has been emitted.
+static const uint32_t kTimerHz = 50000;
+static hw_timer_t *stepTimer = nullptr;
+static portMUX_TYPE stepMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile int32_t currentPos = 0;
+static volatile int32_t stepTarget = 0;
+static volatile uint32_t stepRate = 0;
+static volatile int8_t stepSign = 1;
+static volatile uint32_t phase = 0;
+static int32_t speedLimit = (int32_t)kDefaultHz;
+static int32_t accelLimit = (int32_t)kDefaultAccel;
+static float plannedRate = 0.0f;
+static uint32_t lastPlanUs = 0;
+
+static void IRAM_ATTR onStepTimer() {
+  portENTER_CRITICAL_ISR(&stepMux);
+  const uint32_t rate = stepRate;
+  const int8_t sign = stepSign;
+  const int32_t pos = currentPos;
+  const int32_t goal = stepTarget;
+  if (rate == 0 || (sign > 0 && pos >= goal) || (sign < 0 && pos <= goal)) {
+    phase = 0;
+    portEXIT_CRITICAL_ISR(&stepMux);
+    return;
+  }
+  phase += rate;
+  if (phase < kTimerHz) {
+    portEXIT_CRITICAL_ISR(&stepMux);
+    return;
+  }
+  phase -= kTimerHz;
+  gpio_set_level((gpio_num_t)PIN_STEP, 1);
+  ets_delay_us(3);
+  gpio_set_level((gpio_num_t)PIN_STEP, 0);
+  currentPos += sign;
+  portEXIT_CRITICAL_ISR(&stepMux);
 }
 
-// 运动前先唤醒：待机断电后再发位置，必须重新使能，否则只会记数不动轴。
+static void setStepRate(int32_t rate) {
+  bool forward = rate >= 0;
+  uint32_t absolute = (uint32_t)(forward ? rate : -rate);
+  if (absolute > (uint32_t)speedLimit) absolute = (uint32_t)speedLimit;
+  digitalWrite(PIN_DIR, forward ? HIGH : LOW);
+  if (absolute) delayMicroseconds(3);
+  portENTER_CRITICAL(&stepMux);
+  stepSign = forward ? 1 : -1;
+  stepRate = absolute;
+  if (!absolute) phase = 0;
+  portEXIT_CRITICAL(&stepMux);
+}
+
+static int32_t readPosition() {
+  portENTER_CRITICAL(&stepMux);
+  int32_t p = currentPos;
+  portEXIT_CRITICAL(&stepMux);
+  return p;
+}
+
+static void planMotion() {
+  const uint32_t now = micros();
+  if (lastPlanUs == 0) lastPlanUs = now;
+  float dt = (float)(now - lastPlanUs) * 1e-6f;
+  if (dt < 0.0005f) return;
+  if (dt > 0.02f) dt = 0.02f;
+  lastPlanUs = now;
+
+  int32_t p, goal;
+  portENTER_CRITICAL(&stepMux);
+  p = currentPos;
+  goal = stepTarget;
+  portEXIT_CRITICAL(&stepMux);
+  if (!enabled || standbyOff || p == goal) {
+    plannedRate = 0;
+    setStepRate(0);
+    if (enabled && p == goal && commandResult == MOTOR_RESULT_ACCEPTED)
+      commandResult = MOTOR_RESULT_COMPLETED;
+    return;
+  }
+
+  const int32_t error = goal - p;
+  const float distance = (float)abs(error);
+  float desired = sqrtf(2.0f * (float)accelLimit * distance);
+  if (desired > (float)speedLimit) desired = (float)speedLimit;
+  if (error < 0) desired = -desired;
+  const float delta = (float)accelLimit * dt;
+  // Reverse only after the old direction has completely stopped, so DIR
+  // always has setup time before the first pulse in the new direction.
+  if (plannedRate != 0.0f && plannedRate * desired < 0.0f) {
+    plannedRate += plannedRate > 0 ? -delta : delta;
+    if (plannedRate * desired < 0.0f)
+      plannedRate = 0.0f;
+  } else if (plannedRate < desired) {
+    plannedRate = min(plannedRate + delta, desired);
+  } else if (plannedRate > desired) {
+    plannedRate = max(plannedRate - delta, desired);
+  }
+  setStepRate((int32_t)(plannedRate >= 0 ? plannedRate + 0.5f : plannedRate - 0.5f));
+}
+
+static void applyEnable() {
+  digitalWrite(PIN_EN, (enabled && !standbyOff) ? LOW : HIGH);
+}
+
 static void wake() {
   lastMoveMs = millis();
   if (!standbyOff) return;
@@ -334,49 +428,36 @@ static void wake() {
   applyEnable();
 }
 
-static void recoverRunningAtTarget();
-static void resetStepperOutput(int32_t position);
-static const int32_t kTargetPositionSlack = 4;
-
-static bool positionNearTarget(int32_t position) {
-  int32_t distance = position - target;
-  return distance >= -kTargetPositionSlack && distance <= kTargetPositionSlack;
-}
-
-static void queueMoveTo(int32_t position) {
-  int8_t result = stepper->moveTo(position);
-  Serial.printf("moveTo pos=%ld rc=%d run=%d queue=%d ramp=%u future=%ld\n",
-                (long)position, result, stepper->isRunning() ? 1 : 0,
-                stepper->isQueueRunning() ? 1 : 0, stepper->rampState(),
-                (long)stepper->getPositionAfterCommandsCompleted());
-}
-
 void motorBegin() {
   pinMode(PIN_EN, OUTPUT);
+  pinMode(PIN_STEP, OUTPUT);
+  pinMode(PIN_DIR, OUTPUT);
   digitalWrite(PIN_EN, HIGH);
-
-  tmcLoad();  // 必须在 tmcApply() 之前：把上次保存的参数读回来
-  recomputeLimits();  // 软限位跟随读回来的细分
-
-  engine.init(1);
-#if defined(SUPPORT_SELECT_DRIVER_TYPE)
-  stepper = engine.stepperConnectToPin(PIN_STEP, DRIVER_RMT);
-#else
-  stepper = engine.stepperConnectToPin(PIN_STEP);
-#endif
-  if (!stepper) {
-    Serial.println("step pin busy");
-    return;
+  digitalWrite(PIN_STEP, LOW);
+  digitalWrite(PIN_DIR, LOW);
+  tmcLoad();
+  recomputeLimits();
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  stepTimer = timerBegin(kTimerHz);
+  if (stepTimer) {
+    timerAttachInterrupt(stepTimer, &onStepTimer);
+    timerAlarm(stepTimer, 1, true, 0);
   }
-  stepper->setDirectionPin(PIN_DIR);
-  stepper->setEnablePin(PIN_EN, true);
-  stepper->setAutoEnable(false);
-  stepper->setSpeedInHz(kDefaultHz);
-  stepper->setAcceleration(kDefaultAccel);
-  stepper->disableOutputs();
-  stepper->setCurrentPosition(0);
+#else
+  stepTimer = timerBegin(1, 80, true);
+  if (stepTimer) {
+    timerAttachInterrupt(stepTimer, &onStepTimer, true);
+    timerAlarmWrite(stepTimer, 1000000 / kTimerHz, true);
+    timerAlarmEnable(stepTimer);
+  }
+#endif
   target = 0;
-  Serial.println("stepper ok");
+  portENTER_CRITICAL(&stepMux);
+  currentPos = 0;
+  stepTarget = 0;
+  portEXIT_CRITICAL(&stepMux);
+  lastPlanUs = micros();
+  Serial.println(stepTimer ? "hardware timer stepper ok" : "step timer init failed");
 }
 
 void motorUartBegin() {
@@ -385,122 +466,41 @@ void motorUartBegin() {
 }
 
 void motorSetPos(int32_t steps) {
-  if (!stepper || !enabled) {
-    commandResult = MOTOR_RESULT_REJECTED;
-    return;
-  }
+  if (!enabled || !stepTimer) { commandResult = MOTOR_RESULT_REJECTED; return; }
   wake();
-  const bool needsRecovery =
-      stepper->isRunning() && positionNearTarget(stepper->getCurrentPosition());
-  if (needsRecovery) {
-    recoverRunningAtTarget();
-  }
-  target = clampLim(steps);
-  limitHit = target != steps;
+  const int32_t clamped = clampLim(steps);
+  target = clamped;
+  limitHit = clamped != steps;
   commandResult = limitHit ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_ACCEPTED;
-  if (needsRecovery || stepper->isRunning()) {
-    pendingTarget = target;
-    pendingSince = millis();
-    movePending = true;
-    return;
-  }
-  movePending = false;
-  queueMoveTo(target);
+  portENTER_CRITICAL(&stepMux);
+  stepTarget = clamped;
+  portEXIT_CRITICAL(&stepMux);
 }
 
 void motorJog(int32_t delta) {
-  if (!stepper || !enabled) {
-    commandResult = MOTOR_RESULT_REJECTED;
-    return;
-  }
+  if (!enabled || !stepTimer) { commandResult = MOTOR_RESULT_REJECTED; return; }
   wake();
-  const int32_t current = stepper->getCurrentPosition();
-  if (stepper->isRunning()) {
-    // Cancel the previous move without rebuilding the RMT channel. Reattaching
-    // the pin here can leave a new jog accepted in software but without pulses.
-    stepper->forceStopAndNewPosition(current);
-  }
-  const int32_t requested = current + delta;
-  target = clampLim(requested);
-  limitHit = target != requested;
+  const int32_t requested = readPosition() + delta;
+  const int32_t clamped = clampLim(requested);
+  target = clamped;
+  limitHit = clamped != requested;
   commandResult = limitHit ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_ACCEPTED;
-  movePending = false;
-  queueMoveTo(target);
+  portENTER_CRITICAL(&stepMux);
+  stepTarget = clamped;
+  portEXIT_CRITICAL(&stepMux);
 }
-
-// ---- 楔死看门狗 ----
-// 实测 FastAccelStepper 的 RMT 通道偶尔会进入一种状态：
-// isRunning() 一直是 true、位置却不再推进（RMT 还在输出慢速脉冲），
-// 表现就是“电机一直慢慢转、停不下来”，此时 stopMove() 也压不住。
-// 判据：位置连续 kWedgedMs 没变、isRunning() 仍为真、且未到目标。
-// 处理：forceStopAndNewPosition() 硬停并对齐，然后把目标对齐到当前位置，
-// 让它停下而不是继续空转。App／自动跟焦需要时会重新下发目标。
-// 必须定义在 motorStandbyTick() 之前。
-static const uint32_t kWedgedMs = 700;
-static const uint32_t kRunningAtTargetMs = 1000;
-static int32_t wdPos = 0x7fffffff;
-static uint32_t wdSince = 0;
-static uint16_t wdCount = 0;
-
-static void resetStepperOutput(int32_t position) {
-  stepper->forceStopAndNewPosition(position);
-  stepper->detachFromPin();
-  stepper->reAttachToPin();
-  if (enabled && !standbyOff) stepper->enableOutputs();
-}
-
-static void wedgedTick() {
-  if (!stepper) return;
-  int32_t p = stepper->getCurrentPosition();
-  uint32_t now = millis();
-  if (p == target && wdPos != p) {
-    wdPos = p;
-    wdSince = now;
-  } else if (p != wdPos) {
-    wdPos = p;
-    wdSince = now;
-    return;
-  }
-  if (!stepper->isRunning()) return;
-  if (positionNearTarget(p)) {
-    stepper->stopMove();
-    if (!stepper->isRunning() || now - wdSince < kRunningAtTargetMs) return;
-    wdCount++;
-    resetStepperOutput(target);
-    p = target;
-    wdSince = now;
-    Serial.printf("stepper running at target %ld - force stop #%u\n", (long)p,
-                  wdCount);
-    return;
-  }
-  if (now - wdSince < kWedgedMs) return;
-  wdCount++;
-  Serial.printf("stepper wedged at %ld (target %ld) - force stop #%u\n", (long)p,
-                (long)target, wdCount);
-  resetStepperOutput(p);
-  target = p;
-  wdPos = p;
-  wdSince = now;
-  lastMoveMs = now;
-}
-
-static void recoverRunningAtTarget() {
-  if (!stepper || !stepper->isRunning()) return;
-  const int32_t p = stepper->getCurrentPosition();
-  if (!positionNearTarget(p)) return;
-  resetStepperOutput(target);
-  wdPos = target;
-  wdSince = millis();
-  Serial.printf("stepper running near target %ld - force stop\n", (long)target);
-}
-
-uint16_t motorRecoverCount() { return wdCount; }
 
 void motorStop() {
-  if (!stepper) return;
+  if (!stepTimer) return;
+  const int32_t p = readPosition();
+  portENTER_CRITICAL(&stepMux);
+  stepTarget = p;
+  stepRate = 0;
+  phase = 0;
+  portEXIT_CRITICAL(&stepMux);
+  plannedRate = 0;
+  target = p;
   movePending = false;
-  stepper->stopMove();
-  target = stepper->getCurrentPosition();
   commandResult = MOTOR_RESULT_STOPPED;
   lastMoveMs = millis();
 }
@@ -514,17 +514,9 @@ void motorSetEnabled(bool on) {
 }
 
 void motorStandbyTick() {
-  engine.manageSteppers();
-  wedgedTick();  // 每 loop 都要跑，与待机无关
-  if (movePending && stepper && millis() - pendingSince >= kMoveUpdateDelayMs) {
-    movePending = false;
-    queueMoveTo(pendingTarget);
-  }
+  planMotion();
   if (!enabled || !tmcStandby || standbyOff) return;
-  if (motorMoving()) {
-    lastMoveMs = millis();
-    return;
-  }
+  if (motorMoving()) { lastMoveMs = millis(); return; }
   if (millis() - lastMoveMs < kStandbyDelayMs) return;
   standbyOff = true;
   applyEnable();
@@ -534,46 +526,40 @@ void motorStandbyTick() {
 bool motorStandbyOff() { return standbyOff; }
 
 void motorSetLimits(int32_t minSteps, int32_t maxSteps) {
-  if (minSteps > maxSteps) {
-    int32_t t = minSteps;
-    minSteps = maxSteps;
-    maxSteps = t;
-  }
-  minLim = minSteps;
-  maxLim = maxSteps;
-  limExplicit = true;
-  if (stepper && enabled) {
-    movePending = false;
-    target = clampLim(target);
-    limitHit = false;
-    queueMoveTo(target);
-  }
+  if (minSteps > maxSteps) { int32_t t = minSteps; minSteps = maxSteps; maxSteps = t; }
+  minLim = minSteps; maxLim = maxSteps; limExplicit = true;
+  const int32_t clamped = clampLim(target);
+  target = clamped;
+  limitHit = false;
+  portENTER_CRITICAL(&stepMux);
+  stepTarget = clamped;
+  portEXIT_CRITICAL(&stepMux);
 }
 
 void motorSetSpeed(int32_t hz, int32_t accel) {
-  if (!stepper) return;
   if (hz < 100) hz = 100;
   if (hz > 40000) hz = 40000;
   if (accel < 100) accel = 100;
   if (accel > 1000000) accel = 1000000;
-  stepper->setSpeedInHz((uint32_t)hz);
-  stepper->setAcceleration((uint32_t)accel);
+  speedLimit = hz;
+  accelLimit = accel;
 }
 
-int32_t motorPos() { return stepper ? stepper->getCurrentPosition() : 0; }
+int32_t motorPos() { return readPosition(); }
 int32_t motorTarget() { return target; }
 int32_t motorMin() { return minLim; }
 int32_t motorMax() { return maxLim; }
 bool motorEnabled() { return enabled; }
 bool motorLimitHit() { return limitHit; }
-// 用 FastAccelStepper 自己的运行状态。不要用“位置 != 目标”判断：
-// stopMove() 减速后位置永远到不了旧目标，会一直显示在动；
-// 而“位置 300ms 没变就对齐目标”的做法会把慢速进行中的动作截断（实测少走 14 步）。
-bool motorMoving() { return stepper && stepper->isRunning(); }
+bool motorMoving() {
+  portENTER_CRITICAL(&stepMux);
+  bool moving = stepRate != 0 || currentPos != stepTarget;
+  portEXIT_CRITICAL(&stepMux);
+  return moving;
+}
 bool motorUartOk() { return uartOk; }
 const char *motorUartHint() { return uartHint; }
 MotorCommandResult motorCommandResult() { return commandResult; }
-
 void motorTmcSnap(TmcSnap *o) {
   memset(o, 0, sizeof(*o));
   o->uartOk = uartOk;
