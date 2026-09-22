@@ -301,11 +301,15 @@ motorCommunicationTick()（主循环每轮）：
 发完就不再发。于是任何超过 1 s 的行程都在 **1.0 s 处**被看门狗刹停 —— 截断位置只由
 "速度 × 1 s"决定，跟行程总长无关：
 
-| 速度设置 | 5 圈（16000 步，1/16 细分）在 1.0 s 处被截断的位置 |
+| 速度设置（单发 `JOG 16000` = 5 圈） | 1.0 s 处被截断的位置（真机实测） |
 | --- | --- |
-| 8000 脉冲/秒（固件默认） | `pos = 6455` 步 ≈ **2.0 圈**（40%） |
-| 3200 脉冲/秒（App 默认 1.2 圈/秒） | `pos = 3379` 步 ≈ **1.06 圈**（21%） |
-| 8000 脉冲/秒 + 锁存 | `pos = 16000` 步 = **5.00 圈**，`result = completed` |
+| 3200 脉冲/秒（App 默认 1.2 圈/秒，加速度 96000） | `pos ≈ 3800–4000` 步 ≈ **1.2 圈**（24–25%） |
+| 9600 脉冲/秒（App 滑条 ≈3 圈/秒，加速度 96000） | `pos ≈ 9300–9700` 步 ≈ **2.9 圈**（58–61%） |
+| 8000 脉冲/秒（固件默认，加速度 20000） | `pos ≈ 6700–7000` 步 ≈ **2.1 圈**（42–44%） |
+| 3200 脉冲/秒 + 锁存 | `pos = 16000` 步 = **5.00 圈**，`result = completed` |
+
+上表是实测值（`test/repro_jog_truncation.py` 的真机输出），比"纯速度 × 1 s"的理论值略小一点，
+差在加速段 —— 起步到匀速也占了那 1 s 里的一部分。
 
 两个改法任选一个；"点一次就走"的按钮用锁存更合适（省电、省带宽）：
 
@@ -329,6 +333,11 @@ if (_moving) _link.setPos(_targetSteps);
 `test/udp_motion_acceptance.py` 里的 `single-shot JOG: streaming vs latched` 组核对两种模式
 都还符合契约。
 
+想亲眼看截断，跑 `python test/repro_jog_truncation.py`：它严格照抄 App 的发包方式（单发 `JOG`
+16000 步 + 200 ms `QUERY` + 1 s `TMC_QUERY` 轮询），四种速度/模式各走几趟，打印每趟的
+"最后运动中 / 首次静止"时刻和原始轨迹。**流式必然被截断，锁存必然跑满**，输出末行给出结论、
+退出码 0；设备停在 `pos = 0`、静止、`ENABLE(0)`。
+
 ### 7.3 真机验证过的证据
 
 - 流式 `SET_POS 19000` 后静默 1.25 s → 停在 `pos = 6202`，`result = stopped`（应到 19000）
@@ -337,6 +346,11 @@ if (_moving) _link.setPos(_targetSteps);
   `pos = 16000` / `completed`
 - 三条都在 `test/udp_motion_acceptance.py` 里成为固定用例（`communication timeout` /
   `latched single-shot move` / `single-shot JOG: streaming vs latched`）
+- 另有 `test/repro_jog_truncation.py` 在真机上反复复现（4 种模式 × 3 趟）：每趟流式都在
+  "最后运动中 0.81–0.83 s / 首次静止 1.02–1.04 s"被刹停、`result = stopped`、`armed` 由 1 转 0，
+  截断位置 24–61%（随速度）；锁存 3 趟全部 `16000` 步 / `completed`。轨迹里能直接看到
+  `t=1.03s pos=4008 target=4008 moving=0 result=stopped armed=False` —— `target` 被
+  `motorStop()` 重锚，证明是看门狗主动刹停，不是丢包或限位。
 
 ---
 
@@ -474,6 +488,7 @@ if (_moving) _link.setPos(_targetSteps);
 | `python firmware/tools/discover.py` | 逐网卡广播发现，打印 device_id / fw / mac / IP（多网卡机器必须用它，别用普通 socket 广播） |
 | `python firmware/tools/jog.py status|enable|pos N|jog N|stop|limits MIN MAX|speed HZ ACCEL` | 手工点动；加 `--latch` 走单次锁存 |
 | `python test/udp_motion_acceptance.py [--host 192.168.4.1]` | 黑盒运动验收，9 组用例，`exit 0` = 全过 |
+| `python test/repro_jog_truncation.py [--reps 3]` | 复现"单发 JOG 被 1 s 看门狗截断"：流式/锁存四种模式对照，`exit 0` = 与文档一致。会真实驱动电机 |
 
 验收覆盖：发现/状态、使能前置与拒绝、限位夹紧、点动、停止、通信看门狗超时、**单次锁存**、
 待机断电。

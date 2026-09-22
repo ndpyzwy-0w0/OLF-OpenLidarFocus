@@ -440,6 +440,7 @@ Python 语法检查：
 
 ```powershell
 python -m py_compile test\udp_motion_acceptance.py
+python -m py_compile test\repro_jog_truncation.py
 ```
 
 固件编译：
@@ -465,6 +466,19 @@ platformio device monitor -d firmware -p COM19 -b 115200
 ```powershell
 python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 ```
+
+复现"单发 JOG 被 1 s 看门狗截断"（App"走圈"按钮的症状）：
+
+```powershell
+python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
+```
+
+该工具严格照抄 App 的发包方式（单发 `JOG` 16000 步 = 5 圈 + 200 ms `QUERY` + 1 s `TMC_QUERY`
+轮询），四种模式各走 `--reps` 趟：App 默认 1.2 圈/秒流式、App 滑条 3.0 圈/秒流式、固件默认
+2.5 圈/秒流式、以及 `flags = 0x01` 锁存对照。每趟打印"最后运动中 / 首次静止"时刻、截断位置和
+原始 200 ms 采样轨迹。**流式必然被截断、锁存必然跑满**（实测 4 模式 × 3 趟：23.5–25.2% /
+58.2–60.5% / 42.1–43.5% / 100%），末行给出结论，退出码 0 = 与文档一致。跑完设备停在
+`pos = 0`、静止、`ENABLE(0)`。
 
 脚本覆盖 ENABLE、JOG、HOME/STATUS_V2、SET_POS、STOP、反向、软限位、待机唤醒、
 通信超时、单次锁存和单发 JOG 的流式/锁存对照，共 9 组。必须连接设备 AP（`FF-XXXXXX`）
