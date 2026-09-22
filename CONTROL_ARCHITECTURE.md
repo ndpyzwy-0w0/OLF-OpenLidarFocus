@@ -154,7 +154,8 @@ Flutter 的 `MotorLink` 会自动为每个发送的控制包分配序号。未�
 
 结果与请求序号一起使用。结果表示最近一次命令的状态，不是历史队列；
 `accepted` 只有在 `pos == target` 且 `moving == false` 后才变成
-`completed`。
+`completed`。`STATUS` 和 `STATUS_V2` 共用同一次提升，因此两种包的
+`result` 始终一致，客户端不应依赖它们之间的差异。
 
 ### 两种目标语义
 
@@ -187,6 +188,14 @@ STST、TSTEP、CS_ACTUAL、DRV_STATUS
 
 当前 UDP 状态已经返回：
 
+```text
+enabled
+moving
+uart_ok
+standby
+limited
+pos
+target
 ```
 
 ### 位置可信度与手动 HOME
@@ -203,15 +212,7 @@ position_trusted
 fault
 ```
 
-旧客户端继续使用 `STATUS`，新客户端应优先读取 `STATUS_V2`。text
-enabled
-moving
-uart_ok
-standby
-limited
-pos
-target
-```
+旧客户端继续使用 `STATUS`，新客户端应优先读取 `STATUS_V2`。
 
 ## S 曲线 / jerk 运动 profile
 

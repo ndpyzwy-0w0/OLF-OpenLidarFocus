@@ -1,432 +1,402 @@
-# 跟焦器交接（2026-09-22）
+# iphone-follow-focus 项目交付文档
 
-下一任模型先读本文，再改代码。仓库：`J:\New soft project\iphone-follow-focus`。
+更新时间：2026-09-22
 
-## 产品
+这份文档是后续 agent 的第一阅读入口。它描述当前仓库的真实实现，不要把旧提交或旧文档中
+FastAccelStepper/RMT 的描述当作当前代码。
 
-电影机拍片；iPhone 贴机身当 LiDAR 测距/跟踪；ESP32-S3 Super Mini + TMC2209 扭电影镜头对焦环。电机是笨绝对位置伺服。手机做 LiDAR/人脸/LUT。链路：**WiFi SoftAP + UDP**，不要 BLE。
+## 1. 项目目标
 
-## 现在通 / 不通
+本项目是一个电影机自动跟焦器：
 
-| 块 | 状态 |
+```text
+iPhone LiDAR/人脸跟踪
+    -> Flutter/Swift 负责距离滤波、目标映射和跟焦策略
+    -> ESP32-S3 负责实时规划、软限位、STEP/DIR 和安全停止
+    -> TMC2209
+    -> 步进电机和镜头对焦环
+```
+
+当前可以先用 Windows Flutter 调试界面控制 ESP32；正式 iOS LiDAR 功能需要 macOS + Xcode +
+iPhone Pro 真机。
+
+## 2. 当前状态摘要
+
+| 功能 | 当前状态 |
 | --- | --- |
-| USB 烧录 COM19（S3 原生 CDC） | 通 |
-| SoftAP `FF-debug` / `ffdebug1`，UDP `192.168.4.1:4210` | 通 |
-| OLED 0.42" 72×40 I2C `0x3C` | 通 |
-| STEP/DIR 绝对位置（已实测） | **通**：Flutter → AP → UDP → 电机 可正常控制旋转 |
-| TMC2209 UART 读写寄存器 | **通**（2026-09-22 解决，见下） |
-| iOS LiDAR | 代码有；Windows 编不出，需 Mac + iPhone Pro |
+| ESP32-S3 固件编译 | 已通过 |
+| 硬件定时器 STEP/DIR 输出 | 已替代旧 RMT 后端，已实测 |
+| `JOG +8/-8/+80/-80` | 已验证位置增量准确 |
+| `SET_POS`、STOP、反向保护 | 已实现并验证 |
+| TMC2209 UART 诊断 | 已通，GPIO12 同脚半双工 |
+| Wi-Fi SoftAP + UDP | 已通 |
+| Flutter Windows 调试界面 | 可运行 |
+| Flutter 协议和单测 | 25 项通过 |
+| 通信失联停止 | 已实现，控制包超时 1000 ms |
+| 手动 HOME / `positionTrusted` | 已实现 |
+| 自动化 UDP 验收脚本 | 已完成，需在实际硬件/Wi-Fi 环境运行 |
+| iOS LiDAR | 代码存在，未在本 Windows 环境验证 |
+| Wi-Fi 列表扫描和设备发现 | 尚未实现，属于下一阶段 |
 
-### UART 是怎么通
-
-**接了模块上标 `RX` 的那个脚，不是 `TX`。** 这是唯一的原因。
-
-```text
-GPIO12 ---- 模块 RX 脚          ← 就这一根
-GPIO11 空着（不要接，不要 10k）
-3.3V → VDD      GND 共地      VM 先上电
-模块 TX 空着
-```
-
-固件按 **GPIO12 同脚半双工**（`r12 t12`，115200，`RS485_HALF_DUPLEX`）握手成功：
+最近提交：
 
 ```text
-tmc try r12 t12 115200
-tmc ok ver=0x21 rx=12 tx=12 addr=0 baud=115200
-uart U r12 t12 a0 ok=1
+a9c9725 fix: report trusted status on queries
+3e802df feat: add motion safety and trusted home
+5113270 fix: guard stepper direction changes
+b6812e8 fix: replace RMT motion with timer pulses
 ```
 
-`ver=0x21` 是 TMC2209 真实版本，整帧通过 CRC 校验，不是回声。UDP 端到端也验证过：
+## 3. 硬件和接线
 
-```text
-STATUS   pos=0 target=0  en=0 run=0 uart=1
-uart_ok=1 stealth=1  rms=800mA  1/16  toff=4 ihold=6 irun=13 ver=0x21 cs_actual=6
-drv_status=0xC0060000  sg=0  tstep=65535  flags=0xC0   (stst, stealth；无 OT/OLA/OLB/S2G)
-```
+硬件：
 
-**踩过的坑，别重犯：**
+- ESP32-S3 Super Mini
+- BIGTREETECH TMC2209 V1.1
+- 0.9° 步进电机，400 整步/圈
+- OLED 0.42 inch，I2C 地址 `0x3C`
 
-- 接 **TX** 脚时：双脚模式下只能收到**自己发出的 4 字节** `05 00 06 6f`（及各地址对应 CRC）——那是 ESP 自己的回声，不是芯片应答；改成 GPIO12 同脚半双工后是 **0 字节**。两种都**不是**波特率问题，不要再扫波特率或对调引脚。
-- TX 脚对地量到 **约 1.2V**（不是 UART 空闲的 3.3V），说明那根脚不是这根单线 UART。**1.2V 是故障特征，不是要修的目标。**
-- 参考工程 `esp32s3-tb6600-stepper` 的 README 写的是接「模块 TX」；**在同一块 V1.1 模块上实测，跟焦器这边要接 RX 才通**。两块板子走线不同，以实测为准。
-
-**电流来源已切换：** UART 通之前由模块 **VREF 电位器**决定；通之后 `tmcApply()` 会写 `GCONF`（`I_scale_analog=0`）+ `IHOLD_IRUN`，电流改由**寄存器**决定，**默认 800 mA RMS、16 细分、stealthChop**。所以：
-
-- 电机**变热或变强是正常的**，是寄存器在接管，不是故障。
-- 要调就在 Flutter 的 TMC 面板改 mA（参考工程用的是 400 mA），或改 `motor.cpp` 里的 `kRmsMa`。
-- 此时拧 VREF 电位器**不再起作用**。
-
-## 硬件
-
-- 板：**ESP32-S3 Super Mini**（排针 GPIO0–13 + USB 19/20 + LED 48）。**没有 GPIO17/18。**
-- 驱动：**BIGTREETECH TMC2209 V1.1**（与参考工程同一块/同款），UART **单线**。
-- 电机电源 **VS/VM**（常见 12V）与逻辑 **VDD/VIO=3.3V** 分开，**共地**。VS 不要接到 3.3V。**先上 VM，再插 USB**。
-- CLK / MS1 / MS2 悬空即可（地址 0）。
-
-### 引脚（当前固件）
+当前引脚：
 
 | 功能 | GPIO |
 | --- | --- |
-| BOOT 按键（使能） | 0 |
+| BOOT 按键/手动切换使能 | 0 |
 | STEP | 5 |
 | DIR | 6 |
-| EN（低有效） | 7 |
-| OLED SDA / SCL | 8 / 9 |
-| TMC UART（同脚半双工） | **12 → 模块 RX 脚** |
-| （未使用） | 11 |
-| WS2812 | 48（**当前未使用，见下**） |
-| USB D−/D+ | 19/20 |
+| EN，低有效 | 7 |
+| OLED SDA/SCL | 8/9 |
+| TMC UART | 12，同脚半双工 |
+| 未使用 | 11 |
+| USB D-/D+ | 19/20 |
 
-Super Mini 丝印 **TX/RX 是 GPIO43/44**（USB 串口），**不要**接到 TMC。
-
-### UART 接线（实测可用）
+TMC2209 实测可用接线：
 
 ```text
-GPIO12 ---- 模块 RX 脚
-3.3V → VDD     GND 共地     VM 先上电
-GPIO11 空着     模块 TX 空着     不要 10k
+GPIO12 -> TMC 模块标记为 RX 的引脚
+GPIO11 不接
+模块 TX 不接
+VDD/VIO = 3.3 V
+VM/VS 使用电机电源
+ESP32 和驱动器共地
+先上 VM，再插 USB
 ```
 
-参考工程那套（`esp32s3-tb6600-stepper`）走的是 DevKitC 的 IO17 单线、接的是模块 TX。**跟随焦器这套不同，以实测的 `U r12 t12 a0` 为准**：同一块模块，这边必须接 **RX** 脚。
+不要根据参考工程的引脚名称直接改线。参考工程
+`J:\softwareProject\esp32s3-tb6600-stepper` 是 DevKitC，使用 GPIO17，和本项目
+Super Mini 不同。本项目已实测 `r12 t12`、115200、地址 0、TMC2209 version `0x21`。
 
-### 已跑通 UART 的参考工程（复用这个，不要再引入 TMCStepper）
+不要重新引入 `neopixelWrite`。旧版 RMT API 和 IDF5/RMT 资源可能冲突，当前 WS2812
+没有使用。
 
-`J:\softwareProject\esp32s3-tb6600-stepper`
+## 4. 固件
 
-- 板是 DevKitC，UART 在 **IO17 单线**：`Serial2.begin(115200, SERIAL_8N1, 17, 17)`
-- `uart_set_mode(UART_NUM_2, UART_MODE_RS485_HALF_DUPLEX)`
-- `gpio_set_drive_capability(tx, GPIO_DRIVE_CAP_0)` + pullup
-- 只接模块 **TX**，不接 RX，不必 1k
-- 读 IOIN `0x06`，回包 `05 FF 06`，version `0x21`/`0x20`
-- 原始 4 字节读 / 8 字节写 + CRC，**不用 TMCStepper 库**
+入口和主要文件：
 
-跟焦器 Super Mini 没有 17，已对齐成 **GPIO12 同脚半双工、接模块 RX 脚**（见「UART 是怎么通」）。
+- [firmware/src/main.cpp](<J:/New%20soft%20project/iphone-follow-focus/firmware/src/main.cpp>)：
+  SoftAP、DNS、HTTP、UDP 初始化和主循环。
+- [firmware/src/motor.cpp](<J:/New%20soft%20project/iphone-follow-focus/firmware/src/motor.cpp>)：
+  硬件定时器脉冲、运动规划、TMC2209 UART、软限位、待机和看门狗。
+- [firmware/include/motor.h](<J:/New%20soft%20project/iphone-follow-focus/firmware/include/motor.h>)：
+  运动公共接口。
+- [firmware/src/protocol.cpp](<J:/New%20soft%20project/iphone-follow-focus/firmware/src/protocol.cpp>)：
+  UDP 命令解析和状态回复。
+- [firmware/include/protocol.h](<J:/New%20soft%20project/iphone-follow-focus/firmware/include/protocol.h>)：
+  协议常量和数据结构。
+- [firmware/platformio.ini](<J:/New%20soft%20project/iphone-follow-focus/firmware/platformio.ini>)：
+  PlatformIO `s3mini` 环境。
 
-## 下一刀该干什么
+固件启动：
 
-UART 已通，硬件排查结束。剩下的都是软件/产品：
+1. `motorBegin()` 初始化 GPIO、参数和硬件定时器。
+2. OLED 和 Wi-Fi SoftAP 启动。
+3. UDP 端口 `4210` 初始化。
+4. 首次进入 `loop()` 时尝试 TMC UART，避免 UART 异常阻塞热点和按键。
+5. 主循环处理 DNS、HTTP、UDP、待机和按键。
 
-1. **在 Flutter 里实测一遍**：连接 → 使能 → Jog/滑条 → 确认轴真的转（别只看界面的 pos 数字；`pos` 是开环计数）。Jog 想更快就加**加速度**，不是加巡航速度。
-2. **确认电流合适**：运行电流默认 800 mA RMS。若镜头环发烫或丢步，在 Flutter TMC 面板调（参考工程用 400 mA）。保持电流默认 200 mA，待机自动断电默认开。
-3. 在 Flutter 里跑一遍 TMC 面板：每个参数都有中文说明，改完看日志是否有异常位。
-4. 上 Mac 编 iOS 真机包，测 LiDAR 距离与人脸跟踪，再做镜头标定。
-5. 不要把主控改成 `VACTUAL`。不要为 UART 再引入 TMCStepper。**不要加回 `neopixelWrite`。**
+## 5. 运动后端和单位
 
-## 固件要点
-
-路径：`firmware/`，PlatformIO env `s3mini`。
+当前不是 FastAccelStepper，也不是 RMT 队列。使用：
 
 ```text
-pio run -e s3mini -t upload --upload-port COM19
+hw_timer_t
+定时器频率 50 kHz
+ISR 用相位累加器生成 STEP
+STEP 高电平约 3 us
+只有真实输出 STEP 脉冲后 currentPos 才加/减 1
 ```
 
-`platformio.ini`：`ARDUINO_USB_CDC_ON_BOOT=1`，`monitor_dtr=0` `monitor_rts=0`。Flash 写 4MB。打开 CDC 若收不到 boot 日志：探测在 `loop` 里，USB 常晚于前半段 printf。
-
-启动顺序（故意的）：
-
-1. `motorBegin()`：FastAccelStepper RMT。OLED、WiFi AP。
-2. **`loop` 里第一次** `motorUartBegin()`，避免 UART 卡死时按键/热点都不工作。
-3. **不要** `setCpuFrequencyMhz(80)`。
-
-### 绝对不要用 `neopixelWrite` 驱动 GPIO48 的 WS2812（已删除）
-
-**这是修了好几轮才找到的坑，务必别再引入。**
-
-Arduino 的 `esp32-hal-rmt.c` 里 `neopixelWrite` 用**旧版 `rmt_*` API + 自己的私有通道分配表 `g_rmt_objects[]`**；而 FastAccelStepper 在 IDF5 下用**新版 `driver/rmt_tx.h`（`rmt_channel_handle_t`）**。**两套分配器各自记账、看不到对方，会同时抢到同一个硬件 RMT 通道。**
-
-后果不是报错，而是**静默错乱**，而且症状随分配顺序变：
-
-| 现象 | 含义 |
-| --- | --- |
-| ESP 侧 `pos` 平滑推进、`run=1` | 固件以为在动 |
-| 芯片侧 `STST=1`、`CS_ACTUAL` 停在 IHOLD | **驱动根本没收到脉冲** |
-| 有时 `STST=0` 但 `pos` 卡死不动 | 通道被抢，ISR 记账和输出脱节 |
-| 偶发 `OT` | 电机堵转发热 |
-
-所以**不要用 `pos` 变化判断电机是否在转**——那是开环计数，跟轴无关。**看 `STST` 和 `TSTEP` 才是真相**：运动时 `TSTEP` 会掉到小数值（如 94→2047），静止时是 65535。`CS_ACTUAL` 运动时应升到 IRUN（13），静止回 IHOLD（6）。
-
-LED 已整段删除（`PIN_LED` / `setLed` / `updateLed` / `neopixelWrite`），OLED 已经显示 OFF/EN/RUN 和 UART 状态，功能不丢。**要恢复 RGB 灯，必须用 IDF5 新版 RMT 驱动（和 FastAccelStepper 同一个分配器），不要用 `neopixelWrite`；MCPWM 在 IDF5 下没有后端可用（`StepperISR_idf4_esp32_mcpwm_pcnt.cpp` 只有 IDF4 版）。**
-
-BOOT：只切换使能（OLED `OFF`↔`EN`），**不会自己转**。转要用 Flutter Jog/`SET_POS`。EN 在 `applyEnable` 里直接 `digitalWrite`（低=使能）。
-
-TMC 报文（和 [这篇](https://blog.csdn.net/m0_64386340/article/details/141472069) 一样，不要用串口助手当产品）：
-
-- 读：`05 addr reg crc`（reg **不要** `|0x80`）
-- 写：`05 addr (reg|0x80) d3 d2 d1 d0 crc`
-- 回包从机地址 `0xFF`；跟焦 **不要**写 `VACTUAL 0x22` 当主控（那是内部脉冲，破坏绝对位置）
-
-当前 `tmcBringUp()`：先 `r12 t12` 115200 半双工，再 `r11 t11`，再双脚 19200。失败串口 `tmc uart fail`，OLED `chk RX`。
-
-**排查期的串口现象（当时的线是接在模块 `TX` 脚上，已废弃，仅作对照）：**
-
-- 双脚模式常收到 **正好 4 字节** `05 00 06 6f`（及 addr1–3 对应 CRC）→ 那是 **ESP 自己的回声**，不是芯片应答
-- GPIO12 同脚半双工：**0 字节**
-
-结论是那根脚不对。**换到模块 `RX` 脚后，同样的 `r12 t12` 立刻握手成功**，说明固件和波特率一直是对的，不用改。
-
-TMCStepper 已从 `platformio.ini` 拿掉。CRC 在 `motor.cpp` 里。
-
-## 为什么“点走步没反应”（已定位）
-
-固件里 `motorJog` / `motorSetPos` 的第一行是：
-
-```c
-if (!stepper || !enabled) return;
-```
-
-**未使能时静默返回**，App 那边看不出任何异常。而 **板子一重启 `enabled` 就归零**，App 只在点「连接电机」时发过一次使能——于是重启之后所有走步/滑条/自动跟焦都像坏了一样。实测对照：
+因此：
 
 ```text
-enabled=0 时 JOG 800 -> pos=0  target=0   ← 被完全忽略
-ENABLE 之后同一 JOG  -> pos=800           ← 正常
+0.9° 电机 = 400 整步/圈
+脉冲/圈 = 400 * TMC 细分
+1/16 = 6400 脉冲/圈
+JOG +8 = 8 个脉冲
+JOG +80 = 80 个脉冲
 ```
 
-修法在 App 侧（固件不该自动使能电机，那样上电就带电很危险）：App 用 `_wantEnabled` 记“用户意图”，发现固件报 `enabled=0` 就自动补发一次使能（1 秒节流）。点走步时若发现没使能，会先发使能并提示“再点一次”。
+规划器是本地梯形/三角速度规划，不是 S 曲线：
 
-**规矩：App 端别用“上报的 enabled”当“用户想要的状态”，两者要分开记。**
-
-## 参数持久化（NVS）
-
-TMC 参数存进 flash（`Preferences` 命名空间 `tmc`），重启不再回默认值：
-
-| 键 | 内容 |
-| --- | --- |
-| `rms` | 运行电流 mA |
-| `hold` | 保持电流 mA |
-| `ms` | 细分 |
-| `toff` | 关断时间 |
-| `stealth` | 静音开关 |
-| `intpol` | 微步插值 |
-| `standby` | 待机断电开关 |
-
-写入时机：每次 `motorTmcSet()` 之后；读取在 `motorBegin()` 里、**必须早于 `tmcApply()`**。
-
-**故意不持久化 `enabled`**：开机自动使能电机很危险（会突然带电顶镜头）。要由 App 连上后自己补使能。
-
-实测：设成 1000 mA / 1/32 / toff 7 / spread 后复位，读回仍是这四个值。
-
-## 走步 / 走圈
-
-换算：**0.9° 电机 → 400 整步/圈**，脉冲/圈 = 400 × 细分（1/16 时 = 6400）。逻辑在 `lib/motor_cal.dart`（`MotorCal`），有单测；换 1.8° 电机只改 `fullStepsPerRev = 200`。
-
-**走圈复用 JOG，不在固件里加新指令**：步数 = 圈数 × 脉冲/圈，然后发相对运动。App 面板有 步 / 圈 两个输入框和各自的「走步/走圈/反向」按钮，并显示当前位置是多少圈。
-
-## 楔死状态与看门狗（“一直慢慢转停不下来”）
-
-**实测复现**（低加速度 + 运动中改目标最容易触发）：`isRunning()` 一直是 true、
-`getCurrentPosition()` 却不再推进，而驱动侧的 RMT 仍在输出慢速脉冲。
-物理表现就是**电机一直慢慢转、停不下来**，此时 `stopMove()` 也压不住。
-
-判据是“说在跑但没进展”，所以固件每 loop 跑 `wedgedTick()`：
-位置连续 **700 ms** 没变、`isRunning()` 仍为真、且未到目标 → 判定楔死，
-用 `forceStopAndNewPosition(p)` 硬停并对齐，再把 `target` 对齐到当前位置
-（**停下**而不是继续空转，安全优先），并打印一行日志：
-
-```
-stepper wedged at 92 (target 0) - force stop #2
+```text
+默认速度 = 8000 steps/s
+默认加速度 = 20000 steps/s²
+desired = sqrt(2 * acceleration * remaining_distance)
 ```
 
-复现脚本连续触发 5 次，每次都被看门狗拉回，最终 `pos == tgt`、`moving == 0`。
+短距离达不到巡航速度是正常的。要改善短距离速度，应提高加速度，而不是只提高巡航速度。
+反向时会先清零步速和相位，改变 DIR，等待约 3 us 后再输出反向脉冲。
 
-**注意**：这不是“固件逻辑写错”，而是 FastAccelStepper 的 RMT 通道在这种
-目标反复改写的用法下的行为。看门狗是兜底，成本低、必须保留。
+## 6. Wi-Fi 和 UDP
 
-### 相关的两个反向教训
+当前固件固定为 SoftAP：
 
-- **`motorMoving()` 要用 `stepper->isRunning()`**，不要用“位置 != 目标”：
-  `stopMove()` 减速后位置永远到不了旧目标，会一直显示在动。
-- 曾经为了“让 moving 收敛”加了 `settleTick()`（位置 300 ms 不变就把 target 对齐），
-  **结果它会截断慢速进行中的动作**：80 步的 jog 只走到 66 步就停了
-  （低速接近目标时步间隔会拉长到超过 300 ms）。已删除，改用看门狗按
-  “没进展”判断，而不是按“位置没变”判断。
-
-## App 侧防“停不下来”
-
-三个静默失败点，都在 `lib/main.dart`：
-
-1. **停机闩锁 `_stopLatched`**：点“停”只发一条 STOP，但 `_onTick` 每 20 ms 跑一次，
-   自动跟焦会在 20 ms 内用距离重算目标再发一次，把“停”覆盖掉 —— 于是“停不下来”。
-   现在点停会闩锁，直到用户再次操作（走步/拖滑条/切自动/使能）。
-2. **自动模式死区 + 最小间隔**（`kAutoDeadbandSteps = 8`，60 ms）：
-   LiDAR 距离微抖会让目标每 tick 变几步，每段都是三角形微动，
-   表现就是“一直缓慢转”。小于死区就不重发。
-3. **手动介入即退出自动**：走步/拖滑条/停机都会关掉自动跟焦并提示原因，
-   否则自动逻辑会在下一 tick 把手工动作拉回去。
-
-## 为什么“走 80 步比走 800 步慢好多”（不是 bug）
-
-位置控制下走固定距离 d，若来不及加到巡航速度，运动是三角形加减速：
-
-```
-峰值速度 = √(加速度 × 距离)
+```text
+SSID: FF-debug
+密码: ffdebug1
+AP channel: 1
+默认地址: 192.168.4.1
+UDP: 4210
+HTTP: 80
 ```
 
-所以**同样的速度/加速度设置下，行程越短峰值越低**。按 App 默认
-（巡航 1.2 圈/秒、加速度 30 圈/秒²，1/16）：
+HTTP 根页面可用于简单延迟测试。DNS captive portal 会把未知 HTTP 路径重定向到根页面。
+Wi-Fi sleep 已关闭。
 
-| 行程 | 峰值速度 |
-| --- | --- |
-| 80 步 | √(192000×80) = 3919 步/秒 = **0.61 圈/秒** |
-| 800 步 | √(192000×800) = 12393 → 被巡航封顶 = **1.2 圈/秒** |
+Flutter 当前 [MotorLink](<J:/New%20soft%20project/iphone-follow-focus/lib/ff_protocol.dart:241>)
+使用 UDP，不建立 TCP 连接。现阶段默认目标仍是 `192.168.4.1:4210`。
 
-80 步的峰值只有 800 步的一半。硬件验证：加速度 500 步/秒²、走 80 步，
-理论峰值 200 步/秒，实测约 **220 步/秒** ✓。
+### 当前协议
 
-**想让它快就加大加速度，不是加大巡航速度。** App 里会在步数输入框下方直接
-算出“走 N 步的峰值约 X 圈/秒”，低于巡航时标黄提示。
+普通包固定 12 字节，小端：
 
-## 速度 / 加速度（为什么“调速不生效”、“换 256 后很慢”）
+```text
+offset 0: magic uint8 = 0x46
+offset 1: cmd uint8
+offset 2: flags uint8
+offset 3: sequence uint8
+offset 4: a int32
+offset 8: b int32
+```
 
-**速度和加速度在 App 里用物理单位给（圈/秒、圈/秒²），发给固件前乘脉冲/圈换成步。**
-不要用步/秒做界面单位——换细分会让同一数值的物理速度差 16 倍，这就是
-“换成 1/256 后变得很慢”的原因：脉冲/圈从 6400 变成 102400，同样 40000 步/秒
-的物理速度从 6.25 圈/秒掉到 0.39 圈/秒。
+命令：
 
-实测（同一圈行程，40000 步/秒）：
-
-| 细分 | 脉冲/圈 | 耗时 |
+| 值 | 命令 | 参数 |
 | --- | --- | --- |
-| 1/16 | 6400 | 0.33 s |
-| 1/256 | 102400 | 2.9 s |
+| `0x01` | `SET_POS` | `a = 绝对目标步数` |
+| `0x02` | `JOG` | `a = 相对步数` |
+| `0x03` | `STOP` | 无 |
+| `0x04` | `ENABLE` | `a = 0/1` |
+| `0x05` | `SET_LIMITS` | `a=min, b=max` |
+| `0x06` | `QUERY` | 无 |
+| `0x07` | `SET_SPEED` | `a=steps/s, b=steps/s²` |
+| `0x08` | `TMC_QUERY` | 无 |
+| `0x09` | `TMC_SET` | `a=key, b=value` |
+| `0x0A` | `HOME` | 手动软件校零 |
 
-**hz 是巡航速度，accel 才是短行程的瓶颈。** 跑固定距离 d 时峰值速度 ≈
-`sqrt(2 * accel * d)`，够不到 hz 就没意义。所以 80/800 步的 Jog 想更快要加**加速度**，
-不是加巡航速度。App 里两个滑条都是圈/秒、圈/秒²。
+旧状态 `0x81` 仍是 12 字节。`QUERY` 当前会返回旧状态和 `STATUS_V2`。
+`HOME` 也会连续返回这两个状态包。`STATUS_V2 = 0x83`，固定 16 字节：
 
-**1/256 外部细分在这个项目上没有意义**：TMC2209 开 `intpol`（固件默认开）时，
-MRES=1/16 会内部插值到 1/256，平滑度一样但脉冲只有 1/16。除非有特殊理由，
-外部细分保持 **1/16 + 插值**。App 会在速度超过当前细分的物理上限时给出提示。
-
-## 软限位：按“圈”缩放，不要写死步数
-
-固件默认软限位是 **±`kDefaultLimitRevs` 圈（20）**，随细分自动重算：
-`步数 = 400 × 细分 × 20`。1/16 时是 ±128000 步，1/256 时是 ±2048000 步。
-
-**为什么不能写死步数**：写死 ±20000 时，1/16 下还有 3.1 圈行程，1/256 下只剩
-**0.2 圈**——连一圈都走不了，命令被 `clampLim()` 静默夹掉，表现就是“点了没反应”。
-这正是“SLP 之后操作无反应”的成因之一（另一个是无线链路偶发掉线）。
-
-`minLim/maxLim` 在 App 下发 `SET_LIMITS` 后被 `limExplicit` 锁定，不再自动重算。
-App 侧对应常量是 `lib/motor_cal.dart` 的 `kDefaultLimitRevs`——**两边必须一致**。
-
-App 还会在发命令前用 `_lo()/_hi()` 预检，超限就提示而不是静默失败。
-“点了没反应”这类问题一半来自静默 no-op，能提示就提示。
-
-### 标定与细分绑定
-
-`LensLut` 记录 `microsteps`，`scaledTo(ms)` 按比例换算步数，`adding()` 会先把旧点
-统一到当前细分再加新点。**不这样做的话，改一次细分整套标定就静默错位。**
-
-## 状态标志与 `isRunning()`
-
-`motorMoving()` 用**位置是否到达目标**判断，**不用** `FastAccelStepper::isRunning()`。
-实测 `isRunning()` 在目标被反复覆盖后会保持 true，后果是界面永远显示 RUN、
-待机永不触发。
-
-`motorStop()` 之后位置还会因减速越过目标，所以 `settleTick()`（每 loop 调用）
-在位置连续 300 ms 不变时把 `target` 对齐到实际位置，让 `motorMoving()` 收敛。
-
-## 写测试脚本时注意（踩过的坑）
-
-状态包（0x81）和 TMC dump（0x82）都发到同一个 UDP 源端口。**每次发送前先清空
-接收队列，并按 `d[1]` 匹配期望的命令码**；否则会把上一条 TMC 回复当成状态包解析，
-得出“pos == target 但 MOVING 置位”这种自相矛盾的结论，浪费大量时间排查固件。
-
-```python
-def raw(c, a=0, b=0, want=0x81):   # 除 TMC 命令外都回 0x81
-    drain()                         # 清空遗留报文
-    send(c, a, b)
-    return 按 d[1] == want 匹配的报文
+```text
+magic, cmd, flags, sequence,
+pos int32, target int32,
+position_trusted uint8, fault uint8, reserved uint16
 ```
 
-## TMC2209 可调参数
+flags 低 5 位：
 
-App 面板每个参数都配中文说明；固件侧 `FfTmcKey`（`include/protocol.h`）与 `motorTmcSet` 的 key 一一对应。
+```text
+enabled = 1
+moving = 2
+uart_ok = 4
+standby = 8
+limited = 16
+```
 
-| key | 参数 | 含义 / 范围 |
-| --- | --- | --- |
-| 1 | 运行电流 | 转动时的电流 mA，300–1200，默认 800。越大越有力越热 |
-| 2 | 细分 | 每整步细分数 8/16/…/256，越高越平滑、脉冲越多 |
-| 3 | StealthChop | 1=静音（静止可能有轻微嗡声），0=SpreadCycle（响、力矩硬） |
-| 4 | toff | 斩波关断时间 1–15，一般 3–5 |
-| 5 | 保持电流 | 停止时维持的电流档 0–31（相对 irun）。**0 = 不锁轴、不发热** |
-| 6 | 运行电流档 | 直接写 IRUN 的 CS 值 0–31，一般不用动 |
-| 7 | **待机断电** | 1=静止约 2.5 s 后断使能（不发热不震），0=一直保持电流 |
+flags 高 3 位是最近命令结果：
 
-**注意 `CS_ACTUAL` 是“配置值”不是“实测电流”**：待机断使能后它仍显示 IHOLD 档（如 3），别据此判断待机没生效——看状态位 `FF_FLAG_STANDBY`（App 显示 `SLP`）和轴是否发烫。
+```text
+0 idle
+1 accepted
+2 completed
+3 limited
+4 rejected
+5 stopped
+```
 
-## 待机发热 / 轻微震动
+sequence 用于把回复和请求关联。它只证明命令被接收并回复，不代表机械动作已经完成。
 
-静止时的发热与嗡震都来自**保持电流**。两级处理：
+`STATUS` 和 `STATUS_V2` 使用同一个提升逻辑：`accepted` 在 `pos == target`
+且不再运动时变为 `completed`。两种包的 `result` 始终一致。
 
-1. **默认保持电流从 400 mA 降到 200 mA**（`kHoldMa`），CS 档从 6 降到 3——发热约为原来 1/4。
-2. **待机自动断电**（key 7，默认开）：静止约 2.5 s 后拉高 EN 释放驱动，0 发热 0 震动；任何运动指令立刻唤醒。
+## 7. 安全和位置可信度
 
-代价：待机时**没有锁轴力**。跟焦是开环的，若镜头环受重力/弹簧会自己走，位置就会丢——这时把待机断电关掉（App 开关），或把保持电流调到 0 之外的值。
+### 通信看门狗
 
-## 已知未复现的异常
+只有 `SET_POS` 和 `JOG` 会刷新运动看门狗。`QUERY`、`ENABLE`、TMC 查询等不会刷新。
+看门狗阈值为 1000 ms。运动中超过阈值没有新的控制包时：
 
-（原先这一节说“`run=1` 卡住无法复现、是测试脚本问题”——**那个结论是错的**，
-已由上面的「楔死状态与看门狗」取代：楔死可复现，且已由 `wedgedTick()` 兜住。
-当时确实也同时存在脚本解析错误，两件事都有。）
+```text
+motorStop()
+communicationWatchdogArmed = false
+commandResult = STOPPED
+```
 
-若将来遇到“位置不动 / 停不下来”，按这个顺序查：
-1. 串口有没有 `stepper wedged ... force stop`：有就是看门狗在工作
-2. `STST` / `TSTEP`：`TSTEP != 65535` 说明驱动在收脉冲（轴在转）；`pos` 是开环计数
-3. `moving` 标志与 `standby`：待机后要先唤醒
-4. 是不是超出了软限位
-5. 断电重启
+自动跟焦必须持续发送最新 `SET_POS`。当前没有区分自动会话和手动会话，长距离手动
+SET_POS 也会受此规则影响。
 
-## UDP 协议
+### HOME
 
-12 字节 LE，magic `0x46`。实现：`firmware/include/protocol.h`、`lib/ff_protocol.dart`。
+目前没有物理限位开关，`HOME` 不是机械回零。只有电机完全停止时才允许成功，成功后：
 
-| cmd | 含义 |
-| --- | --- |
-| 0x01 SET_POS | a=步数 |
-| 0x02 JOG | a=delta |
-| 0x03 STOP | |
-| 0x04 ENABLE | a≠0 使能 |
-| 0x05 SET_LIMITS | a,b（按步数，会锁住自动限位） |
-| 0x06 QUERY | 回 STATUS 0x81 |
-| 0x07 SET_SPEED | a=Hz b=accel（**注意是步/秒，App 负责从圈/秒换算**） |
-| 0x08 TMC_QUERY | 回 22 字节 TMC_DUMP 0x82 |
-| 0x09 TMC_SET | a=key b=val（key 见 TMC 表，7=待机断电；回 0x82） |
+```text
+currentPos = 0
+target = 0
+positionTrusted = true
+```
 
-flags：bit0 EN，bit1 RUN，bit2 UART_OK，bit3 STANDBY（待机已断使能）。
+上电、复位、禁用电机后 `positionTrusted = false`。这只是开环脉冲位置经过人工确认，
+不等价于编码器闭环真实机械位置。
 
-**除 TMC 命令回 0x82 外，其它命令都回 0x81。**
+### 待机和使能
 
-TMC keys：1 rms mA，2 细分，3 stealth，4 toff，5 ihold，6 irun。
+上电不会自动使能，避免电机突然带电。Flutter 连接后根据用户意图补发 `ENABLE`。
+待机功能默认开启，静止约 2.5 s 后释放驱动；新的 JOG/目标会唤醒。
 
-## Flutter / iOS
+## 8. Flutter 调试程序
 
-- Windows 调试 GUI：`open-flutter.bat`；Flutter SDK `J:\New soft project\tools\flutter`。
-- **不要**加 Python tkinter。`firmware/tools/jog.py` 仅 CLI。
-- **不要**加回 `shared_preferences`（Windows 要 Developer Mode 符号链接）。LUT 用 `dart:io` 写 APPDATA/HOME。
-- `windows/runner/CMakeLists.txt` 已 `/utf-8`（MSVC 中文）。
-- 滑条有 `_sliderDirty`：不拖滑条时不要每 20ms 把 Jog 打回 0。
-- 连接后自动 `enable(true)`。
-- 速度与加速度是两个滑条；加速度默认 200000，别写死成 20000，否则调速滑条看起来没反应。
-- iOS：`ios/Runner/LidarPlugin.swift`，LiDAR 约 0.2–5m。Windows 不能测。
+入口：[lib/main.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/main.dart>)。
 
-**iOS 未修的已知问题（会影响标定精度）**：预览层用 `.resizeAspectFill`，竖屏 480×640 画面被裁掉两侧再铺满屏幕；但点击坐标按 view 边界直接归一化后当深度图坐标用，**取景点会系统性偏移**，越靠画面边缘越偏。这个偏移标定补不回来，必须先把 aspect-fill 的显示矩形算出来再反算，或改成 `.resizeAspect` 加黑边。
+启动：
 
-## 约束（用户规则）
+```powershell
+cd "J:\New soft project\iphone-follow-focus"
+. "J:\New soft project\commands\env.ps1"
+flutter pub get
+flutter run -d windows
+```
 
-- 新工程放 `J:\New soft project`，不要写到 home。
-- Super Mini 只用 0–13。
-- 少写抽象、少加依赖。
-- 不要改 plan 文件。
-- 未要求不要 commit。
-- 懒：能复用 `esp32s3-tb6600-stepper` 的 UART 就复用，不要再造 GUI。
+双击 [open-flutter.bat](<J:/New%20soft%20project/iphone-follow-focus/open-flutter.bat>) 会：
 
-## 关键文件
+1. 进入当前项目目录；
+2. 启动 PowerShell；
+3. 加载 `commands/env.ps1`；
+4. 执行 `flutter run -d windows`；
+5. 保持终端窗口不退出。
 
-- `firmware/src/motor.cpp` — STEP/DIR + UART  
-- `firmware/src/main.cpp` — AP、BOOT、LED  
-- `firmware/src/oled.cpp` — 底行 `motorUartHint()`  
-- `firmware/include/protocol.h`  
-- `lib/main.dart`、`lib/ff_protocol.dart`、`lib/lens_lut.dart`  
-- `ios/Runner/LidarPlugin.swift`  
-- 参考：`J:\softwareProject\esp32s3-tb6600-stepper\src\main.cpp` 里 `tmcUartOpen` / `tmcSetup`
+界面点击“连接电机”后才会创建 UDP socket，并发送速度、待机参数、ENABLE、QUERY、
+TMC_QUERY。Windows 下 LiDAR 不可用，因为 [lidar.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/lidar.dart>)
+只在 iOS 启用原生通道。
+
+Flutter 已有：
+
+- 手动步数/圈数 JOG；
+- 滑条绝对目标；
+- 自动跟焦状态和死区；
+- 停机闩锁，防止自动模式立即覆盖 STOP；
+- 软限位预检；
+- TMC 诊断；
+- HOME 和 `positionTrusted`；
+- 标定表持久化到 `%APPDATA%\iphone_follow_focus\lens_lut.json`。
+
+`LensLut` 和电机换算测试位于 [lib/lens_lut.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/lens_lut.dart>)
+和 [lib/motor_cal.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/motor_cal.dart>)。
+
+## 9. 测试和验收
+
+Flutter 测试：
+
+```powershell
+flutter test
+```
+
+当前已通过 25 项。
+
+Python 语法检查：
+
+```powershell
+python -m py_compile test\udp_motion_acceptance.py
+```
+
+固件编译：
+
+```powershell
+platformio run -d firmware -e s3mini
+```
+
+烧录（当前设备曾使用 COM19）：
+
+```powershell
+platformio run -d firmware -e s3mini -t upload --upload-port COM19
+```
+
+打开串口监视器：
+
+```powershell
+platformio device monitor -d firmware -p COM19 -b 115200
+```
+
+实际硬件验收：
+
+```powershell
+python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
+```
+
+脚本覆盖 ENABLE、JOG、HOME/STATUS_V2、SET_POS、STOP、反向、软限位、待机唤醒和
+通信超时。必须连接 `FF-debug` 并接好电机后运行；没有硬件时只能做语法/编译验证。
+
+两处容易误改的地方：
+
+- SET_POS 组会同时校验 `STATUS` 和 `STATUS_V2` 对已完成的动作都报 `completed`。
+- 通信超时组不能断言 `pos != target`：`motorStop()` 会把 `target` 重锚到停止位置，
+  所以停止后 `pos == target` 恒成立。该组判定的是“没有到达请求的 19000 步”
+  且 `result == stopped`。
+
+验收时不能只看软件 `pos`。应同时观察电机是否实际转动，并用 TMC 状态判断：
+
+```text
+静止通常 TSTEP=65535、STST=1
+运动时 TSTEP 应变小、STST 应解除
+```
+
+## 10. 当前未完成和下一步
+
+### 首要下一步：Wi-Fi 设备发现
+
+用户希望扫描附近 Wi-Fi 并显示可用跟焦器，连接时不依赖固定 IP。当前尚未实现。
+建议按以下顺序设计，不要只按 SSID 判断设备身份：
+
+1. 固件生成稳定 `device_id`，建议使用 ESP32 MAC 地址。
+2. 将 SSID 从统一 `FF-debug` 改为可区分格式，例如 `FF-XXXXXX`，或至少保留
+   `FF-` 设备前缀。
+3. 增加 UDP 发现请求/响应，响应设备类型、ID、协议版本、固件版本和 UDP 端口。
+4. Flutter 连接后先用发现协议验证这是本项目固件，再建立 `MotorLink`。
+5. Windows 可使用原生 WLAN API 扫描；不要把 `netsh` 当正式跨平台方案。
+6. iOS 受系统限制，不能假设普通 App 能自由读取全部附近 Wi-Fi 列表。正式 iOS
+   方案更适合用 `NEHotspotConfiguration` 连接已知 SSID，再用 UDP 发现包验证。
+7. 多设备识别使用 BSSID/MAC 或固件返回的 `device_id`，SSID 不是唯一身份。
+
+### 固件
+
+- 实现持久化 fault code，而不是当前 `STATUS_V2.fault = 0`。
+- 评估自动跟焦和手动控制是否需要不同看门狗策略。
+- 增加独立最大减速度和 jerk/S 曲线 profile。
+- 接入真实机械限位后扩展 HOME 为自动回零。
+- 如硬件允许，增加编码器闭环；开环 `pos` 不能证明机械真实位置。
+
+### Flutter/iOS
+
+- 把固定 `192.168.4.1` 替换为设备发现结果。
+- 增加 Wi-Fi/设备列表页和连接状态。
+- 完善 HOME 提示，明确它是软件校零而非机械回零。
+- 在 Mac + iPhone Pro 上验证 LiDAR、目标跟踪、镜头标定和丢目标策略。
+- 再开发正式 Swift/iOS 底层和 UI。
+
+## 11. 修改规则
+
+- 不要重新引入 FastAccelStepper/RMT 作为运动后端。
+- 不要把 `pos == target` 单独当成机械运动完成证明。
+- 不要把手机端每个 LiDAR 采样变成必须执行的离散轨迹点。
+- 不要重新引入 `neopixelWrite`。
+- 修改 STEP 输出时，必须保持“实际 STEP 脉冲完成后才推进 `currentPos`”。
+- 修改协议时保留旧 12 字节客户端兼容，新增字段优先使用新命令/新包。
+- 触碰电机、电流或引脚前先阅读本文和 [CONTROL_ARCHITECTURE.md](<J:/New%20soft%20project/iphone-follow-focus/CONTROL_ARCHITECTURE.md>)。
