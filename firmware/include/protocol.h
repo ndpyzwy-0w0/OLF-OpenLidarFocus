@@ -72,4 +72,5 @@ static const uint16_t kUdpPort = 4210;
 
 void protocolBegin(WiFiUDP *udp);
 void protocolPoll();
-void protocolSendStatus(const IPAddress &ip, uint16_t port);
+// The packet pad byte is an optional request sequence. Legacy clients may send 0.
+void protocolSendStatus(const IPAddress &ip, uint16_t port, uint8_t sequence = 0);

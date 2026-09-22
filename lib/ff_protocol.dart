@@ -30,12 +30,14 @@ const int kFlagLimited = 16;
 
 class FfPacket {
   final int cmd;
+  final int sequence;
   final int flags;
   final int a;
   final int b;
 
   const FfPacket({
     required this.cmd,
+    this.sequence = 0,
     this.flags = 0,
     this.a = 0,
     this.b = 0,
@@ -46,7 +48,7 @@ class FfPacket {
     d.setUint8(0, kFfMagic);
     d.setUint8(1, cmd);
     d.setUint8(2, flags);
-    d.setUint8(3, 0);
+    d.setUint8(3, sequence & 0xff);
     d.setInt32(4, a, Endian.little);
     d.setInt32(8, b, Endian.little);
     return d.buffer.asUint8List();
@@ -57,6 +59,7 @@ class FfPacket {
     final d = ByteData.sublistView(Uint8List.fromList(bytes), 0, 12);
     return FfPacket(
       cmd: d.getUint8(1),
+      sequence: d.getUint8(3),
       flags: d.getUint8(2),
       a: d.getInt32(4, Endian.little),
       b: d.getInt32(8, Endian.little),
@@ -147,16 +150,19 @@ class TmcDump {
 }
 
 class MotorStatus {
+  final int sequence;
   final int pos;
   final int target;
   final bool enabled;
   final bool moving;
   final bool uartOk;
   final bool limited;
+
   /// 处于待机断电：用户仍使能，但驱动已释放（不发热、不震动）。
   final bool standby;
 
   const MotorStatus({
+    this.sequence = 0,
     required this.pos,
     required this.target,
     required this.enabled,
@@ -168,6 +174,7 @@ class MotorStatus {
 
   factory MotorStatus.fromPacket(FfPacket p) {
     return MotorStatus(
+      sequence: p.sequence,
       pos: p.a,
       target: p.b,
       enabled: p.flags & kFlagEnabled != 0,
@@ -183,6 +190,7 @@ class MotorLink {
   InternetAddress host = InternetAddress('192.168.4.1');
   int port = 4210;
   RawDatagramSocket? _sock;
+  int _nextSequence = 0;
   void Function(MotorStatus)? onStatus;
   void Function(TmcDump)? onTmc;
 
@@ -190,6 +198,7 @@ class MotorLink {
 
   Future<void> open() async {
     await close();
+    _nextSequence = 0;
     final sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
     sock.listen((event) {
       if (event != RawSocketEvent.read) return;
@@ -213,7 +222,19 @@ class MotorLink {
   }
 
   void _send(FfPacket p) {
-    _sock?.send(p.encode(), host, port);
+    final sequence = (_nextSequence + 1) & 0xff;
+    _nextSequence = sequence == 0 ? 1 : sequence;
+    _sock?.send(
+      FfPacket(
+        cmd: p.cmd,
+        sequence: _nextSequence,
+        flags: p.flags,
+        a: p.a,
+        b: p.b,
+      ).encode(),
+      host,
+      port,
+    );
   }
 
   void setPos(int steps) => _send(FfPacket(cmd: kFfSetPos, a: steps));

@@ -5,11 +5,17 @@ import 'package:iphone_follow_focus/ff_protocol.dart';
 
 void main() {
   test('packet roundtrip matches 12-byte firmware layout', () {
-    final raw = const FfPacket(cmd: kFfSetPos, a: 1234, b: -5).encode();
+    final raw = const FfPacket(
+      cmd: kFfSetPos,
+      sequence: 42,
+      a: 1234,
+      b: -5,
+    ).encode();
     expect(raw.length, 12);
     expect(raw[0], kFfMagic);
     final p = FfPacket.decode(raw)!;
     expect(p.cmd, kFfSetPos);
+    expect(p.sequence, 42);
     expect(p.a, 1234);
     expect(p.b, -5);
   });
@@ -30,6 +36,14 @@ void main() {
     expect(s.standby, isFalse);
     expect(s.pos, -99);
     expect(s.target, 100);
+  });
+
+  test('status preserves request sequence', () {
+    final p = FfPacket.decode(
+      const FfPacket(cmd: kFfStatus, sequence: 7, a: 1, b: 2).encode(),
+    )!;
+    final s = MotorStatus.fromPacket(p);
+    expect(s.sequence, 7);
   });
 
   test('standby flag is reported independently of enabled', () {

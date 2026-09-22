@@ -7,7 +7,7 @@
 static WiFiUDP *udp = nullptr;
 static uint8_t buf[64];
 
-static void fillStatus(FfPacket *p) {
+static void fillStatus(FfPacket *p, uint8_t sequence = 0) {
   p->magic = kFfMagic;
   p->cmd = FF_STATUS;
   p->flags = 0;
@@ -16,15 +16,15 @@ static void fillStatus(FfPacket *p) {
   if (motorUartOk()) p->flags |= FF_FLAG_UART_OK;
   if (motorStandbyOff()) p->flags |= FF_FLAG_STANDBY;
   if (motorLimitHit()) p->flags |= FF_FLAG_LIMITED;
-  p->pad = 0;
+  p->pad = sequence;
   p->a = motorPos();
   p->b = motorTarget();
 }
 
-void protocolSendStatus(const IPAddress &ip, uint16_t port) {
+void protocolSendStatus(const IPAddress &ip, uint16_t port, uint8_t sequence) {
   if (!udp) return;
   FfPacket p;
-  fillStatus(&p);
+  fillStatus(&p, sequence);
   udp->beginPacket(ip, port);
   udp->write(reinterpret_cast<uint8_t *>(&p), sizeof(p));
   udp->endPacket();
@@ -93,7 +93,7 @@ static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
     default:
       break;
   }
-  protocolSendStatus(ip, port);
+  protocolSendStatus(ip, port, in.pad);
 }
 
 void protocolBegin(WiFiUDP *u) {
