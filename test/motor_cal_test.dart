@@ -36,6 +36,24 @@ void main() {
     expect(cal.stepsToRevs(-3200, 16), closeTo(-0.5, 1e-9));
   });
 
+  test('default soft limit scales with microsteps so travel is not clamped away', () {
+    // 1/16: 20 rev = 128000 steps
+    expect(cal.defaultLimitSpan(16), 128000);
+    // 1/256 is 16x finer, so the same 20 revolutions needs 16x the steps.
+    // A fixed step limit would shrink the usable travel to 0.2 rev.
+    expect(cal.defaultLimitSpan(256), 2048000);
+    expect(cal.defaultLimitSpan(256) ~/ cal.defaultLimitSpan(16), 16);
+  });
+
+  test('max physical speed drops as microsteps rise', () {
+    // Ceiling is 40k steps/s. At 1/16 (6400 steps/rev) that is 6.25 rev/s;
+    // at 1/256 (102400 steps/rev) the ceiling is only 0.39 rev/s. This is why
+    // a speed setting in steps/s looked 16x slower after switching to 1/256.
+    expect(cal.maxRevsPerSec(16), closeTo(6.25, 1e-9));
+    expect(cal.maxRevsPerSec(256), closeTo(0.390625, 1e-9));
+    expect(cal.maxRevsPerSec(16) / cal.maxRevsPerSec(256), closeTo(16, 1e-9));
+  });
+
   test('a different motor only changes the full-steps constant', () {
     // 1.8 degree motor would be 200 full steps per revolution
     const other = MotorCal(fullStepsPerRev: 200);

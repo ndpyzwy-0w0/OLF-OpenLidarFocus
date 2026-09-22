@@ -46,4 +46,40 @@ void main() {
     final jump = f.update(2.0);
     expect(jump, closeTo(1.55, 0.01));
   });
+
+  test('calibration rescales when microsteps change', () {
+    // 1 rev of travel recorded as 6400 steps at 1/16
+    final lut = LensLut(const [
+      LutPoint(meters: 1.0, steps: 0),
+      LutPoint(meters: 2.0, steps: 6400),
+    ], microsteps: 16);
+    expect(lut.stepsFor(2.0), 6400);
+
+    // Same physical travel at 1/256 must be 16x the steps, not the same number.
+    final fine = lut.scaledTo(256);
+    expect(fine.microsteps, 256);
+    expect(fine.stepsFor(2.0), 102400);
+    // The distance->focus mapping itself must be unchanged (allow rounding).
+    expect(fine.stepsFor(1.5), closeTo(lut.stepsFor(1.5)! * 16, 20));
+  });
+
+  test('adding a point unifies the whole table on the current microsteps', () {
+    var lut = LensLut(const [
+      LutPoint(meters: 1.0, steps: 0),
+      LutPoint(meters: 2.0, steps: 6400),
+    ], microsteps: 16);
+    lut = lut.adding(const LutPoint(meters: 3.0, steps: 51200), microsteps: 256);
+    expect(lut.microsteps, 256);
+    expect(lut.points.length, 3);
+    // the older 6400-step point was converted, not left stale
+    expect(lut.points.map((p) => p.steps).toList(), [0, 102400, 51200]);
+  });
+
+  test('microsteps survive a save/load round trip', () {
+    final lut = LensLut(const [LutPoint(meters: 1, steps: 100)],
+        microsteps: 32);
+    final back = LensLut.fromJson(lut.toJson());
+    expect(back.microsteps, 32);
+    expect(back.points.single.steps, 100);
+  });
 }

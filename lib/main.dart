@@ -58,9 +58,13 @@ class _FollowPageState extends State<FollowPage> {
   bool _open = false;
   int _pos = 0;
   int _target = 0;
-  int _speedHz = 8000;
+  // 速度和加速度都用**物理单位**（圈/秒、圈/秒²），再乘脉冲/圈换成步。
+  // 用步/秒做单位的话，换细分会让同一数值的物理速度差 16 倍——这就是
+  // “换成 1/256 后变得很慢”的原因。
+  double _speedRevS = 1.2;
   // 短行程跑不到巡航速度，峰值 ≈ √(2×加速度×步数)，所以加速度才是“快慢”的主要旋钮。
-  int _accel = 200000;
+  double _accelRevS2 = 30;
+  int _appliedSpr = 0;
   bool _standbyFeature = true; // 待机自动断电开关（固件默认开）
   bool _standbyOff = false;    // 当前是否已断电（来自固件状态位）
   // 用户意图：板子重启后固件 enabled 会归零，这里负责自动补一次使能，
@@ -150,6 +154,14 @@ class _FollowPageState extends State<FollowPage> {
       _lastTmc = now;
       _link.queryTmc();
     }
+    // 细分变化会改变“步”的尺度：重算速度、并把标定限位按新细分重新下发。
+    if (_spr != _appliedSpr) {
+      _appliedSpr = _spr;
+      _applySpeed();
+      if (_lut.ready) {
+        _link.setLimits(_lutNow.minSteps!, _lutNow.maxSteps!);
+      }
+    }
     // 板子重启后固件 enabled=0，App 这边补一次使能，让状态自愈。
     if (_wantEnabled && !_enabled &&
         now.difference(_lastEnableAttempt) > const Duration(seconds: 1)) {
@@ -160,7 +172,7 @@ class _FollowPageState extends State<FollowPage> {
     int? want;
     if (_auto) {
       final d = _distance;
-      if (d != null) want = _lut.stepsFor(d);
+      if (d != null) want = _lutNow.stepsFor(d);
     } else if (_sliderDirty) {
       want = _sliderSteps();
       _sliderDirty = false;
@@ -170,17 +182,35 @@ class _FollowPageState extends State<FollowPage> {
     _link.setPos(want);
   }
 
-  int get _spr => _cal.stepsPerRev(_tmc?.microsteps ?? 16);
+  int get _ms => _tmc?.microsteps ?? 16;
+  int get _spr => _cal.stepsPerRev(_ms);
+
+  /// 把物理单位换算成固件要的步/秒、步/秒²。
+  void _applySpeed() {
+    if (!_link.isOpen) return;
+    final spd = (_speedRevS * _spr).round();
+    final acc = (_accelRevS2 * _spr).round();
+    _link.setSpeed(spd.clamp(100, 40000), acc.clamp(100, 1000000));
+  }
 
   /// 走步/走圈都走同一条相对运动命令（JOG），不在固件里另加指令。
   void _jog(int delta) {
-    if (!_open) return;
+    if (!_open || delta == 0) return;
     if (!_enabled) {
       // 板子重启后固件是关的；先补使能，否则这一步会被静默忽略。
       _wantEnabled = true;
       _lastEnableAttempt = DateTime.now();
       _link.enable(true);
       setState(() => _msg = '已发送使能，再点一次走步');
+      return;
+    }
+    // 提前拦下会被固件软限位夹掉的命令——否则表现就是“点了没反应”。
+    final lo = _lo();
+    final hi = _hi();
+    final want = _pos + delta;
+    if (want < lo || want > hi) {
+      setState(() => _msg = '超出软限位 $lo..$hi 步（当前 $_pos，请求 $want）。'
+          '换细分会改变步数尺度；可先回中点，或完成标定后由标定值决定限位。');
       return;
     }
     _link.jog(delta);
@@ -196,11 +226,14 @@ class _FollowPageState extends State<FollowPage> {
   void _goRevs(int sign) {
     final r = double.tryParse(_revsText.text.trim());
     if (r == null || r == 0) return;
-    _jog(sign * _cal.revsToSteps(r.abs(), _tmc?.microsteps ?? 16));
+    _jog(sign * _cal.revsToSteps(r.abs(), _ms));
   }
 
-  int _lo() => _lut.minSteps ?? -20000;
-  int _hi() => _lut.maxSteps ?? 20000;
+  /// 标定值按当前细分换算后的视图。
+  LensLut get _lutNow => _lut.scaledTo(_ms);
+
+  int _lo() => _lutNow.minSteps ?? -_cal.defaultLimitSpan(_ms);
+  int _hi() => _lutNow.maxSteps ?? _cal.defaultLimitSpan(_ms);
 
   int _sliderSteps() {
     final lo = _lo();
@@ -212,7 +245,7 @@ class _FollowPageState extends State<FollowPage> {
   Future<void> _connect() async {
     try {
       await _link.open();
-      _link.setSpeed(_speedHz, _accel);
+      _applySpeed();
       _link.setTmc(kTmcStandby, _standbyFeature ? 1 : 0);
       _wantEnabled = true;
       _lastEnableAttempt = DateTime.now();
@@ -234,7 +267,10 @@ class _FollowPageState extends State<FollowPage> {
   Future<void> _setLut(LensLut next) async {
     _lut = next;
     await next.save();
-    if (next.ready) _link.setLimits(next.minSteps!, next.maxSteps!);
+    if (next.ready) {
+      final now = next.scaledTo(_ms);
+      _link.setLimits(now.minSteps!, now.maxSteps!);
+    }
     setState(() {});
   }
 
@@ -405,28 +441,45 @@ class _FollowPageState extends State<FollowPage> {
                   Text(
                     '脉冲/圈 $_spr（0.9° 电机 = ${_cal.fullStepsPerRev} 整步/圈 × '
                     '1/${_tmc?.microsteps ?? 16} 细分）；当前位置 '
-                    '${_cal.stepsToRevs(_pos, _tmc?.microsteps ?? 16).toStringAsFixed(2)} 圈',
+                    '${_cal.stepsToRevs(_pos, _ms).toStringAsFixed(2)} 圈',
                     style: const TextStyle(fontSize: 11),
                   ),
-                  Text('速度 $_speedHz step/s'),
+                  Text('速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒'
+                      '（${(_speedRevS * 60).round()} 转/分 · ${(_speedRevS * _spr).round()} 步/秒）'),
                   Slider(
-                    min: 1000,
-                    max: 20000,
-                    value: _speedHz.toDouble(),
-                    onChanged: (v) => setState(() => _speedHz = v.round()),
-                    onChangeEnd: (v) => _link.setSpeed(v.round(), _accel),
+                    min: 0.05,
+                    max: 3.0,
+                    value: _speedRevS.clamp(0.05, 3.0),
+                    onChanged: (v) => setState(() => _speedRevS = v),
+                    onChangeEnd: (v) {
+                      _speedRevS = v;
+                      _applySpeed();
+                    },
                   ),
-                  Text('加速度 $_accel step/s²'),
+                  if (_speedRevS > _cal.maxRevsPerSec(_ms))
+                    Text(
+                      '⚠ 1/$_ms 细分下最高只有 '
+                      '${_cal.maxRevsPerSec(_ms).toStringAsFixed(2)} 圈/秒'
+                      '（固件上限 $kMaxStepHz 步/秒）。'
+                      '要更快就用更低细分：1/16 配「微步插值」内部同样是 1/256，'
+                      '但脉冲只有 1/16。',
+                      style: const TextStyle(fontSize: 11, color: Color(0xFFFFAB40)),
+                    ),
+                  Text('加速度 ${_accelRevS2.toStringAsFixed(0)} 圈/秒²'),
                   Slider(
-                    min: 20000,
-                    max: 600000,
-                    value: _accel.toDouble().clamp(20000, 600000),
-                    onChanged: (v) => setState(() => _accel = v.round()),
-                    onChangeEnd: (v) => _link.setSpeed(_speedHz, v.round()),
+                    min: 2,
+                    max: 100,
+                    value: _accelRevS2.clamp(2, 100),
+                    onChanged: (v) => setState(() => _accelRevS2 = v),
+                    onChangeEnd: (v) {
+                      _accelRevS2 = v;
+                      _applySpeed();
+                    },
                   ),
                   const Text(
-                    '短行程达不到巡航速度（峰值 ≈ √(2×加速度×步数)）。'
-                    '80/800 步这种 Jog 想更快，加大加速度，不是加大速度。',
+                    '速度和加速度按“圈/秒”给，换细分不会改变物理速度。'
+                    '短行程达不到巡航速度（峰值 ≈ √(2×加速度×步数)），'
+                    '80/800 步这种 Jog 想更快就加大加速度。',
                     style: TextStyle(fontSize: 11),
                   ),
                   Row(
@@ -437,18 +490,24 @@ class _FollowPageState extends State<FollowPage> {
                         onPressed: _distance == null
                             ? null
                             : () => _setLut(
-                                  _lut.adding(LutPoint(meters: _distance!, steps: _pos)),
+                                  _lut.adding(
+                                    LutPoint(meters: _distance!, steps: _pos),
+                                    microsteps: _ms,
+                                  ),
                                 ),
                         child: const Text('记录当前'),
                       ),
                     ],
                   ),
-                  const Text('Jog 到实焦后点记录。至少两点；按 1/距离 插值。'),
-                  for (var i = 0; i < _lut.points.length; i++)
+                  const Text('Jog 到实焦后点记录。至少两点；按 1/距离 插值。'
+                      '标定与当前细分绑定，换细分会自动换算。'),
+                  for (var i = 0; i < _lutNow.points.length; i++)
                     ListTile(
                       dense: true,
                       title: Text(
-                        '${_lut.points[i].meters.toStringAsFixed(2)} m  →  ${_lut.points[i].steps}',
+                        '${_lutNow.points[i].meters.toStringAsFixed(2)} m  →  '
+                        '${_lutNow.points[i].steps} 步'
+                        '（${_cal.stepsToRevs(_lutNow.points[i].steps, _ms).toStringAsFixed(2)} 圈）',
                       ),
                       trailing: IconButton(
                         icon: const Icon(Icons.delete),

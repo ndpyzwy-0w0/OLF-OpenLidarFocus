@@ -20,11 +20,29 @@ class LutPoint {
 class LensLut {
   final List<LutPoint> points;
 
-  LensLut(List<LutPoint> raw)
+  /// 标定点的步数是在这个细分下记录的。换细分后用 [scaledTo] 换算。
+  /// 步数与细分成正比，所以同一物理位置在不同细分下步数不同——
+  /// 不记录细分，改细分后整套标定就会静默错位。
+  final int microsteps;
+
+  LensLut(List<LutPoint> raw, {this.microsteps = 16})
       : points = List<LutPoint>.from(raw)
           ..sort((a, b) => a.meters.compareTo(b.meters));
 
   bool get ready => points.length >= 2;
+
+  /// 把标定步数换算到另一个细分。细分相同时返回自身。
+  LensLut scaledTo(int ms) {
+    if (ms == microsteps || microsteps <= 0 || ms <= 0) return this;
+    final k = ms / microsteps;
+    return LensLut(
+      [
+        for (final p in points)
+          LutPoint(meters: p.meters, steps: (p.steps * k).round()),
+      ],
+      microsteps: ms,
+    );
+  }
 
   int? get minSteps =>
       points.isEmpty ? null : points.map((p) => p.steps).reduce(math.min);
@@ -45,20 +63,25 @@ class LensLut {
     return points.last.steps;
   }
 
-  LensLut adding(LutPoint p) {
-    final next = [for (final x in points) x];
+  /// 记录一个标定点。先把已有标定点换算到 [microsteps]，再加新点，
+  /// 保证整套标定始终统一在同一个细分下。
+  LensLut adding(LutPoint p, {int? microsteps}) {
+    final ms = microsteps ?? this.microsteps;
+    final base = scaledTo(ms);
+    final next = [for (final x in base.points) x];
     next.removeWhere((x) => (x.meters - p.meters).abs() < 0.02);
     next.add(p);
-    return LensLut(next);
+    return LensLut(next, microsteps: ms);
   }
 
   LensLut removingAt(int i) {
     final next = [for (final x in points) x];
     next.removeAt(i);
-    return LensLut(next);
+    return LensLut(next, microsteps: microsteps);
   }
 
   Map<String, Object> toJson() => {
+        'microsteps': microsteps,
         'points': [for (final p in points) p.toJson()],
       };
 
@@ -66,7 +89,8 @@ class LensLut {
     final list = (j['points'] as List<dynamic>? ?? [])
         .map((e) => LutPoint.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList();
-    return LensLut(list);
+    return LensLut(list,
+        microsteps: (j['microsteps'] as num?)?.toInt() ?? 16);
   }
 
   static File _file() {

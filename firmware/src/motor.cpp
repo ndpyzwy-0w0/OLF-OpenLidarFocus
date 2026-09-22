@@ -20,8 +20,13 @@ static FastAccelStepperEngine engine;
 static FastAccelStepper *stepper = nullptr;
 static char uartHint[24] = "UART ?";
 
-// 软限位默认值与 App 一致（App 未标定前按 ±20000 取值）。
-// 之前是 ±1000000：标定流程本身要 Jog 到实焦，那一刻限位等于没有，容易顶坏镜头。
+// 软限位默认按“圈”算，随细分自动缩放。
+// 为什么不能写死步数：1/16 时 20000 步 = 3.1 圈，1/256 时同样 20000 步只有 0.2 圈——
+// 换细分后行程会被无声地夹没，表现就是“点了没反应”。
+// App 标定后会下发 SET_LIMITS（按步数）覆盖这个默认值。
+static const int32_t kFullStepsPerRev = 400;  // 0.9°/步 电机 → 400 整步/圈
+static const int32_t kDefaultLimitRevs = 20;  // 未标定时的默认软限位（电机圈数）
+static bool limExplicit = false;              // true = App 已下发过步数限位
 static int32_t minLim = -20000;
 static int32_t maxLim = 20000;
 static int32_t target = 0;
@@ -50,6 +55,20 @@ static uint16_t tmcMs = kMicrosteps;
 static uint32_t tmcDrv = 0;
 static uint16_t tmcSg = 0;
 static uint16_t tmcTstep = 0;
+
+// 脉冲/圈 = 400 × 细分。
+static int32_t stepsPerRevFw() {
+  int32_t ms = tmcMsSet ? (int32_t)tmcMsSet : 1;
+  return kFullStepsPerRev * ms;
+}
+
+// 未标定时把软限位重算成 ±kDefaultLimitRevs 圈，跟随当前细分。
+static void recomputeLimits() {
+  if (limExplicit) return;
+  int32_t span = stepsPerRevFw() * kDefaultLimitRevs;
+  minLim = -span;
+  maxLim = span;
+}
 
 // ---- 参数持久化（NVS）----
 // TMC 参数存进 flash，重启后不再回到默认值。
@@ -314,6 +333,7 @@ void motorBegin() {
   digitalWrite(PIN_EN, HIGH);
 
   tmcLoad();  // 必须在 tmcApply() 之前：把上次保存的参数读回来
+  recomputeLimits();  // 软限位跟随读回来的细分
 
   engine.init();
 #if defined(SUPPORT_SELECT_DRIVER_TYPE)
@@ -358,6 +378,7 @@ void motorJog(int32_t delta) {
 void motorStop() {
   if (!stepper) return;
   stepper->stopMove();
+  // 减速还会往前走一点，目标先记当前位置；settleTick() 会在真正停住后对齐。
   target = stepper->getCurrentPosition();
   lastMoveMs = millis();
 }
@@ -370,9 +391,30 @@ void motorSetEnabled(bool on) {
   applyEnable();
 }
 
+// 位置连续 kSettleMs 没变就认为真的停住了，把目标对齐过去，让 motorMoving() 收敛。
+// 不能用 stepper->isRunning()：目标被反复覆盖后它会永久卡在 true（已实测），
+// 后果是界面永远显示 RUN、待机永不触发。
+static const uint32_t kSettleMs = 300;
+static int32_t settlePos = 0;
+static uint32_t settleSince = 0;
+
+static void settleTick() {
+  if (!stepper) return;
+  int32_t p = stepper->getCurrentPosition();
+  if (p != settlePos) {
+    settlePos = p;
+    settleSince = millis();
+    return;
+  }
+  if (p == target) return;
+  if (millis() - settleSince < kSettleMs) return;
+  target = p;
+}
+
 void motorStandbyTick() {
+  settleTick();  // 与待机无关，必须先跑
   if (!enabled || !tmcStandby || standbyOff) return;
-  if (stepper && stepper->isRunning()) {
+  if (motorMoving()) {
     lastMoveMs = millis();
     return;
   }
@@ -392,6 +434,7 @@ void motorSetLimits(int32_t minSteps, int32_t maxSteps) {
   }
   minLim = minSteps;
   maxLim = maxSteps;
+  limExplicit = true;
   if (stepper && enabled) {
     target = clampLim(target);
     stepper->moveTo(target);
@@ -413,7 +456,11 @@ int32_t motorTarget() { return target; }
 int32_t motorMin() { return minLim; }
 int32_t motorMax() { return maxLim; }
 bool motorEnabled() { return enabled; }
-bool motorMoving() { return stepper && stepper->isRunning(); }
+// 用“位置是否到达目标”判断，不用 FastAccelStepper::isRunning()（会卡住）。
+bool motorMoving() {
+  if (!stepper) return false;
+  return stepper->getCurrentPosition() != target;
+}
 bool motorUartOk() { return uartOk; }
 const char *motorUartHint() { return uartHint; }
 
@@ -464,6 +511,7 @@ void motorTmcSet(int32_t key, int32_t val) {
       break;
     case TMC_MICROSTEPS:
       tmcMsSet = (uint16_t)val;
+      recomputeLimits();  // 行程上限按圈算，换细分要跟着变
       break;
     case TMC_STEALTH:
       tmcStealthSet = val ? 1 : 0;
