@@ -32,6 +32,7 @@ static int32_t maxLim = 20000;
 static int32_t target = 0;
 static bool enabled = false;
 static bool uartOk = false;
+static bool limitHit = false;
 
 // 待机断电：用户仍处于“使能”意图，但物理上已释放驱动，避免静止时发热和轻微震动。
 static bool standbyOff = false;
@@ -389,6 +390,7 @@ void motorSetPos(int32_t steps) {
     recoverRunningAtTarget();
   }
   target = clampLim(steps);
+  limitHit = target != steps;
   if (needsRecovery) {
     pendingTarget = target;
     pendingSince = millis();
@@ -406,7 +408,9 @@ void motorJog(int32_t delta) {
   if (needsRecovery) {
     recoverRunningAtTarget();
   }
-  target = clampLim(target + delta);
+  const int32_t requested = target + delta;
+  target = clampLim(requested);
+  limitHit = target != requested;
   if (needsRecovery) {
     pendingTarget = target;
     pendingSince = millis();
@@ -530,6 +534,7 @@ void motorSetLimits(int32_t minSteps, int32_t maxSteps) {
   limExplicit = true;
   if (stepper && enabled) {
     target = clampLim(target);
+    limitHit = false;
     queueMoveTo(target);
   }
 }
@@ -549,6 +554,7 @@ int32_t motorTarget() { return target; }
 int32_t motorMin() { return minLim; }
 int32_t motorMax() { return maxLim; }
 bool motorEnabled() { return enabled; }
+bool motorLimitHit() { return limitHit; }
 // 用 FastAccelStepper 自己的运行状态。不要用“位置 != 目标”判断：
 // stopMove() 减速后位置永远到不了旧目标，会一直显示在动；
 // 而“位置 300ms 没变就对齐目标”的做法会把慢速进行中的动作截断（实测少走 14 步）。

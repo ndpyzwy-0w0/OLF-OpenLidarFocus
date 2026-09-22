@@ -33,6 +33,7 @@ enum FfFlag : uint8_t {
   FF_FLAG_MOVING = 2,
   FF_FLAG_UART_OK = 4,
   FF_FLAG_STANDBY = 8,  // 处于待机断电状态：用户仍使能，但驱动已被释放
+  FF_FLAG_LIMITED = 16, // 最近一次位置命令被软限位夹紧
 };
 
 struct FfPacket {

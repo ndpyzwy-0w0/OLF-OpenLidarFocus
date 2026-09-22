@@ -31,6 +31,7 @@ int32_t motorMin();
 int32_t motorMax();
 bool motorEnabled();
 bool motorMoving();
+bool motorLimitHit();
 bool motorUartOk();
 const char *motorUartHint();
 

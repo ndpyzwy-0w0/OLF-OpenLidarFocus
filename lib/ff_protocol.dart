@@ -26,6 +26,7 @@ const int kFlagEnabled = 1;
 const int kFlagMoving = 2;
 const int kFlagUartOk = 4;
 const int kFlagStandby = 8;
+const int kFlagLimited = 16;
 
 class FfPacket {
   final int cmd;
@@ -65,6 +66,7 @@ class FfPacket {
 
 class TmcDump {
   final bool uartOk;
+  final bool limited;
   final bool stealth;
   final int rmsMa;
   final int microsteps;
@@ -80,6 +82,7 @@ class TmcDump {
 
   const TmcDump({
     required this.uartOk,
+    this.limited = false,
     required this.stealth,
     required this.rmsMa,
     required this.microsteps,
@@ -149,6 +152,7 @@ class MotorStatus {
   final bool enabled;
   final bool moving;
   final bool uartOk;
+  final bool limited;
   /// 处于待机断电：用户仍使能，但驱动已释放（不发热、不震动）。
   final bool standby;
 
@@ -158,6 +162,7 @@ class MotorStatus {
     required this.enabled,
     required this.moving,
     required this.uartOk,
+    this.limited = false,
     this.standby = false,
   });
 
@@ -168,6 +173,7 @@ class MotorStatus {
       enabled: p.flags & kFlagEnabled != 0,
       moving: p.flags & kFlagMoving != 0,
       uartOk: p.flags & kFlagUartOk != 0,
+      limited: p.flags & kFlagLimited != 0,
       standby: p.flags & kFlagStandby != 0,
     );
   }

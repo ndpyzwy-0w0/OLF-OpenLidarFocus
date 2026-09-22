@@ -105,6 +105,9 @@ class _FollowPageState extends State<FollowPage> {
         _moving = s.moving;
         _uartOk = s.uartOk;
         _standbyOff = s.standby;
+        if (s.limited) {
+          _msg = '已到软限位：$s.pos 步';
+        }
       });
     };
     _link.onTmc = (d) {
