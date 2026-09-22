@@ -356,6 +356,25 @@ python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 脚本覆盖 ENABLE、JOG、HOME/STATUS_V2、SET_POS、STOP、反向、软限位、待机唤醒和
 通信超时。必须连接 `FF-debug` 并接好电机后运行；没有硬件时只能做语法/编译验证。
 
+该脚本会真实驱动电机（整轮往返约 2 圈，最大单次连续约 1.3 圈），运行前先确认镜头
+行程内没有障碍物。
+
+2026-09-22 已对 `FF-debug` 上的真机完整跑过一次：**7/7 全部通过，exit 0**。
+其中两组结果最能说明问题：
+
+- SET_POS：同一个 `seq` 的 legacy `STATUS` 和 `STATUS_V2` 都在动作结束后报
+  `completed`（`pos == target == 32`）。修复前 `STATUS_V2` 会停留在 `accepted`，
+  本组即失败。
+- 通信超时：请求 19000 步，实际走到 6417 步被看门狗刹停，`result == stopped`，
+  且 `target` 被 `motorStop()` 重锚为 6417。
+
+烧录会清空位置（`pos = 0`、`trusted = 0`），因此新烧的固件必须先发一次 HOME
+才能让 `trusted` 变 1；HOME 只做软件置零，电机不会动。
+
+整轮 7 组一起很快失败、且每条都只打印 `FAIL <组名>: timed out` 时，那是 `recv`
+超时而非断言失败（`socket.timeout` 的字符串恰好就是 `"timed out"`）。本项目实测
+这种情况全部由 Wi-Fi 掉线引起，先确认 `192.168.4.1` 能 ping 通再重跑。
+
 两处容易误改的地方：
 
 - SET_POS 组会同时校验 `STATUS` 和 `STATUS_V2` 对已完成的动作都报 `completed`。
