@@ -368,8 +368,10 @@ python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 - 通信超时：请求 19000 步，实际走到 6417 步被看门狗刹停，`result == stopped`，
   且 `target` 被 `motorStop()` 重锚为 6417。
 
-烧录会清空位置（`pos = 0`、`trusted = 0`），因此新烧的固件必须先发一次 HOME
-才能让 `trusted` 变 1；HOME 只做软件置零，电机不会动。
+`trusted` 会在两种情况下回到 0：上电/烧录后（此时 `pos = 0`），以及
+`motorSetEnabled(false)`。后者是刻意的 —— 驱动器不再保持扭矩，开环步数不再可信。
+所以 App 每次重新使能后都要重新 HOME，不能假设 `trusted` 会保持。HOME 只做软件
+置零，电机不会动。
 
 整轮 7 组一起很快失败、且每条都只打印 `FAIL <组名>: timed out` 时，那是 `recv`
 超时而非断言失败（`socket.timeout` 的字符串恰好就是 `"timed out"`）。本项目实测
