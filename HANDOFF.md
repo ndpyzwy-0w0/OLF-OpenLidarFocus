@@ -43,10 +43,10 @@ iPhone Pro 真机。
 最近提交：
 
 ```text
+2301604 test: cover single-shot JOG streaming vs latched modes
+8add5d6 docs: clarify watchdog ARMED semantics and refresh the commit log
 45cc8c8 feat: add latched single-shot moves and allow several AP clients
 b453ca4 docs: record per-board SSID and discovery protocol
-86f30e3 feat: derive per-board SSID and add UDP discovery
-8a48093 docs: clarify when position trust is cleared
 ```
 
 ## 3. 硬件和接线
