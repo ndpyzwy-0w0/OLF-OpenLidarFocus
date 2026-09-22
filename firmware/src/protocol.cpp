@@ -16,6 +16,12 @@ static void fillStatus(FfPacket *p, uint8_t sequence = 0) {
   if (motorUartOk()) p->flags |= FF_FLAG_UART_OK;
   if (motorStandbyOff()) p->flags |= FF_FLAG_STANDBY;
   if (motorLimitHit()) p->flags |= FF_FLAG_LIMITED;
+  MotorCommandResult result = motorCommandResult();
+  if (result == MOTOR_RESULT_ACCEPTED && !motorMoving() &&
+      motorPos() == motorTarget()) {
+    result = MOTOR_RESULT_COMPLETED;
+  }
+  p->flags |= (static_cast<uint8_t>(result) << FF_RESULT_SHIFT) & FF_RESULT_MASK;
   p->pad = sequence;
   p->a = motorPos();
   p->b = motorTarget();

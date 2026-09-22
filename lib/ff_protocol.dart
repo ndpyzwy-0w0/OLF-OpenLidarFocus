@@ -27,6 +27,15 @@ const int kFlagMoving = 2;
 const int kFlagUartOk = 4;
 const int kFlagStandby = 8;
 const int kFlagLimited = 16;
+const int kFlagResultShift = 5;
+const int kFlagResultMask = 0xe0;
+
+const int kResultIdle = 0;
+const int kResultAccepted = 1;
+const int kResultCompleted = 2;
+const int kResultLimited = 3;
+const int kResultRejected = 4;
+const int kResultStopped = 5;
 
 class FfPacket {
   final int cmd;
@@ -160,6 +169,7 @@ class MotorStatus {
 
   /// 处于待机断电：用户仍使能，但驱动已释放（不发热、不震动）。
   final bool standby;
+  final int result;
 
   const MotorStatus({
     this.sequence = 0,
@@ -170,6 +180,7 @@ class MotorStatus {
     required this.uartOk,
     this.limited = false,
     this.standby = false,
+    this.result = kResultIdle,
   });
 
   factory MotorStatus.fromPacket(FfPacket p) {
@@ -182,6 +193,7 @@ class MotorStatus {
       uartOk: p.flags & kFlagUartOk != 0,
       limited: p.flags & kFlagLimited != 0,
       standby: p.flags & kFlagStandby != 0,
+      result: (p.flags & kFlagResultMask) >> kFlagResultShift,
     );
   }
 }

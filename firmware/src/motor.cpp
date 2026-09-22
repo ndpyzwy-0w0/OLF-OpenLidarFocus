@@ -33,6 +33,7 @@ static int32_t target = 0;
 static bool enabled = false;
 static bool uartOk = false;
 static bool limitHit = false;
+static MotorCommandResult commandResult = MOTOR_RESULT_IDLE;
 
 // 待机断电：用户仍处于“使能”意图，但物理上已释放驱动，避免静止时发热和轻微震动。
 static bool standbyOff = false;
@@ -383,7 +384,10 @@ void motorUartBegin() {
 }
 
 void motorSetPos(int32_t steps) {
-  if (!stepper || !enabled) return;
+  if (!stepper || !enabled) {
+    commandResult = MOTOR_RESULT_REJECTED;
+    return;
+  }
   wake();
   const bool needsRecovery =
       stepper->isRunning() && positionNearTarget(stepper->getCurrentPosition());
@@ -392,6 +396,7 @@ void motorSetPos(int32_t steps) {
   }
   target = clampLim(steps);
   limitHit = target != steps;
+  commandResult = limitHit ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_ACCEPTED;
   if (needsRecovery || stepper->isRunning()) {
     pendingTarget = target;
     pendingSince = millis();
@@ -403,7 +408,10 @@ void motorSetPos(int32_t steps) {
 }
 
 void motorJog(int32_t delta) {
-  if (!stepper || !enabled) return;
+  if (!stepper || !enabled) {
+    commandResult = MOTOR_RESULT_REJECTED;
+    return;
+  }
   wake();
   const bool needsRecovery =
       stepper->isRunning() && positionNearTarget(stepper->getCurrentPosition());
@@ -413,6 +421,7 @@ void motorJog(int32_t delta) {
   const int32_t requested = target + delta;
   target = clampLim(requested);
   limitHit = target != requested;
+  commandResult = limitHit ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_ACCEPTED;
   movePending = false;
   queueMoveTo(target);
 }
@@ -490,6 +499,7 @@ void motorStop() {
   movePending = false;
   stepper->stopMove();
   target = stepper->getCurrentPosition();
+  commandResult = MOTOR_RESULT_STOPPED;
   lastMoveMs = millis();
 }
 
@@ -560,6 +570,7 @@ bool motorLimitHit() { return limitHit; }
 bool motorMoving() { return stepper && stepper->isRunning(); }
 bool motorUartOk() { return uartOk; }
 const char *motorUartHint() { return uartHint; }
+MotorCommandResult motorCommandResult() { return commandResult; }
 
 void motorTmcSnap(TmcSnap *o) {
   memset(o, 0, sizeof(*o));

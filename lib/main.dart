@@ -91,6 +91,7 @@ class _FollowPageState extends State<FollowPage> {
   DateTime? _lastStatusAt;
   int _lastSentSequence = 0;
   int _lastEchoedSequence = 0;
+  int _commandResult = kResultIdle;
   Timer? _tick;
   String _msg = '连手机热点 FF-debug / ffdebug1';
   TmcDump? _tmc;
@@ -106,6 +107,7 @@ class _FollowPageState extends State<FollowPage> {
       setState(() {
         _lastStatusAt = DateTime.now();
         _lastEchoedSequence = s.sequence;
+        _commandResult = s.result;
         _pos = s.pos;
         _target = s.target;
         _enabled = s.enabled;
@@ -672,6 +674,11 @@ class _FollowPageState extends State<FollowPage> {
         ok: _open && _target == _pos && !_moving,
         detail: _moving ? '正在追踪 $_target' : '位置 $_pos / 目标 $_target',
       ),
+      (
+        name: '最近命令结果',
+        ok: _commandResult != kResultRejected,
+        detail: _commandResultLabel(_commandResult),
+      ),
     ];
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
@@ -696,6 +703,23 @@ class _FollowPageState extends State<FollowPage> {
           ),
       ],
     );
+  }
+
+  String _commandResultLabel(int result) {
+    switch (result) {
+      case kResultAccepted:
+        return '已接受 / 执行中';
+      case kResultCompleted:
+        return '已完成';
+      case kResultLimited:
+        return '已限位夹紧';
+      case kResultRejected:
+        return '已拒绝（未使能）';
+      case kResultStopped:
+        return '已停止';
+      default:
+        return '空闲';
+    }
   }
 
   Widget _tmcPanel() {

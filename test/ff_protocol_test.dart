@@ -46,6 +46,16 @@ void main() {
     expect(s.sequence, 7);
   });
 
+  test('status decodes command result from upper flags', () {
+    final p = FfPacket.decode(
+      const FfPacket(
+        cmd: kFfStatus,
+        flags: kFlagEnabled | (kResultLimited << kFlagResultShift),
+      ).encode(),
+    )!;
+    expect(MotorStatus.fromPacket(p).result, kResultLimited);
+  });
+
   test('standby flag is reported independently of enabled', () {
     final p = FfPacket.decode(
       const FfPacket(

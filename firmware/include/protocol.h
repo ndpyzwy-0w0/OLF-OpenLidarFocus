@@ -36,6 +36,10 @@ enum FfFlag : uint8_t {
   FF_FLAG_LIMITED = 16, // 最近一次位置命令被软限位夹紧
 };
 
+// Upper three flag bits carry the latest command result.
+static const uint8_t FF_RESULT_SHIFT = 5;
+static const uint8_t FF_RESULT_MASK = 0xE0;
+
 struct FfPacket {
   uint8_t magic;
   uint8_t cmd;

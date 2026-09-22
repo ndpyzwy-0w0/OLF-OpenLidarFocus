@@ -64,3 +64,14 @@ struct TmcSnap {
 
 void motorTmcSnap(TmcSnap *o);
 void motorTmcSet(int32_t key, int32_t val);
+
+enum MotorCommandResult : uint8_t {
+  MOTOR_RESULT_IDLE = 0,
+  MOTOR_RESULT_ACCEPTED = 1,
+  MOTOR_RESULT_COMPLETED = 2,
+  MOTOR_RESULT_LIMITED = 3,
+  MOTOR_RESULT_REJECTED = 4,
+  MOTOR_RESULT_STOPPED = 5,
+};
+
+MotorCommandResult motorCommandResult();
