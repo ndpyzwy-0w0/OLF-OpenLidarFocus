@@ -40,6 +40,7 @@ static uint32_t lastMoveMs = 0;
 static const uint32_t kStandbyDelayMs = 2500;
 static bool movePending = false;
 static int32_t pendingTarget = 0;
+static uint32_t pendingSince = 0;
 
 static uint8_t tmcSlave = 0;
 static uint8_t tmcVer = 0;
@@ -376,6 +377,7 @@ void motorSetPos(int32_t steps) {
   target = clampLim(steps);
   if (needsRecovery) {
     pendingTarget = target;
+    pendingSince = millis();
     movePending = true;
     return;
   }
@@ -393,6 +395,7 @@ void motorJog(int32_t delta) {
   target = clampLim(target + delta);
   if (needsRecovery) {
     pendingTarget = target;
+    pendingSince = millis();
     movePending = true;
     return;
   }
@@ -483,7 +486,7 @@ void motorSetEnabled(bool on) {
 
 void motorStandbyTick() {
   wedgedTick();  // 每 loop 都要跑，与待机无关
-  if (movePending && stepper && !stepper->isRunning()) {
+  if (movePending && stepper && millis() - pendingSince >= 50) {
     movePending = false;
     stepper->moveTo(pendingTarget);
   }
