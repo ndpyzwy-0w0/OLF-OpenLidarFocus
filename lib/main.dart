@@ -56,6 +56,7 @@ class _FollowPageState extends State<FollowPage> {
   bool _moving = false;
   bool _uartOk = false;
   bool _open = false;
+  bool _previewExpanded = true;
   int _pos = 0;
   int _target = 0;
   // 速度和加速度都用**物理单位**（圈/秒、圈/秒²），再乘脉冲/圈换成步。
@@ -380,26 +381,18 @@ class _FollowPageState extends State<FollowPage> {
       ),
       body: Column(
         children: [
-          Expanded(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                _preview(),
-                Positioned(
-                  left: 12,
-                  top: 8,
-                  child: Text(
-                    distText,
-                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      shadows: const [
-                        Shadow(blurRadius: 8, color: Colors.black),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          if (_previewExpanded)
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  _preview(),
+                  Positioned(left: 12, top: 8, child: _previewToggle(distText)),
+                ],
+              ),
+            )
+          else
+            _previewToggle(distText, compact: true),
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 340),
             child: SingleChildScrollView(
@@ -973,6 +966,33 @@ class _FollowPageState extends State<FollowPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _previewToggle(String distance, {bool compact = false}) {
+    return Material(
+      color: compact ? Theme.of(context).colorScheme.surface : Colors.black54,
+      child: InkWell(
+        onTap: () => setState(() => _previewExpanded = !_previewExpanded),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _previewExpanded
+                    ? Icons.keyboard_arrow_up
+                    : Icons.keyboard_arrow_down,
+                size: 18,
+              ),
+              const SizedBox(width: 4),
+              Text('摄像头 ${_previewExpanded ? "展开" : "已折叠"}'),
+              const SizedBox(width: 10),
+              Text('距离 $distance', style: const TextStyle(fontSize: 12)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
