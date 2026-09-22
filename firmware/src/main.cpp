@@ -3,6 +3,7 @@
 #include <WebServer.h>
 #include <WiFiUdp.h>
 #include <DNSServer.h>
+#include <esp_system.h>
 
 #include "motor.h"
 #include "protocol.h"
@@ -12,6 +13,7 @@ static const int PIN_BTN = 0;
 
 static const char *kSsid = "FF-debug";
 static const char *kPass = "ffdebug1";
+static const uint8_t kApChannel = 1;
 
 static DNSServer dns;
 static WebServer http(80);
@@ -53,18 +55,53 @@ static void handleRoot() { http.send(200, "text/html; charset=utf-8", kPage); }
 static void handlePing() { http.send(200, "text/plain", "ok"); }
 static void handleCaptive() { http.sendHeader("Location", "/", true); http.send(302, "text/plain", ""); }
 
+static void onWiFiEvent(WiFiEvent_t event) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_AP_START:
+      Serial.println("wifi ap started");
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STOP:
+      Serial.println("wifi ap stopped");
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+      Serial.printf("wifi client connected count=%d\n", WiFi.softAPgetStationNum());
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+      Serial.printf("wifi client disconnected count=%d\n", WiFi.softAPgetStationNum());
+      break;
+    default:
+      break;
+  }
+}
+
+static void logWiFiState() {
+  static uint8_t lastStations = 255;
+  static uint32_t lastLogMs = 0;
+  const uint32_t now = millis();
+  const uint8_t stations = WiFi.softAPgetStationNum();
+  if (stations != lastStations || now - lastLogMs >= 30000) {
+    lastStations = stations;
+    lastLogMs = now;
+    Serial.printf("wifi ap=%d clients=%u channel=%u ip=%s\n",
+                  WiFi.getMode() == WIFI_AP ? 1 : 0, stations, kApChannel,
+                  WiFi.softAPIP().toString().c_str());
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_BTN, INPUT_PULLUP);
 
+  Serial.printf("reset reason=%d\n", (int)esp_reset_reason());
   motorBegin();
   oledBegin();
 
   btStop();
   WiFi.persistent(false);
+  WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_AP);
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
-  WiFi.softAP(kSsid, kPass);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.softAP(kSsid, kPass, kApChannel, false, 1);
   delay(100);
 
   IPAddress ip = WiFi.softAPIP();
@@ -81,6 +118,7 @@ void setup() {
 
   Serial.printf("AP %s  pass %s  http://%s  udp %u\n",
                 kSsid, kPass, ip.toString().c_str(), kUdpPort);
+  logWiFiState();
 }
 
 void loop() {
@@ -99,6 +137,7 @@ void loop() {
   protocolPoll();
   motorStandbyTick();
   oledPoll();
+  logWiFiState();
 
   bool btn = digitalRead(PIN_BTN);
   if (lastBtn && !btn) {
