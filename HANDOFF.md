@@ -43,10 +43,10 @@ iPhone Pro 真机。
 最近提交：
 
 ```text
+45cc8c8 feat: add latched single-shot moves and allow several AP clients
+b453ca4 docs: record per-board SSID and discovery protocol
 86f30e3 feat: derive per-board SSID and add UDP discovery
 8a48093 docs: clarify when position trust is cleared
-d075952 docs: record real-hardware acceptance results
-b94b67f docs: note proxy breaks local flutter test
 ```
 
 ## 3. 硬件和接线
@@ -336,9 +336,11 @@ commandResult = STOPPED
 | `0`（默认） | 流式 | 本次移动纳入看门狗：必须持续发新包，静默 > 1 s 就刹停 |
 | `1`（`FF_REQ_LATCH = 0x01`） | 单次锁存 | 本次移动**不**纳入看门狗：发一次即可跑完；此时失联，移动会走到目标才停（软限位照常生效） |
 
-可观测性：`STATUS_V2.reserved` 位 0 = `FF_V2_WATCHDOG_ARMED`。它表示"当前处于流式监视
-模式"，在一次流式移动跑完之后**仍然为 1**（清除时机只有 `STOP`/`ENABLE(0)`/`HOME`/超时），
-所以要判断"此刻失联会不会被刹停"必须写成 `ARMED && MOVING`。
+可观测性：`STATUS_V2.reserved` 位 0 = `FF_V2_WATCHDOG_ARMED`。它表示"当前的流式监视模式
+是否武装"，由最近一次被接受的 `SET_POS`/`JOG` 决定（流式 → 1，锁存 → 0），并且在一次流式
+移动跑完之后**仍然为 1**：改写/清除时机只有 `ENABLE(0)`、`HOME`、看门狗超时和下一次锁存命令
+（`STOP` 不清，无害，因为 tick 还要求 `MOVING`）。所以要判断"此刻失联会不会被刹停"必须写成
+`ARMED && MOVING`。
 
 选择建议：
 
