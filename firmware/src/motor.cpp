@@ -348,7 +348,7 @@ void motorBegin() {
   tmcLoad();  // 必须在 tmcApply() 之前：把上次保存的参数读回来
   recomputeLimits();  // 软限位跟随读回来的细分
 
-  engine.init();
+  engine.init(1);
 #if defined(SUPPORT_SELECT_DRIVER_TYPE)
   stepper = engine.stepperConnectToPin(PIN_STEP, DRIVER_RMT);
 #else
