@@ -29,22 +29,23 @@ iPhone Pro 真机。
 | `JOG +8/-8/+80/-80` | 已验证位置增量准确 |
 | `SET_POS`、STOP、反向保护 | 已实现并验证 |
 | TMC2209 UART 诊断 | 已通，GPIO12 同脚半双工 |
-| Wi-Fi SoftAP + UDP | 已通 |
+| Wi-Fi SoftAP + UDP | 已通，SSID 每板唯一 `FF-XXXXXX` |
+| 固件侧设备发现 `FF_DISCOVER` | 已实现，真机验证通过 |
+| 主机侧 Wi-Fi 扫描和列表 | 尚未实现，属于下一阶段 |
 | Flutter Windows 调试界面 | 可运行 |
 | Flutter 协议和单测 | 25 项通过 |
 | 通信失联停止 | 已实现，控制包超时 1000 ms |
 | 手动 HOME / `positionTrusted` | 已实现 |
 | 自动化 UDP 验收脚本 | 已完成，需在实际硬件/Wi-Fi 环境运行 |
 | iOS LiDAR | 代码存在，未在本 Windows 环境验证 |
-| Wi-Fi 列表扫描和设备发现 | 尚未实现，属于下一阶段 |
 
 最近提交：
 
 ```text
-a9c9725 fix: report trusted status on queries
-3e802df feat: add motion safety and trusted home
-5113270 fix: guard stepper direction changes
-b6812e8 fix: replace RMT motion with timer pulses
+86f30e3 feat: derive per-board SSID and add UDP discovery
+8a48093 docs: clarify when position trust is cleared
+d075952 docs: record real-hardware acceptance results
+b94b67f docs: note proxy breaks local flutter test
 ```
 
 ## 3. 硬件和接线
@@ -102,13 +103,17 @@ Super Mini 不同。本项目已实测 `r12 t12`、115200、地址 0、TMC2209 v
   UDP 命令解析和状态回复。
 - [firmware/include/protocol.h](<J:/New%20soft%20project/iphone-follow-focus/firmware/include/protocol.h>)：
   协议常量和数据结构。
+- [firmware/src/device.cpp](firmware/src/device.cpp) 和
+  [firmware/include/device.h](firmware/include/device.h)：设备身份
+  （AP 接口 MAC → `FF-XXXXXX`）和固件版本号，SSID 与发现回包共用同一来源。
 - [firmware/platformio.ini](<J:/New%20soft%20project/iphone-follow-focus/firmware/platformio.ini>)：
   PlatformIO `s3mini` 环境。
 
 固件启动：
 
 1. `motorBegin()` 初始化 GPIO、参数和硬件定时器。
-2. OLED 和 Wi-Fi SoftAP 启动。
+2. OLED 启动；`WiFi.mode(WIFI_AP)` → `deviceBegin()` → `WiFi.softAP(deviceId(), ...)`。
+   `deviceBegin()` 必须在 `mode()` 之后、`softAP()` 之前，因为 SSID 就是 `deviceId()`。
 3. UDP 端口 `4210` 初始化。
 4. 首次进入 `loop()` 时尝试 TMC UART，避免 UART 异常阻塞热点和按键。
 5. 主循环处理 DNS、HTTP、UDP、待机和按键。
@@ -148,16 +153,25 @@ desired = sqrt(2 * acceleration * remaining_distance)
 
 ## 6. Wi-Fi 和 UDP
 
-当前固件固定为 SoftAP：
+当前固件为 SoftAP，SSID 每板唯一：
 
 ```text
-SSID: FF-debug
+SSID: FF-XXXXXX   例如 FF-75A578，取自 AP 接口 MAC 末三字节
 密码: ffdebug1
 AP channel: 1
 默认地址: 192.168.4.1
 UDP: 4210
 HTTP: 80
 ```
+
+SSID 和发现回包里的 `device_id` 都由 [firmware/src/device.cpp](firmware/src/device.cpp)
+统一生成，两者必然一致；回包里的 `mac` 就是扫描列表显示的 BSSID。实测本板
+`FF-75A578` / `92:DA:72:75:A5:78`。注意设备启动日志打印的 eFuse 基址是
+`90:DA:72:75:A5:78`，与 BSSID 差一个本地管理位，所以身份必须取 AP 接口 MAC
+（`WiFi.softAPmacAddress()`），不能取基址，否则和扫描结果对不上。
+
+`netsh wlan show networks` 返回的是缓存，刚上电/刚重启后可能扫不到新 SSID，
+隔几秒重试即可，验证 SSID 不需要真的连上去。
 
 HTTP 根页面可用于简单延迟测试。DNS captive portal 会把未知 HTTP 路径重定向到根页面。
 Wi-Fi sleep 已关闭。
@@ -192,6 +206,7 @@ offset 8: b int32
 | `0x08` | `TMC_QUERY` | 无 |
 | `0x09` | `TMC_SET` | `a=key, b=value` |
 | `0x0A` | `HOME` | 手动软件校零 |
+| `0x0B` | `DISCOVER` | 无，回 `0x84`，且**不**附状态包 |
 
 旧状态 `0x81` 仍是 12 字节。`QUERY` 当前会返回旧状态和 `STATUS_V2`。
 `HOME` 也会连续返回这两个状态包。`STATUS_V2 = 0x83`，固定 16 字节：
@@ -227,6 +242,45 @@ sequence 用于把回复和请求关联。它只证明命令被接收并回复�
 
 `STATUS` 和 `STATUS_V2` 使用同一个提升逻辑：`accepted` 在 `pos == target`
 且不再运动时变为 `completed`。两种包的 `result` 始终一致。
+
+### 设备发现
+
+`DISCOVER` 复用控制端口 `4210`，不另开端口。请求就是普通 12 字节包的
+`cmd = 0x0B`，`a`/`b` 忽略。设备回一个 32 字节 `FF_DISCOVER_REPLY = 0x84`，
+固定小端布局：
+
+```text
+offset 0:  magic uint8 = 0x46
+offset 1:  cmd uint8 = 0x84
+offset 2:  kind uint8 = 1（跟焦器）
+offset 3:  protocol uint8 = 1
+offset 4:  udp_port uint16
+offset 6:  fw_major/minor/patch uint8 ×3
+offset 9:  mac[6]，与扫描到的 BSSID 相同
+offset 15: device_id[16]，NUL 结尾，例如 "FF-75A578"
+offset 31: reserved
+```
+
+`protocol.h` 里有 `static_assert(sizeof(FfDiscovery) == 32)`。这个分支在
+[firmware/src/protocol.cpp](firmware/src/protocol.cpp) 里**直接 `return`**：
+发现请求不该顺带回一个状态包，否则和 `QUERY` 的双包行为混淆，主机端也不好解析。
+
+主机侧工具 [firmware/tools/discover.py](firmware/tools/discover.py)：
+
+```powershell
+python firmware\tools\discover.py                      # 广播
+python firmware\tools\discover.py --target 192.168.4.1 # 单播
+python firmware\tools\discover.py --bind 192.168.4.2   # 指定源地址
+```
+
+真机结果：`FF-75A578  fw 1.0.0  udp 4210  mac 92:DA:72:75:A5:78  at 192.168.4.1`，
+且只收到 1 个数据包。
+
+开发机排查提示：主机存在多条默认路由时（本项目机器上有以太网 + VPN），
+受限广播 `255.255.255.255` 会跟随**默认路由**从别的网卡出去，永远到不了板子，
+表现就是"单播能通、广播无响应"。所以 `discover.py` 先发一次不绑定的包，再逐个
+绑定本机 IPv4 各发一次（等价于 SSDP 的做法），也支持直接发子网广播
+`--target 192.168.4.255`。板子本身不需要为此做任何改动。
 
 ## 7. 安全和位置可信度
 
@@ -354,12 +408,13 @@ python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 ```
 
 脚本覆盖 ENABLE、JOG、HOME/STATUS_V2、SET_POS、STOP、反向、软限位、待机唤醒和
-通信超时。必须连接 `FF-debug` 并接好电机后运行；没有硬件时只能做语法/编译验证。
+通信超时。必须连接设备 AP（`FF-XXXXXX`）并接好电机后运行；没有硬件时只能做语法/编译验证。
 
 该脚本会真实驱动电机（整轮往返约 2 圈，最大单次连续约 1.3 圈），运行前先确认镜头
 行程内没有障碍物。
 
-2026-09-22 已对 `FF-debug` 上的真机完整跑过一次：**7/7 全部通过，exit 0**。
+2026-09-22 已在 `FF-75A578` 上完整跑过两轮：**7/7 全部通过，exit 0**。第二轮在
+唯一 SSID + 发现协议改动之后，用于确认改动没有牵连影响。
 其中两组结果最能说明问题：
 
 - SET_POS：同一个 `seq` 的 legacy `STATUS` 和 `STATUS_V2` 都在动作结束后报
@@ -393,20 +448,24 @@ python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 
 ## 10. 当前未完成和下一步
 
-### 首要下一步：Wi-Fi 设备发现
+### 首要下一步：主机侧 Wi-Fi 扫描和设备列表
 
-用户希望扫描附近 Wi-Fi 并显示可用跟焦器，连接时不依赖固定 IP。当前尚未实现。
-建议按以下顺序设计，不要只按 SSID 判断设备身份：
+用户希望扫描附近 Wi-Fi 并显示可用跟焦器，连接时不依赖固定 IP。固件侧已完成
+（唯一 SSID + `FF_DISCOVER`，见 §6），剩下的都在主机侧：
 
-1. 固件生成稳定 `device_id`，建议使用 ESP32 MAC 地址。
-2. 将 SSID 从统一 `FF-debug` 改为可区分格式，例如 `FF-XXXXXX`，或至少保留
-   `FF-` 设备前缀。
-3. 增加 UDP 发现请求/响应，响应设备类型、ID、协议版本、固件版本和 UDP 端口。
-4. Flutter 连接后先用发现协议验证这是本项目固件，再建立 `MotorLink`。
-5. Windows 可使用原生 WLAN API 扫描；不要把 `netsh` 当正式跨平台方案。
-6. iOS 受系统限制，不能假设普通 App 能自由读取全部附近 Wi-Fi 列表。正式 iOS
-   方案更适合用 `NEHotspotConfiguration` 连接已知 SSID，再用 UDP 发现包验证。
-7. 多设备识别使用 BSSID/MAC 或固件返回的 `device_id`，SSID 不是唯一身份。
+1. 在 [lib/ff_protocol.dart](lib/ff_protocol.dart) 加入发现命令常量（`0x0B`/`0x84`）
+   和 32 字节回包解析。
+2. 扫描附近 Wi-Fi，筛出 `FF-` 前缀的 AP 作为候选设备，展示成"可用设备"列表。
+3. 连上候选 AP 后**先用** `FF_DISCOVER` 验证，确认对方是本项目固件并拿到
+   `device_id`/`mac`/`fw`/`udp_port`，再建立 `MotorLink`；不要再假设
+   `192.168.4.1:4210`。
+4. 用回包里的 `mac` 和扫描到的 BSSID 交叉校验，确认列表项和控制连接指向同一台板子。
+5. Windows 用原生 WLAN API 扫描；不要把 `netsh` 当正式跨平台方案。
+6. 广播在开发机上不可靠（主机多条默认路由会让 `255.255.255.255` 走错网卡，见 §6），
+   所以 App 侧要能回退到子网广播或单播候选 IP。
+7. iOS 受系统限制，普通 App 不能自由读取附近 Wi-Fi 列表。正式 iOS 方案用
+   `NEHotspotConfiguration` 连接已知 SSID，再用 UDP 发现包验证。SSID 现在每板唯一，
+   多设备场景可以让用户先选 SSID 再连接。
 
 ### 固件
 
@@ -418,8 +477,8 @@ python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 
 ### Flutter/iOS
 
+- 实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。
 - 把固定 `192.168.4.1` 替换为设备发现结果。
-- 增加 Wi-Fi/设备列表页和连接状态。
 - 完善 HOME 提示，明确它是软件校零而非机械回零。
 - 在 Mac + iPhone Pro 上验证 LiDAR、目标跟踪、镜头标定和丢目标策略。
 - 再开发正式 Swift/iOS 底层和 UI。
