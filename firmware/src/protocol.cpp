@@ -7,6 +7,17 @@
 static WiFiUDP *udp = nullptr;
 static uint8_t buf[64];
 
+// Shared by STATUS and STATUS_V2 so both report the same command result: a move
+// that actually finished must not still look "accepted".
+static MotorCommandResult effectiveResult() {
+  MotorCommandResult result = motorCommandResult();
+  if (result == MOTOR_RESULT_ACCEPTED && !motorMoving() &&
+      motorPos() == motorTarget()) {
+    return MOTOR_RESULT_COMPLETED;
+  }
+  return result;
+}
+
 static void fillStatus(FfPacket *p, uint8_t sequence = 0) {
   p->magic = kFfMagic;
   p->cmd = FF_STATUS;
@@ -16,12 +27,8 @@ static void fillStatus(FfPacket *p, uint8_t sequence = 0) {
   if (motorUartOk()) p->flags |= FF_FLAG_UART_OK;
   if (motorStandbyOff()) p->flags |= FF_FLAG_STANDBY;
   if (motorLimitHit()) p->flags |= FF_FLAG_LIMITED;
-  MotorCommandResult result = motorCommandResult();
-  if (result == MOTOR_RESULT_ACCEPTED && !motorMoving() &&
-      motorPos() == motorTarget()) {
-    result = MOTOR_RESULT_COMPLETED;
-  }
-  p->flags |= (static_cast<uint8_t>(result) << FF_RESULT_SHIFT) & FF_RESULT_MASK;
+  p->flags |= (static_cast<uint8_t>(effectiveResult()) << FF_RESULT_SHIFT) &
+              FF_RESULT_MASK;
   p->pad = sequence;
   p->a = motorPos();
   p->b = motorTarget();
@@ -39,7 +46,7 @@ void protocolSendStatusV2(const IPAddress &ip, uint16_t port, uint8_t sequence) 
   if (motorUartOk()) p.flags |= FF_FLAG_UART_OK;
   if (motorStandbyOff()) p.flags |= FF_FLAG_STANDBY;
   if (motorLimitHit()) p.flags |= FF_FLAG_LIMITED;
-  p.flags |= (static_cast<uint8_t>(motorCommandResult()) << FF_RESULT_SHIFT) &
+  p.flags |= (static_cast<uint8_t>(effectiveResult()) << FF_RESULT_SHIFT) &
              FF_RESULT_MASK;
   p.pos = motorPos();
   p.target = motorTarget();
