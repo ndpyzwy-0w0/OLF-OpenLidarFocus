@@ -71,6 +71,10 @@ class _FollowPageState extends State<FollowPage> {
   // 否则点“走步”会被电机端的 `if (!enabled) return;` 静默忽略。
   bool _wantEnabled = false;
   DateTime _lastEnableAttempt = DateTime.fromMillisecondsSinceEpoch(0);
+  // 自动跟焦的去抖：距离抖动会让目标每 20ms 变几步，变成“一直慢慢转停不下来”。
+  DateTime _lastAutoSend = DateTime.fromMillisecondsSinceEpoch(0);
+  // 停机闩锁：点“停”之后不再自动重发目标，否则自动跟焦会在 20ms 内把它覆盖掉。
+  bool _stopLatched = false;
   final _cal = const MotorCal();
   final _revsText = TextEditingController(text: '1');
   final _stepsText = TextEditingController(text: '800');
@@ -169,6 +173,7 @@ class _FollowPageState extends State<FollowPage> {
       _link.enable(true);
     }
     if (!_enabled) return;
+    if (_stopLatched) return;  // 点了“停”，不要被自动跟焦重新拉起来
     int? want;
     if (_auto) {
       final d = _distance;
@@ -177,9 +182,40 @@ class _FollowPageState extends State<FollowPage> {
       want = _sliderSteps();
       _sliderDirty = false;
     }
-    if (want == null || want == _lastSent) return;
+    if (want == null) return;
+
+    // 自动模式下必须有死区和最小间隔：
+    // 距离微抖会让目标每 tick 变几步，每一段都是三角形微动，
+    // 表现就是“一直缓慢转动、永远停不下来”。
+    if (_auto) {
+      if ((want - (_lastSent ?? want)).abs() < kAutoDeadbandSteps) return;
+      if (now.difference(_lastAutoSend) < const Duration(milliseconds: 60)) return;
+      _lastAutoSend = now;
+    } else if (want == _lastSent) {
+      return;
+    }
     _lastSent = want;
     _link.setPos(want);
+  }
+
+  /// 用户手动介入（走步/拖滑条/停机）时退出自动跟焦。
+  /// 不这样做的话自动逻辑会在下一个 tick 把手工动作拉回去，
+  /// 看起来就像“操作完还在自己转”。
+  void _takeManual(String why) {
+    if (_auto) {
+      _auto = false;
+      _filter.reset();
+      _msg = '已退出自动跟焦（$why）';
+    }
+  }
+
+  void _stopPressed() {
+    _link.stop();
+    _takeManual('停机');
+    _stopLatched = true;
+    _lastSent = null;
+    _sliderDirty = false;
+    setState(() => _msg = '已停机');
   }
 
   int get _ms => _tmc?.microsteps ?? 16;
@@ -213,6 +249,9 @@ class _FollowPageState extends State<FollowPage> {
           '换细分会改变步数尺度；可先回中点，或完成标定后由标定值决定限位。');
       return;
     }
+    _takeManual('走步');
+    _stopLatched = false;
+    _lastSent = null;
     _link.jog(delta);
     _sliderDirty = false;
   }
@@ -345,6 +384,7 @@ class _FollowPageState extends State<FollowPage> {
                         selected: _enabled,
                         onSelected: (v) {
                           _wantEnabled = v;
+                          _stopLatched = false;
                           _link.enable(v);
                           if (!v) _lastSent = null;
                         },
@@ -356,6 +396,8 @@ class _FollowPageState extends State<FollowPage> {
                             ? (v) => setState(() {
                                   _auto = v;
                                   _lastSent = null;
+                                  _stopLatched = false;
+                                  _lastAutoSend = DateTime.fromMillisecondsSinceEpoch(0);
                                   _filter.reset();
                                 })
                             : null,
@@ -370,7 +412,7 @@ class _FollowPageState extends State<FollowPage> {
                               }
                             : null,
                       ),
-                      OutlinedButton(onPressed: _link.stop, child: const Text('停')),
+                      OutlinedButton(onPressed: _open ? _stopPressed : null, child: const Text('停')),
                     ],
                   ),
                   Text(_auto ? '手动滑条（自动开时无效）' : '手动焦点'),
@@ -381,6 +423,7 @@ class _FollowPageState extends State<FollowPage> {
                         : (v) => setState(() {
                               _slider = v;
                               _sliderDirty = true;
+                              _stopLatched = false;
                               _lastSent = null;
                             }),
                   ),
@@ -440,10 +483,12 @@ class _FollowPageState extends State<FollowPage> {
                   ),
                   Text(
                     '脉冲/圈 $_spr（0.9° 电机 = ${_cal.fullStepsPerRev} 整步/圈 × '
-                    '1/${_tmc?.microsteps ?? 16} 细分）；当前位置 '
+                    '1/$_ms 细分）；当前位置 '
                     '${_cal.stepsToRevs(_pos, _ms).toStringAsFixed(2)} 圈',
                     style: const TextStyle(fontSize: 11),
                   ),
+                  // 直接说明“为什么 80 步比 800 步慢”：峰值速度由距离决定。
+                  _peakHint(),
                   Text('速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒'
                       '（${(_speedRevS * 60).round()} 转/分 · ${(_speedRevS * _spr).round()} 步/秒）'),
                   Slider(
@@ -696,6 +741,29 @@ class _FollowPageState extends State<FollowPage> {
             child: const Text('写入'),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 为什么“走 80 步比走 800 步慢”：峰值速度 ≈ √(加速度 × 距离)，
+  /// 短行程根本来不及加到巡航速度。把预测值摆出来，用户就知道该调哪个旋钮。
+  Widget _peakHint() {
+    final n = int.tryParse(_stepsText.text.trim()) ?? 0;
+    if (n <= 0) return const SizedBox.shrink();
+    final accelSteps = (_accelRevS2 * _spr).round();
+    final cruiseSteps = (_speedRevS * _spr).round();
+    final peak =
+        _cal.peakRevsPerSec(n, accelSteps, cruiseSteps, _ms);
+    final limited = peak < _speedRevS * 0.98;
+    return Text(
+      limited
+          ? '走 $n 步的峰值约 ${peak.toStringAsFixed(2)} 圈/秒，'
+              '达不到巡航 ${_speedRevS.toStringAsFixed(2)} 圈/秒（短行程加不完速）。'
+              '想更快就加大加速度。'
+          : '走 $n 步可以达到巡航速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒。',
+      style: TextStyle(
+        fontSize: 11,
+        color: limited ? const Color(0xFFFFAB40) : null,
       ),
     );
   }

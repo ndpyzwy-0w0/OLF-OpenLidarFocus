@@ -375,10 +375,46 @@ void motorJog(int32_t delta) {
   stepper->moveTo(target);
 }
 
+// ---- 楔死看门狗 ----
+// 实测 FastAccelStepper 的 RMT 通道偶尔会进入一种状态：
+// isRunning() 一直是 true、位置却不再推进（RMT 还在输出慢速脉冲），
+// 表现就是“电机一直慢慢转、停不下来”，此时 stopMove() 也压不住。
+// 判据：位置连续 kWedgedMs 没变、isRunning() 仍为真、且未到目标。
+// 处理：forceStopAndNewPosition() 硬停并对齐，然后把目标对齐到当前位置，
+// 让它停下而不是继续空转。App／自动跟焦需要时会重新下发目标。
+// 必须定义在 motorStandbyTick() 之前。
+static const uint32_t kWedgedMs = 700;
+static int32_t wdPos = 0x7fffffff;
+static uint32_t wdSince = 0;
+static uint16_t wdCount = 0;
+
+static void wedgedTick() {
+  if (!stepper) return;
+  int32_t p = stepper->getCurrentPosition();
+  uint32_t now = millis();
+  if (p != wdPos) {
+    wdPos = p;
+    wdSince = now;
+    return;
+  }
+  if (!stepper->isRunning()) return;
+  if (p == target) return;
+  if (now - wdSince < kWedgedMs) return;
+  wdCount++;
+  Serial.printf("stepper wedged at %ld (target %ld) - force stop #%u\n", (long)p,
+                (long)target, wdCount);
+  stepper->forceStopAndNewPosition(p);
+  target = p;
+  wdPos = p;
+  wdSince = now;
+  lastMoveMs = now;
+}
+
+uint16_t motorRecoverCount() { return wdCount; }
+
 void motorStop() {
   if (!stepper) return;
   stepper->stopMove();
-  // 减速还会往前走一点，目标先记当前位置；settleTick() 会在真正停住后对齐。
   target = stepper->getCurrentPosition();
   lastMoveMs = millis();
 }
@@ -391,28 +427,8 @@ void motorSetEnabled(bool on) {
   applyEnable();
 }
 
-// 位置连续 kSettleMs 没变就认为真的停住了，把目标对齐过去，让 motorMoving() 收敛。
-// 不能用 stepper->isRunning()：目标被反复覆盖后它会永久卡在 true（已实测），
-// 后果是界面永远显示 RUN、待机永不触发。
-static const uint32_t kSettleMs = 300;
-static int32_t settlePos = 0;
-static uint32_t settleSince = 0;
-
-static void settleTick() {
-  if (!stepper) return;
-  int32_t p = stepper->getCurrentPosition();
-  if (p != settlePos) {
-    settlePos = p;
-    settleSince = millis();
-    return;
-  }
-  if (p == target) return;
-  if (millis() - settleSince < kSettleMs) return;
-  target = p;
-}
-
 void motorStandbyTick() {
-  settleTick();  // 与待机无关，必须先跑
+  wedgedTick();  // 每 loop 都要跑，与待机无关
   if (!enabled || !tmcStandby || standbyOff) return;
   if (motorMoving()) {
     lastMoveMs = millis();
@@ -456,11 +472,10 @@ int32_t motorTarget() { return target; }
 int32_t motorMin() { return minLim; }
 int32_t motorMax() { return maxLim; }
 bool motorEnabled() { return enabled; }
-// 用“位置是否到达目标”判断，不用 FastAccelStepper::isRunning()（会卡住）。
-bool motorMoving() {
-  if (!stepper) return false;
-  return stepper->getCurrentPosition() != target;
-}
+// 用 FastAccelStepper 自己的运行状态。不要用“位置 != 目标”判断：
+// stopMove() 减速后位置永远到不了旧目标，会一直显示在动；
+// 而“位置 300ms 没变就对齐目标”的做法会把慢速进行中的动作截断（实测少走 14 步）。
+bool motorMoving() { return stepper && stepper->isRunning(); }
 bool motorUartOk() { return uartOk; }
 const char *motorUartHint() { return uartHint; }
 

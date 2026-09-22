@@ -54,6 +54,28 @@ void main() {
     expect(cal.maxRevsPerSec(16) / cal.maxRevsPerSec(256), closeTo(16, 1e-9));
   });
 
+  test('peak speed depends on distance, which is why short jogs feel slow', () {
+    // v_peak = sqrt(accel * distance) while that stays under cruise speed.
+    // Hardware check at accel=500 steps/s^2 and 80 steps predicted 200
+    // steps/s and measured ~220 steps/s.
+    expect(cal.peakStepsPerSec(80, 500), closeTo(200, 1e-6));
+    expect(cal.peakStepsPerSec(800, 500), closeTo(632.455, 0.01));
+    // Doubling the distance raises the peak by sqrt(2), not by 2.
+    expect(cal.peakStepsPerSec(160, 500) / cal.peakStepsPerSec(80, 500),
+        closeTo(1.4142135, 1e-6));
+  });
+
+  test('peak rev/s is capped by cruise speed', () {
+    // App defaults at 1/16: cruise 1.2 rev/s, accel 30 rev/s^2.
+    const cruise = 7680, accel = 192000, ms = 16;
+    // 800 steps can reach cruise: sqrt(192000*800) = 12393 > 7680, so capped.
+    expect(cal.peakRevsPerSec(800, accel, cruise, ms), closeTo(1.2, 1e-9));
+    // 80 steps cannot: sqrt(192000*80) = 3919 -> 0.61 rev/s, half the cruise.
+    expect(cal.peakRevsPerSec(80, accel, cruise, ms), closeTo(0.6124, 1e-3));
+    expect(cal.peakRevsPerSec(80, accel, cruise, ms),
+        lessThan(cal.peakRevsPerSec(800, accel, cruise, ms)));
+  });
+
   test('a different motor only changes the full-steps constant', () {
     // 1.8 degree motor would be 200 full steps per revolution
     const other = MotorCal(fullStepsPerRev: 200);
