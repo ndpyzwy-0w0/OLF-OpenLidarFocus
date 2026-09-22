@@ -53,6 +53,7 @@ void protocolSendStatusV2(const IPAddress &ip, uint16_t port, uint8_t sequence) 
   p.target = motorTarget();
   p.position_trusted = motorPositionTrusted() ? 1 : 0;
   p.fault = 0;
+  p.reserved = motorWatchdogArmed() ? FF_V2_WATCHDOG_ARMED : 0;
   udp->beginPacket(ip, port);
   udp->write(reinterpret_cast<uint8_t *>(&p), sizeof(p));
   udp->endPacket();
@@ -120,11 +121,11 @@ static void protocolSendTmc(const IPAddress &ip, uint16_t port) {
 static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
   switch (in.cmd) {
     case FF_SET_POS:
-      motorNoteControlPacket();
+      motorNoteControlPacket((in.flags & FF_REQ_LATCH) != 0);
       motorSetPos(in.a);
       break;
     case FF_JOG:
-      motorNoteControlPacket();
+      motorNoteControlPacket((in.flags & FF_REQ_LATCH) != 0);
       motorJog(in.a);
       break;
     case FF_STOP:

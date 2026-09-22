@@ -14,6 +14,8 @@ static const int PIN_BTN = 0;
 
 static const char *kPass = "ffdebug1";
 static const uint8_t kApChannel = 1;
+// 允许多台设备同时接入（手机 + 调试机），协议仍约定同一时刻只有一个控制器在发命令。
+static const uint8_t kApMaxStations = 4;
 
 static DNSServer dns;
 static WebServer http(80);
@@ -54,6 +56,14 @@ async function ping(){
 static void handleRoot() { http.send(200, "text/html; charset=utf-8", kPage); }
 static void handlePing() { http.send(200, "text/plain", "ok"); }
 static void handleCaptive() { http.sendHeader("Location", "/", true); http.send(302, "text/plain", ""); }
+
+// iOS/Android 的联网探测必须按各自规范回答，否则系统会判定本 AP 是强制门户并弹
+// “登录网络”面板，干扰 App 的 UDP 连接。人类随便输网址仍由 onNotFound 跳到根页面。
+static void handleAppleProbe() {
+  http.send(200, "text/html",
+            "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+}
+static void handleAndroidProbe() { http.send(204, "text/plain", ""); }
 
 static void onWiFiEvent(WiFiEvent_t event) {
   switch (event) {
@@ -103,16 +113,16 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   deviceBegin();
-  WiFi.softAP(deviceId(), kPass, kApChannel, false, 1);
+  WiFi.softAP(deviceId(), kPass, kApChannel, false, kApMaxStations);
   delay(100);
 
   IPAddress ip = WiFi.softAPIP();
   dns.start(53, "*", ip);
   http.on("/", handleRoot);
   http.on("/ping", handlePing);
-  http.on("/hotspot-detect.html", handleRoot);
-  http.on("/library/test/success.html", handleRoot);
-  http.on("/generate_204", handlePing);
+  http.on("/hotspot-detect.html", handleAppleProbe);
+  http.on("/library/test/success.html", handleAppleProbe);
+  http.on("/generate_204", handleAndroidProbe);
   http.onNotFound(handleCaptive);
   http.begin();
   udp.begin(kUdpPort);

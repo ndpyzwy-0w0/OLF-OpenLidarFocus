@@ -35,7 +35,11 @@ bool motorMoving();
 bool motorLimitHit();
 bool motorUartOk();
 bool motorPositionTrusted();
-void motorNoteControlPacket();
+// 记录一次控制包到达。latched=false（流式）会重新武装通信看门狗，要求 App 持续发包；
+// latched=true（单次锁存）只更新时间戳并解除看门狗，本次移动由固件跑完。
+void motorNoteControlPacket(bool latched = false);
+// 通信看门狗是否武装：武装 + 运动中 + 静默超过阈值 => 固件刹停。
+bool motorWatchdogArmed();
 void motorCommunicationTick();
 const char *motorUartHint();
 

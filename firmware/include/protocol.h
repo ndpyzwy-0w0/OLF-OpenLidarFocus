@@ -40,6 +40,20 @@ enum FfFlag : uint8_t {
   FF_FLAG_LIMITED = 16, // 最近一次位置命令被软限位夹紧
 };
 
+// 请求包的 flags 字节（偏移 2）在命令方向另有含义，回包仍用 FfFlag：
+//   位 0 为 0 = 流式（默认）。命令纳入通信看门狗：运动期间 App 必须持续发新的
+//               控制包，静默超过看门狗阈值即被刹停。
+//   位 0 为 1 = 单次锁存。本次移动不纳入看门狗，App 发一次即可，固件自行跑完；
+//               此时若 App 失联，移动会走到目标再停下（软限位照常生效）。
+// 只有 SET_POS / JOG 解释该字节，其它命令忽略。未定义的位保留，固件忽略未知位。
+static const uint8_t FF_REQ_LATCH = 0x01;
+
+// FfStatusV2.reserved 位定义。
+// 1 = 通信看门狗已武装：运动期间 App 寂静超过阈值就会被刹停，必须持续发包。
+// 武装后要等 STOP / ENABLE(0) / HOME / 看门狗超时才会解除，所以静止时也可能读到 1，
+// 判断“现在必须持续发包吗”要与 FF_FLAG_MOVING 一起看。
+static const uint16_t FF_V2_WATCHDOG_ARMED = 0x0001;
+
 // Upper three flag bits carry the latest command result.
 static const uint8_t FF_RESULT_SHIFT = 5;
 static const uint8_t FF_RESULT_MASK = 0xE0;

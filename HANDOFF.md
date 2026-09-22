@@ -34,9 +34,10 @@ iPhone Pro 真机。
 | 主机侧 Wi-Fi 扫描和列表 | 尚未实现，属于下一阶段 |
 | Flutter Windows 调试界面 | 可运行 |
 | Flutter 协议和单测 | 25 项通过 |
-| 通信失联停止 | 已实现，控制包超时 1000 ms |
+| 通信失联停止 | 已实现，控制包超时 1000 ms；请求 `flags` 位 0 = 单次锁存可豁免，见 §7 |
 | 手动 HOME / `positionTrusted` | 已实现 |
-| 自动化 UDP 验收脚本 | 已完成，需在实际硬件/Wi-Fi 环境运行 |
+| 固件协议契约文档 | [PROTOCOL.md](PROTOCOL.md)，wire 层唯一权威来源 |
+| 自动化 UDP 验收脚本 | 已完成，真机 8/8 通过（含单次锁存用例） |
 | iOS LiDAR | 代码存在，未在本 Windows 环境验证 |
 
 最近提交：
@@ -173,13 +174,28 @@ SSID 和发现回包里的 `device_id` 都由 [firmware/src/device.cpp](firmware
 `netsh wlan show networks` 返回的是缓存，刚上电/刚重启后可能扫不到新 SSID，
 隔几秒重试即可，验证 SSID 不需要真的连上去。
 
-HTTP 根页面可用于简单延迟测试。DNS captive portal 会把未知 HTTP 路径重定向到根页面。
-Wi-Fi sleep 已关闭。
+HTTP 根页面可用于简单延迟测试。Wi-Fi sleep 已关闭。AP 最多允许 4 台客户端同时接入
+（手机 + 调试机），但协议约定同一时刻只有一个控制器发命令。
+
+captive portal 现在按 iOS/Android 规范应答，目的是**不**弹出"需要登录网络"面板（否则
+系统面板会打断 App 的 UDP 连接）：`/hotspot-detect.html` 和 `/library/test/success.html`
+返回 `200` + `<HTML>…Success…</HTML>`，`/generate_204` 返回 `204`。只有人类乱输的未知
+路径才 `302` 跳根页面（DNS 通配把任意域名解析到 `192.168.4.1`）。真机实测：
+
+```text
+/hotspot-detect.html        -> 200 text/html  <HTML>…Success…</HTML>
+/library/test/success.html  -> 200
+/generate_204               -> 204
+/some/random/url            -> 302 Location: http://192.168.4.1/
+```
 
 Flutter 当前 [MotorLink](<J:/New%20soft%20project/iphone-follow-focus/lib/ff_protocol.dart:241>)
 使用 UDP，不建立 TCP 连接。现阶段默认目标仍是 `192.168.4.1:4210`。
 
 ### 当前协议
+
+> **完整 wire 契约见 [PROTOCOL.md](PROTOCOL.md)**：字段布局、回包数量不对称、请求 `flags`
+> 锁存位、已验证的十六进制样例、上位机实现检查清单。本节只保留速查内容。
 
 普通包固定 12 字节，小端：
 
@@ -207,6 +223,20 @@ offset 8: b int32
 | `0x09` | `TMC_SET` | `a=key, b=value` |
 | `0x0A` | `HOME` | 手动软件校零 |
 | `0x0B` | `DISCOVER` | 无，回 `0x84`，且**不**附状态包 |
+
+请求包的 `flags`（偏移 2）本版只定义位 0：`0x01 = FF_REQ_LATCH`（单次锁存，语义见 §7）。
+只有 `SET_POS`/`JOG` 解释它，其它命令忽略它；未定义的位一律忽略，便于前向兼容。
+
+**回包数量是不对称的**，上位机不要一律"等第二个包"：
+
+| 请求 | 回包 |
+| --- | --- |
+| `QUERY`、`HOME` | `STATUS` + `STATUS_V2`（两个） |
+| `TMC_QUERY`、`TMC_SET` | 只有 `TMC_DUMP`（**没有** `STATUS`） |
+| `DISCOVER` | 只有 `DISCOVER_REPLY` |
+| 其它合法命令、未知命令 | 1 个 `STATUS` |
+
+只有"长度 < 12"或"首字节 ≠ 0x46"的报文才被当成非协议包**原样回显**（用于链路探测）。
 
 旧状态 `0x81` 仍是 12 字节。`QUERY` 当前会返回旧状态和 `STATUS_V2`。
 `HOME` 也会连续返回这两个状态包。`STATUS_V2 = 0x83`，固定 16 字节：
@@ -239,6 +269,10 @@ flags 高 3 位是最近命令结果：
 ```
 
 sequence 用于把回复和请求关联。它只证明命令被接收并回复，不代表机械动作已经完成。
+
+`STATUS_V2.reserved`（偏移 14，小端 uint16）位 0 = `FF_V2_WATCHDOG_ARMED (0x0001)`，
+表示当前是否处于"流式看门狗监视"状态，见 §7。`STATUS_V2.fault` 目前恒为 0，故障只能
+通过 `TMC_DUMP.drv_flags` / `uart_ok` 判断。
 
 `STATUS` 和 `STATUS_V2` 使用同一个提升逻辑：`accepted` 在 `pos == target`
 且不再运动时变为 `completed`。两种包的 `result` 始终一致。
@@ -295,8 +329,27 @@ communicationWatchdogArmed = false
 commandResult = STOPPED
 ```
 
-自动跟焦必须持续发送最新 `SET_POS`。当前没有区分自动会话和手动会话，长距离手动
-SET_POS 也会受此规则影响。
+由请求包 `flags`（偏移 2）位 0 选择模式，只有 `SET_POS`/`JOG` 解释它：
+
+| `flags` 位 0 | 模式 | 语义 |
+| --- | --- | --- |
+| `0`（默认） | 流式 | 本次移动纳入看门狗：必须持续发新包，静默 > 1 s 就刹停 |
+| `1`（`FF_REQ_LATCH = 0x01`） | 单次锁存 | 本次移动**不**纳入看门狗：发一次即可跑完；此时失联，移动会走到目标才停（软限位照常生效） |
+
+可观测性：`STATUS_V2.reserved` 位 0 = `FF_V2_WATCHDOG_ARMED`。它表示"当前处于流式监视
+模式"，在一次流式移动跑完之后**仍然为 1**（清除时机只有 `STOP`/`ENABLE(0)`/`HOME`/超时），
+所以要判断"此刻失联会不会被刹停"必须写成 `ARMED && MOVING`。
+
+选择建议：
+
+- **自动跟焦 / 手轮类连续控制**：流式，持续发最新目标。目标没变也应每 200–500 ms 重发
+  （重复同一个 `SET_POS` 是幂等的，且会解除待机），否则一次 >1 s 的行程会被截断。
+- **一次性长行程**（"移动到某位置"、标定）：用锁存位，一次发完，不会被 1 s 阈值截断。
+
+已知问题在**上位机侧**：当前 Windows/Dart 版 App 只在目标变化时才发 `SET_POS`
+（[lib/main.dart](lib/main.dart) 附近），没有保活定时器，所以任何超过 1 s 的行程都会被
+看门狗截断 —— 这正是"控制有时候不灵"的根因。修法是加保活或改用锁存位，固件行为本身
+符合契约。真机对照证据见 §9。
 
 ### HOME
 
@@ -315,6 +368,10 @@ positionTrusted = true
 
 上电不会自动使能，避免电机突然带电。Flutter 连接后根据用户意图补发 `ENABLE`。
 待机功能默认开启，静止约 2.5 s 后释放驱动；新的 JOG/目标会唤醒。
+
+待机释放扭矩时**不清** `positionTrusted`，这是刻意的例外（不同于 `ENABLE(0)` 会清）。
+所以长时间待机 / 人工拧过镜头之后，开环 `pos` 仍被标记可信，必要时用 `HOME` 重新校零。
+`TMC_STANDBY`（TMC_SET `key=7`，`1`=开启，`0`=关闭）会写进 NVS 持久化。
 
 ## 8. Flutter 调试程序
 
@@ -407,21 +464,26 @@ platformio device monitor -d firmware -p COM19 -b 115200
 python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 ```
 
-脚本覆盖 ENABLE、JOG、HOME/STATUS_V2、SET_POS、STOP、反向、软限位、待机唤醒和
-通信超时。必须连接设备 AP（`FF-XXXXXX`）并接好电机后运行；没有硬件时只能做语法/编译验证。
+脚本覆盖 ENABLE、JOG、HOME/STATUS_V2、SET_POS、STOP、反向、软限位、待机唤醒、
+通信超时和单次锁存。必须连接设备 AP（`FF-XXXXXX`）并接好电机后运行；没有硬件时只能
+做语法/编译验证。
 
-该脚本会真实驱动电机（整轮往返约 2 圈，最大单次连续约 1.3 圈），运行前先确认镜头
-行程内没有障碍物。
+该脚本会真实驱动电机（整轮往返约 4 圈，单次最长 12000 步 ≈ 3.75 圈 / 约 1.9 s），
+运行前先确认镜头行程内没有障碍物。
 
-2026-09-22 已在 `FF-75A578` 上完整跑过两轮：**7/7 全部通过，exit 0**。第二轮在
-唯一 SSID + 发现协议改动之后，用于确认改动没有牵连影响。
-其中两组结果最能说明问题：
+已在 `FF-75A578` 上跑过多轮：最初两轮 7/7，加入单次锁存位和 AP 多客户端改动之后的
+最近一轮 **8/8 全部通过，exit 0**。每次固件改动后都重跑，用于确认没有牵连影响。
+其中三组结果最能说明问题：
 
 - SET_POS：同一个 `seq` 的 legacy `STATUS` 和 `STATUS_V2` 都在动作结束后报
   `completed`（`pos == target == 32`）。修复前 `STATUS_V2` 会停留在 `accepted`，
   本组即失败。
-- 通信超时：请求 19000 步，实际走到 6417 步被看门狗刹停，`result == stopped`，
-  且 `target` 被 `motorStop()` 重锚为 6417。
+- 通信超时：请求 19000 步，实际走到 6202 步被看门狗刹停，`result == stopped`，
+  且 `target` 被 `motorStop()` 重锚为 6202。该组同时断言 `QUERY` 不刷新看门狗
+  （发 `QUERY` 不能续命）和流式移动期间 `STATUS_V2` 的 ARMED 位为 1。
+- 单次锁存：同一个 12000 步的锁存 `SET_POS` **只发一次**，静默 1.25 s 后仍在运动并
+  最终 `completed`；对照组的流式命令在同样静默下被停在 6202 步、`result == stopped`。
+  这一对是"短行程能跑、长行程会被截断"的直接证据。
 
 `trusted` 会在两种情况下回到 0：上电/烧录后（此时 `pos = 0`），以及
 `motorSetEnabled(false)`。后者是刻意的 —— 驱动器不再保持扭矩，开环步数不再可信。
@@ -432,12 +494,15 @@ python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 超时而非断言失败（`socket.timeout` 的字符串恰好就是 `"timed out"`）。本项目实测
 这种情况全部由 Wi-Fi 掉线引起，先确认 `192.168.4.1` 能 ping 通再重跑。
 
-两处容易误改的地方：
+三处容易误改的地方：
 
 - SET_POS 组会同时校验 `STATUS` 和 `STATUS_V2` 对已完成的动作都报 `completed`。
 - 通信超时组不能断言 `pos != target`：`motorStop()` 会把 `target` 重锚到停止位置，
   所以停止后 `pos == target` 恒成立。该组判定的是“没有到达请求的 19000 步”
   且 `result == stopped`。
+- 单次锁存组的两个 `SET_POS` 必须打上 `flags = 0x01`，忘了就是流式，会在 1 s 后被
+  刹停而失败；断言"静默后仍在运动"的等待时间必须 > 1000 ms（当前用 1.25 s），
+  但又要小于该行程的运动时长（12000 步 ≈ 1.9 s），否则动作已经结束。
 
 验收时不能只看软件 `pos`。应同时观察电机是否实际转动，并用 TMC 状态判断：
 
@@ -470,13 +535,19 @@ python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 ### 固件
 
 - 实现持久化 fault code，而不是当前 `STATUS_V2.fault = 0`。
-- 评估自动跟焦和手动控制是否需要不同看门狗策略。
+- ~~评估自动跟焦和手动控制是否需要不同看门狗策略。~~ **已实现**：请求 `flags` 位 0 =
+  单次锁存（`FF_REQ_LATCH`），`STATUS_V2.reserved` 位 0 = ARMED 作为可观测性，见 §7。
+  固件侧已完成并真机验收，剩下的修改在 App 侧（见下）。
 - 增加独立最大减速度和 jerk/S 曲线 profile。
 - 接入真实机械限位后扩展 HOME 为自动回零。
 - 如硬件允许，增加编码器闭环；开环 `pos` 不能证明机械真实位置。
 
 ### Flutter/iOS
 
+- **修长行程被看门狗截断**（"控制有时候不灵"的根因）：[lib/main.dart](lib/main.dart)
+  只在目标变化时发 `SET_POS`，没有保活。要么在运动未完成期间每 200–500 ms 重发当前
+  目标（幂等，见 [PROTOCOL.md](PROTOCOL.md) §7），要么对一次性长行程改发
+  `flags = 0x01` 的锁存命令。
 - 实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。
 - 把固定 `192.168.4.1` 替换为设备发现结果。
 - 完善 HOME 提示，明确它是软件校零而非机械回零。
@@ -491,4 +562,26 @@ python test\udp_motion_acceptance.py --host 192.168.4.1 --port 4210
 - 不要重新引入 `neopixelWrite`。
 - 修改 STEP 输出时，必须保持“实际 STEP 脉冲完成后才推进 `currentPos`”。
 - 修改协议时保留旧 12 字节客户端兼容，新增字段优先使用新命令/新包。
+- **协议以 [PROTOCOL.md](PROTOCOL.md) 为准**：改协议/看门狗语义时先改它，再改代码。
 - 触碰电机、电流或引脚前先阅读本文和 [CONTROL_ARCHITECTURE.md](<J:/New%20soft%20project/iphone-follow-focus/CONTROL_ARCHITECTURE.md>)。
+
+## 12. 文件归属与协同边界
+
+本仓库由多个 agent/会话并行改动，请按目录认领，避免互相踩：
+
+| 归属 | 路径 | 说明 |
+| --- | --- | --- |
+| 固件侧 | `firmware/**`、`test/**`、[PROTOCOL.md](PROTOCOL.md) | 协议、运动控制、验收脚本 |
+| 上位机侧 | `lib/**`、`ios/**`、`pubspec.yaml` | Flutter / iOS App |
+| 共享 | [HANDOFF.md](HANDOFF.md)、[README.md](README.md)、[CONTROL_ARCHITECTURE.md](<J:/New%20soft%20project/iphone-follow-focus/CONTROL_ARCHITECTURE.md>) | 改前先确认没有别人正在同一段落工作 |
+
+协同规则：
+
+- **协议只认 [PROTOCOL.md](PROTOCOL.md)**。上位机照它实现；需要新字段/新语义时，先让固件
+  侧在 PROTOCOL.md 写清楚再实现，不要两边各自解读。
+- 固件的任何行为变化（新的 `flags` 位、新的回包、看门狗/锁存语义）必须同一次改动里同步
+  更新 PROTOCOL.md 和本文 §7，并在真机重跑 `test/udp_motion_acceptance.py`。
+- 上位机不要依赖 `STATUS_V2.fault`（恒 0）、不要假设未定义位为 0、不要对单包回复"等第二
+  个包"（见 §6 回包数量表）。
+- 同一时刻只允许一个控制器发命令（AP 可接 4 台客户端，但控制权不共享）。
+- 固件改动后 App 无需重新协商协议版本；但如果新增了字段，App 必须能在字段为 0 时退化工作。

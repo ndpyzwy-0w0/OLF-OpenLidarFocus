@@ -453,10 +453,12 @@ static void wake() {
   applyEnable();
 }
 
-void motorNoteControlPacket() {
+void motorNoteControlPacket(bool latched) {
   lastControlPacketMs = millis();
-  communicationWatchdogArmed = true;
+  communicationWatchdogArmed = !latched;
 }
+
+bool motorWatchdogArmed() { return communicationWatchdogArmed; }
 
 void motorCommunicationTick() {
   if (!communicationWatchdogArmed || !enabled || !motorMoving()) return;

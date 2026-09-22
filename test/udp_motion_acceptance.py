@@ -27,6 +27,11 @@ CMD_HOME = 0x0A
 CMD_STATUS = 0x81
 CMD_STATUS_V2 = 0x83
 
+# 请求包 flags（偏移 2）位 0：单次锁存，本次移动不纳入通信看门狗。
+REQ_LATCH = 0x01
+# STATUS_V2.reserved 位 0：通信看门狗已武装。
+V2_WATCHDOG_ARMED = 0x0001
+
 FLAG_ENABLED = 1
 FLAG_MOVING = 2
 FLAG_STANDBY = 8
@@ -63,7 +68,7 @@ class MotionAcceptance:
 
     def _status(self, data):
         if len(data) >= 16 and data[0] == MAGIC and data[1] == CMD_STATUS_V2:
-            _, _, flags, sequence, pos, target, trusted, fault, _ = struct.unpack(
+            _, _, flags, sequence, pos, target, trusted, fault, v2_bits = struct.unpack(
                 "<BBBBiiBBH", data[:16]
             )
         elif len(data) >= PACKET_SIZE:
@@ -72,7 +77,7 @@ class MotionAcceptance:
             )
             if command != CMD_STATUS:
                 raise AcceptanceError("unexpected reply command 0x%02x" % command)
-            trusted, fault = None, None
+            trusted, fault, v2_bits = None, None, None
         else:
             raise AcceptanceError("short reply (%d bytes)" % len(data))
         result_code = (flags >> 5) & 0x07
@@ -89,6 +94,7 @@ class MotionAcceptance:
             "flags": flags,
             "trusted": trusted,
             "fault": fault,
+            "v2_bits": v2_bits,
         }
         print(
             "seq={sequence:3d} pos={pos:6d} target={target:6d} "
@@ -96,11 +102,11 @@ class MotionAcceptance:
         )
         return status
 
-    def command(self, command, a=0, b=0):
+    def command(self, command, a=0, b=0, flags=0):
         if command == CMD_HOME:
             return self.home()
         sequence = self._next_sequence()
-        self.sock.send(struct.pack(PACKET, MAGIC, command, 0, sequence, a, b))
+        self.sock.send(struct.pack(PACKET, MAGIC, command, flags, sequence, a, b))
         deadline = time.monotonic() + self.args.timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -265,11 +271,15 @@ class MotionAcceptance:
         self.move_to(before + 8)
 
     def test_communication_timeout(self):
-        """A moving axis must stop after >1 s without another control packet."""
+        """流式命令（flags=0）：运动中静默超过 1 s 必须被刹停。"""
         self.command(CMD_SET_LIMITS, -30000, 30000)
         self.move_to(0)
         status = self.command(CMD_SET_POS, 19000)
         self.expect(status["target"] == 19000, "long SET_POS target was not accepted")
+        # QUERY 不刷新看门狗，所以这里必须验证看门狗确实被武装了。
+        _, v2 = self.query_v2()
+        self.expect(bool(v2["v2_bits"] & V2_WATCHDOG_ARMED),
+                    "streaming SET_POS did not arm the communication watchdog")
         time.sleep(1.25)
         status = self.query()
         self.expect(not status["moving"], "communication timeout did not stop motion")
@@ -280,6 +290,34 @@ class MotionAcceptance:
         self.expect(status["result"] == "stopped",
                     "communication timeout reported result %r" % status["result"])
 
+    def test_latched_single_shot_move(self):
+        """单次锁存（flags=REQ_LATCH）：只发一次，静默也必须跑完长行程。
+
+        与 test_communication_timeout 配对：那条验证流式命令会被静默刹停，
+        这条验证同一条路径上锁存命令不受影响——App 手动单次移动和一次性
+        SET_POS 靠它，否则只要行程超过 1 s 就会被截断。
+        """
+        self.home()  # 软件置零：把后续行程锚在当前物理位置，不动电机
+        self.command(CMD_SET_LIMITS, -30000, 30000)
+        _, v2 = self.query_v2()
+        self.expect(not (v2["v2_bits"] & V2_WATCHDOG_ARMED),
+                    "idle axis reported an armed communication watchdog")
+
+        status = self.command(CMD_SET_POS, 12000, flags=REQ_LATCH)
+        self.expect(status["target"] == 12000, "latched SET_POS target was not accepted")
+        _, v2 = self.query_v2()
+        self.expect(not (v2["v2_bits"] & V2_WATCHDOG_ARMED),
+                    "latched SET_POS armed the communication watchdog")
+
+        time.sleep(1.25)  # 远超看门狗阈值，且 QUERY 不会刷新看门狗
+        status = self.query()
+        self.expect(status["moving"], "latched motion stopped after 1.25 s of silence")
+        status = self.wait_for(
+            lambda s: s["pos"] == 12000 and not s["moving"], "latched move completion"
+        )
+        self.expect(status["result"] == "completed",
+                    "latched move reported result %r" % status["result"])
+
     def run(self):
         tests = (
             ("ENABLE and JOG +/-8/+/-80", self.test_enable_and_jogs),
@@ -289,6 +327,7 @@ class MotionAcceptance:
             ("soft limits", self.test_soft_limits),
             ("standby wakeup", self.test_standby_wakeup),
             ("communication timeout", self.test_communication_timeout),
+            ("latched single-shot move", self.test_latched_single_shot_move),
         )
         failures = 0
         try:

@@ -4,6 +4,7 @@
   python jog.py enable
   python jog.py jog 400
   python jog.py pos 0
+  python jog.py --latch pos 40000   # single-shot latch: the comms watchdog cannot cut it short
   python jog.py stop
   python jog.py disable
 """
@@ -15,6 +16,7 @@ import sys
 ADDR = ("192.168.4.1", 4210)
 FMT = "<BBBBii"
 MAGIC = 0x46
+REQ_LATCH = 0x01  # request flags bit 0: latched move, not covered by the watchdog
 CMD = {
     "set_pos": 0x01,
     "jog": 0x02,
@@ -48,11 +50,12 @@ def selfcheck():
     raw2 = pack(CMD["status"], -99, 100, FLAG_ENABLED | FLAG_MOVING)
     p2 = unpack(raw2)
     assert p2["flags"] == 3 and p2["a"] == -99
+    assert pack(CMD["set_pos"], 1, flags=REQ_LATCH)[2] == REQ_LATCH
     print("selfcheck ok  packet=12 bytes")
 
 
-def send(sock, cmd, a=0, b=0):
-    sock.sendto(pack(cmd, a, b), ADDR)
+def send(sock, cmd, a=0, b=0, flags=0):
+    sock.sendto(pack(cmd, a, b, flags), ADDR)
     try:
         data, _ = sock.recvfrom(64)
     except socket.timeout:
@@ -73,6 +76,10 @@ def send(sock, cmd, a=0, b=0):
     return p
 
 
+def flags_for(args):
+    return REQ_LATCH if args.latch else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", nargs="?", default="status",
@@ -80,6 +87,9 @@ def main():
                              "stop", "pos", "jog", "limits", "speed"])
     ap.add_argument("a", nargs="?", type=int, default=0)
     ap.add_argument("b", nargs="?", type=int, default=0)
+    ap.add_argument("--latch", action="store_true",
+                    help="latched single-shot move: send once, the comms watchdog "
+                         "will not stop it (applies to pos/jog)")
     args = ap.parse_args()
     if args.cmd == "selfcheck":
         selfcheck()
@@ -95,9 +105,9 @@ def main():
     elif args.cmd == "stop":
         send(sock, CMD["stop"])
     elif args.cmd == "pos":
-        send(sock, CMD["set_pos"], args.a)
+        send(sock, CMD["set_pos"], args.a, flags=flags_for(args))
     elif args.cmd == "jog":
-        send(sock, CMD["jog"], args.a)
+        send(sock, CMD["jog"], args.a, flags=flags_for(args))
     elif args.cmd == "limits":
         send(sock, CMD["limits"], args.a, args.b)
     elif args.cmd == "speed":
