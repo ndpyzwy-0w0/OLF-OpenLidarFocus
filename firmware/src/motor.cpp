@@ -42,6 +42,7 @@ static const uint32_t kStandbyDelayMs = 2500;
 static bool movePending = false;
 static int32_t pendingTarget = 0;
 static uint32_t pendingSince = 0;
+static const uint32_t kMoveUpdateDelayMs = 50;
 
 static uint8_t tmcSlave = 0;
 static uint8_t tmcVer = 0;
@@ -391,7 +392,7 @@ void motorSetPos(int32_t steps) {
   }
   target = clampLim(steps);
   limitHit = target != steps;
-  if (needsRecovery) {
+  if (needsRecovery || stepper->isRunning()) {
     pendingTarget = target;
     pendingSince = millis();
     movePending = true;
@@ -411,7 +412,7 @@ void motorJog(int32_t delta) {
   const int32_t requested = target + delta;
   target = clampLim(requested);
   limitHit = target != requested;
-  if (needsRecovery) {
+  if (needsRecovery || stepper->isRunning()) {
     pendingTarget = target;
     pendingSince = millis();
     movePending = true;
@@ -506,7 +507,7 @@ void motorSetEnabled(bool on) {
 void motorStandbyTick() {
   engine.manageSteppers();
   wedgedTick();  // 每 loop 都要跑，与待机无关
-  if (movePending && stepper && millis() - pendingSince >= 50) {
+  if (movePending && stepper && millis() - pendingSince >= kMoveUpdateDelayMs) {
     movePending = false;
     queueMoveTo(pendingTarget);
   }
