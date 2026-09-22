@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'ff_protocol.dart';
 import 'lens_lut.dart';
 import 'lidar.dart';
+import 'motor_cal.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -62,6 +63,13 @@ class _FollowPageState extends State<FollowPage> {
   int _accel = 200000;
   bool _standbyFeature = true; // 待机自动断电开关（固件默认开）
   bool _standbyOff = false;    // 当前是否已断电（来自固件状态位）
+  // 用户意图：板子重启后固件 enabled 会归零，这里负责自动补一次使能，
+  // 否则点“走步”会被电机端的 `if (!enabled) return;` 静默忽略。
+  bool _wantEnabled = false;
+  DateTime _lastEnableAttempt = DateTime.fromMillisecondsSinceEpoch(0);
+  final _cal = const MotorCal();
+  final _revsText = TextEditingController(text: '1');
+  final _stepsText = TextEditingController(text: '800');
   double _slider = 0.5;
   double? _distance;
   double _u = 0.5;
@@ -142,6 +150,12 @@ class _FollowPageState extends State<FollowPage> {
       _lastTmc = now;
       _link.queryTmc();
     }
+    // 板子重启后固件 enabled=0，App 这边补一次使能，让状态自愈。
+    if (_wantEnabled && !_enabled &&
+        now.difference(_lastEnableAttempt) > const Duration(seconds: 1)) {
+      _lastEnableAttempt = now;
+      _link.enable(true);
+    }
     if (!_enabled) return;
     int? want;
     if (_auto) {
@@ -154,6 +168,35 @@ class _FollowPageState extends State<FollowPage> {
     if (want == null || want == _lastSent) return;
     _lastSent = want;
     _link.setPos(want);
+  }
+
+  int get _spr => _cal.stepsPerRev(_tmc?.microsteps ?? 16);
+
+  /// 走步/走圈都走同一条相对运动命令（JOG），不在固件里另加指令。
+  void _jog(int delta) {
+    if (!_open) return;
+    if (!_enabled) {
+      // 板子重启后固件是关的；先补使能，否则这一步会被静默忽略。
+      _wantEnabled = true;
+      _lastEnableAttempt = DateTime.now();
+      _link.enable(true);
+      setState(() => _msg = '已发送使能，再点一次走步');
+      return;
+    }
+    _link.jog(delta);
+    _sliderDirty = false;
+  }
+
+  void _goSteps(int sign) {
+    final n = int.tryParse(_stepsText.text.trim());
+    if (n == null || n == 0) return;
+    _jog(sign * n.abs());
+  }
+
+  void _goRevs(int sign) {
+    final r = double.tryParse(_revsText.text.trim());
+    if (r == null || r == 0) return;
+    _jog(sign * _cal.revsToSteps(r.abs(), _tmc?.microsteps ?? 16));
   }
 
   int _lo() => _lut.minSteps ?? -20000;
@@ -171,6 +214,8 @@ class _FollowPageState extends State<FollowPage> {
       await _link.open();
       _link.setSpeed(_speedHz, _accel);
       _link.setTmc(kTmcStandby, _standbyFeature ? 1 : 0);
+      _wantEnabled = true;
+      _lastEnableAttempt = DateTime.now();
       _link.enable(true);
       _link.query();
       _link.queryTmc();
@@ -198,6 +243,8 @@ class _FollowPageState extends State<FollowPage> {
     _tick?.cancel();
     _lidar.dispose();
     _link.close();
+    _revsText.dispose();
+    _stepsText.dispose();
     super.dispose();
   }
 
@@ -261,6 +308,7 @@ class _FollowPageState extends State<FollowPage> {
                         label: const Text('使能'),
                         selected: _enabled,
                         onSelected: (v) {
+                          _wantEnabled = v;
                           _link.enable(v);
                           if (!v) _lastSent = null;
                         },
@@ -300,18 +348,65 @@ class _FollowPageState extends State<FollowPage> {
                               _lastSent = null;
                             }),
                   ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
                     children: [
-                      for (final d in [-800, -80, 80, 800])
+                      for (final d in [-800, -80, -8, 8, 80, 800])
                         OutlinedButton(
-                          onPressed: () {
-                            _link.jog(d);
-                            _sliderDirty = false;
-                          },
+                          onPressed: () => _jog(d),
                           child: Text(d > 0 ? '+$d' : '$d'),
                         ),
                     ],
+                  ),
+                  const Divider(height: 16),
+                  // 步 / 圈，对照 esp32s3-tb6600-stepper 上位机。
+                  Row(
+                    children: [
+                      const Text('步'),
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: 90,
+                        child: TextField(
+                          controller: _stepsText,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(onPressed: () => _goSteps(1), child: const Text('走步')),
+                      OutlinedButton(onPressed: () => _goSteps(-1), child: const Text('反向')),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      const Text('圈'),
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: 90,
+                        child: TextField(
+                          controller: _revsText,
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(onPressed: () => _goRevs(1), child: const Text('走圈')),
+                      OutlinedButton(onPressed: () => _goRevs(-1), child: const Text('反向')),
+                    ],
+                  ),
+                  Text(
+                    '脉冲/圈 $_spr（0.9° 电机 = ${_cal.fullStepsPerRev} 整步/圈 × '
+                    '1/${_tmc?.microsteps ?? 16} 细分）；当前位置 '
+                    '${_cal.stepsToRevs(_pos, _tmc?.microsteps ?? 16).toStringAsFixed(2)} 圈',
+                    style: const TextStyle(fontSize: 11),
                   ),
                   Text('速度 $_speedHz step/s'),
                   Slider(

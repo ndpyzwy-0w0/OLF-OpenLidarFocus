@@ -2,6 +2,7 @@
 #include "protocol.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <string.h>
 #include <FastAccelStepper.h>
 #include "driver/gpio.h"
@@ -49,6 +50,35 @@ static uint16_t tmcMs = kMicrosteps;
 static uint32_t tmcDrv = 0;
 static uint16_t tmcSg = 0;
 static uint16_t tmcTstep = 0;
+
+// ---- 参数持久化（NVS）----
+// TMC 参数存进 flash，重启后不再回到默认值。
+// 不持久化 enabled：开机自动使能电机是危险的，改由 App 在连上后自己重新使能。
+static void tmcLoad() {
+  Preferences p;
+  if (!p.begin("tmc", true)) return;
+  tmcRmsMa = p.getUShort("rms", kRmsMa);
+  tmcHoldMa = p.getUShort("hold", kHoldMa);
+  tmcMsSet = p.getUShort("ms", kMicrosteps);
+  tmcToffSet = (uint8_t)p.getUChar("toff", 4);
+  tmcStealthSet = (uint8_t)p.getUChar("stealth", 1);
+  tmcIntpolSet = (uint8_t)p.getUChar("intpol", 1);
+  tmcStandby = (uint8_t)p.getUChar("standby", 1);
+  p.end();
+}
+
+static void tmcSave() {
+  Preferences p;
+  if (!p.begin("tmc", false)) return;
+  p.putUShort("rms", tmcRmsMa);
+  p.putUShort("hold", tmcHoldMa);
+  p.putUShort("ms", tmcMsSet);
+  p.putUChar("toff", tmcToffSet);
+  p.putUChar("stealth", tmcStealthSet);
+  p.putUChar("intpol", tmcIntpolSet);
+  p.putUChar("standby", tmcStandby);
+  p.end();
+}
 
 static uint8_t tmcCrc(const uint8_t *d, uint8_t len) {
   uint8_t crc = 0;
@@ -283,6 +313,8 @@ void motorBegin() {
   pinMode(PIN_EN, OUTPUT);
   digitalWrite(PIN_EN, HIGH);
 
+  tmcLoad();  // 必须在 tmcApply() 之前：把上次保存的参数读回来
+
   engine.init();
 #if defined(SUPPORT_SELECT_DRIVER_TYPE)
   stepper = engine.stepperConnectToPin(PIN_STEP, DRIVER_RMT);
@@ -420,6 +452,7 @@ void motorTmcSet(int32_t key, int32_t val) {
       standbyOff = false;
       applyEnable();
     }
+    tmcSave();
     return;
   }
   if (!uartOk) return;
@@ -455,4 +488,5 @@ void motorTmcSet(int32_t key, int32_t val) {
       return;
   }
   tmcApply();
+  tmcSave();
 }

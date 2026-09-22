@@ -166,6 +166,51 @@ TMC 报文（和 [这篇](https://blog.csdn.net/m0_64386340/article/details/1414
 
 TMCStepper 已从 `platformio.ini` 拿掉。CRC 在 `motor.cpp` 里。
 
+## 为什么“点走步没反应”（已定位）
+
+固件里 `motorJog` / `motorSetPos` 的第一行是：
+
+```c
+if (!stepper || !enabled) return;
+```
+
+**未使能时静默返回**，App 那边看不出任何异常。而 **板子一重启 `enabled` 就归零**，App 只在点「连接电机」时发过一次使能——于是重启之后所有走步/滑条/自动跟焦都像坏了一样。实测对照：
+
+```text
+enabled=0 时 JOG 800 -> pos=0  target=0   ← 被完全忽略
+ENABLE 之后同一 JOG  -> pos=800           ← 正常
+```
+
+修法在 App 侧（固件不该自动使能电机，那样上电就带电很危险）：App 用 `_wantEnabled` 记“用户意图”，发现固件报 `enabled=0` 就自动补发一次使能（1 秒节流）。点走步时若发现没使能，会先发使能并提示“再点一次”。
+
+**规矩：App 端别用“上报的 enabled”当“用户想要的状态”，两者要分开记。**
+
+## 参数持久化（NVS）
+
+TMC 参数存进 flash（`Preferences` 命名空间 `tmc`），重启不再回默认值：
+
+| 键 | 内容 |
+| --- | --- |
+| `rms` | 运行电流 mA |
+| `hold` | 保持电流 mA |
+| `ms` | 细分 |
+| `toff` | 关断时间 |
+| `stealth` | 静音开关 |
+| `intpol` | 微步插值 |
+| `standby` | 待机断电开关 |
+
+写入时机：每次 `motorTmcSet()` 之后；读取在 `motorBegin()` 里、**必须早于 `tmcApply()`**。
+
+**故意不持久化 `enabled`**：开机自动使能电机很危险（会突然带电顶镜头）。要由 App 连上后自己补使能。
+
+实测：设成 1000 mA / 1/32 / toff 7 / spread 后复位，读回仍是这四个值。
+
+## 走步 / 走圈
+
+换算：**0.9° 电机 → 400 整步/圈**，脉冲/圈 = 400 × 细分（1/16 时 = 6400）。逻辑在 `lib/motor_cal.dart`（`MotorCal`），有单测；换 1.8° 电机只改 `fullStepsPerRev = 200`。
+
+**走圈复用 JOG，不在固件里加新指令**：步数 = 圈数 × 脉冲/圈，然后发相对运动。App 面板有 步 / 圈 两个输入框和各自的「走步/走圈/反向」按钮，并显示当前位置是多少圈。
+
 ## 速度 / 加速度（为什么“调速不生效”）
 
 `motorSetSpeed(hz, accel)` 里 **hz 是巡航速度，accel 才是短行程的瓶颈**。位置控制下跑固定距离 d：
