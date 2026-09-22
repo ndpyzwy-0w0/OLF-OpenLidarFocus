@@ -130,6 +130,9 @@ static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
       break;
   }
   protocolSendStatus(ip, port, in.pad);
+  if (in.cmd == FF_QUERY) {
+    protocolSendStatusV2(ip, port, in.pad);
+  }
 }
 
 void protocolBegin(WiFiUDP *u) {
