@@ -413,12 +413,6 @@ void motorJog(int32_t delta) {
   const int32_t requested = target + delta;
   target = clampLim(requested);
   limitHit = target != requested;
-  if (needsRecovery || stepper->isRunning()) {
-    pendingTarget = target;
-    pendingSince = millis();
-    movePending = true;
-    return;
-  }
   movePending = false;
   queueMoveTo(target);
 }
