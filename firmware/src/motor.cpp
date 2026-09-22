@@ -398,6 +398,7 @@ void motorSetPos(int32_t steps) {
     movePending = true;
     return;
   }
+  movePending = false;
   queueMoveTo(target);
 }
 
@@ -418,6 +419,7 @@ void motorJog(int32_t delta) {
     movePending = true;
     return;
   }
+  movePending = false;
   queueMoveTo(target);
 }
 
@@ -491,6 +493,7 @@ uint16_t motorRecoverCount() { return wdCount; }
 
 void motorStop() {
   if (!stepper) return;
+  movePending = false;
   stepper->stopMove();
   target = stepper->getCurrentPosition();
   lastMoveMs = millis();
@@ -534,6 +537,7 @@ void motorSetLimits(int32_t minSteps, int32_t maxSteps) {
   maxLim = maxSteps;
   limExplicit = true;
   if (stepper && enabled) {
+    movePending = false;
     target = clampLim(target);
     limitHit = false;
     queueMoveTo(target);
