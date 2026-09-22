@@ -333,6 +333,14 @@ static void wake() {
 
 static void recoverRunningAtTarget();
 
+static void queueMoveTo(int32_t position) {
+  int8_t result = stepper->moveTo(position);
+  Serial.printf("moveTo pos=%ld rc=%d run=%d queue=%d ramp=%u future=%ld\n",
+                (long)position, result, stepper->isRunning() ? 1 : 0,
+                stepper->isQueueRunning() ? 1 : 0, stepper->rampState(),
+                (long)stepper->getPositionAfterCommandsCompleted());
+}
+
 void motorBegin() {
   pinMode(PIN_EN, OUTPUT);
   digitalWrite(PIN_EN, HIGH);
@@ -381,7 +389,7 @@ void motorSetPos(int32_t steps) {
     movePending = true;
     return;
   }
-  stepper->moveTo(target);
+  queueMoveTo(target);
 }
 
 void motorJog(int32_t delta) {
@@ -399,7 +407,7 @@ void motorJog(int32_t delta) {
     movePending = true;
     return;
   }
-  stepper->moveTo(target);
+  queueMoveTo(target);
 }
 
 // ---- 楔死看门狗 ----
@@ -488,7 +496,7 @@ void motorStandbyTick() {
   wedgedTick();  // 每 loop 都要跑，与待机无关
   if (movePending && stepper && millis() - pendingSince >= 50) {
     movePending = false;
-    stepper->moveTo(pendingTarget);
+    queueMoveTo(pendingTarget);
   }
   if (!enabled || !tmcStandby || standbyOff) return;
   if (motorMoving()) {
@@ -514,7 +522,7 @@ void motorSetLimits(int32_t minSteps, int32_t maxSteps) {
   limExplicit = true;
   if (stepper && enabled) {
     target = clampLim(target);
-    stepper->moveTo(target);
+    queueMoveTo(target);
   }
 }
 
