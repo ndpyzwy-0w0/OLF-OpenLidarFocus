@@ -332,6 +332,12 @@ static void wake() {
 }
 
 static void recoverRunningAtTarget();
+static const int32_t kTargetPositionSlack = 4;
+
+static bool positionNearTarget(int32_t position) {
+  int32_t distance = position - target;
+  return distance >= -kTargetPositionSlack && distance <= kTargetPositionSlack;
+}
 
 static void queueMoveTo(int32_t position) {
   int8_t result = stepper->moveTo(position);
@@ -378,7 +384,7 @@ void motorSetPos(int32_t steps) {
   if (!stepper || !enabled) return;
   wake();
   const bool needsRecovery =
-      stepper->isRunning() && stepper->getCurrentPosition() == target;
+      stepper->isRunning() && positionNearTarget(stepper->getCurrentPosition());
   if (needsRecovery) {
     recoverRunningAtTarget();
   }
@@ -396,7 +402,7 @@ void motorJog(int32_t delta) {
   if (!stepper || !enabled) return;
   wake();
   const bool needsRecovery =
-      stepper->isRunning() && stepper->getCurrentPosition() == target;
+      stepper->isRunning() && positionNearTarget(stepper->getCurrentPosition());
   if (needsRecovery) {
     recoverRunningAtTarget();
   }
@@ -444,11 +450,12 @@ static void wedgedTick() {
     return;
   }
   if (!stepper->isRunning()) return;
-  if (p == target) {
+  if (positionNearTarget(p)) {
     stepper->stopMove();
     if (!stepper->isRunning() || now - wdSince < kRunningAtTargetMs) return;
     wdCount++;
-    resetStepperOutput(p);
+    resetStepperOutput(target);
+    p = target;
     wdSince = now;
     Serial.printf("stepper running at target %ld - force stop #%u\n", (long)p,
                   wdCount);
@@ -468,11 +475,11 @@ static void wedgedTick() {
 static void recoverRunningAtTarget() {
   if (!stepper || !stepper->isRunning()) return;
   const int32_t p = stepper->getCurrentPosition();
-  if (p != target) return;
-  resetStepperOutput(p);
-  wdPos = p;
+  if (!positionNearTarget(p)) return;
+  resetStepperOutput(target);
+  wdPos = target;
   wdSince = millis();
-  Serial.printf("stepper running at target %ld - force stop\n", (long)p);
+  Serial.printf("stepper running near target %ld - force stop\n", (long)target);
 }
 
 uint16_t motorRecoverCount() { return wdCount; }
