@@ -311,6 +311,18 @@ flutter test
 
 当前已通过 25 项。
 
+如果测试在加载阶段就全部失败，报
+`Unable to connect to flutter_tester process: WebSocketException: Invalid WebSocket upgrade request`,
+这是本机环境问题，不是代码问题：全局的 `HTTP_PROXY`/`HTTPS_PROXY` 会把 Dart VM 连接
+本地 `flutter_tester` 的 WebSocket 也送去代理。判断特征是所有测试文件一起挂，包括从
+未改动过的 `widget_test.dart`。对测试进程清掉代理即可：
+
+```powershell
+Remove-Item Env:HTTP_PROXY, Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+$env:NO_PROXY = "127.0.0.1,localhost"
+flutter test
+```
+
 Python 语法检查：
 
 ```powershell
