@@ -87,6 +87,9 @@ class _FollowPageState extends State<FollowPage> {
   int? _lastSent;
   bool _sliderDirty = false;
   DateTime _lastQuery = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime? _lastStatusAt;
+  int _lastSentSequence = 0;
+  int _lastEchoedSequence = 0;
   Timer? _tick;
   String _msg = '连手机热点 FF-debug / ffdebug1';
   TmcDump? _tmc;
@@ -100,6 +103,8 @@ class _FollowPageState extends State<FollowPage> {
     _link.onStatus = (s) {
       if (!mounted) return;
       setState(() {
+        _lastStatusAt = DateTime.now();
+        _lastEchoedSequence = s.sequence;
         _pos = s.pos;
         _target = s.target;
         _enabled = s.enabled;
@@ -119,6 +124,10 @@ class _FollowPageState extends State<FollowPage> {
           _msg = '已到软限位：$s.pos 步';
         }
       });
+    };
+    _link.onSent = (sequence) {
+      if (!mounted) return;
+      setState(() => _lastSentSequence = sequence);
     };
     _link.onTmc = (d) {
       if (!mounted) return;
@@ -620,6 +629,7 @@ class _FollowPageState extends State<FollowPage> {
                     ),
                   if (_lut.points.isEmpty) const Text('还没有标定点。'),
                   const SizedBox(height: 8),
+                  _diagnosticPanel(),
                   _tmcPanel(),
                 ],
               ),
@@ -627,6 +637,71 @@ class _FollowPageState extends State<FollowPage> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _diagnosticPanel() {
+    final statusAge = _lastStatusAt == null
+        ? null
+        : DateTime.now().difference(_lastStatusAt!);
+    final statusLive =
+        _open && statusAge != null && statusAge < const Duration(seconds: 1);
+    final sequenceOk =
+        _lastSentSequence != 0 && _lastSentSequence == _lastEchoedSequence;
+    final rows = <({String name, bool ok, String detail})>[
+      (
+        name: 'UDP 状态回包',
+        ok: statusLive,
+        detail: statusAge == null ? '尚未收到' : '${statusAge.inMilliseconds} ms 前',
+      ),
+      (
+        name: '请求序号回显',
+        ok: sequenceOk,
+        detail: _lastSentSequence == 0
+            ? '尚未发送控制命令'
+            : '发送 $_lastSentSequence / 回显 $_lastEchoedSequence',
+      ),
+      (name: 'TMC2209 UART', ok: _uartOk, detail: _uartOk ? '通讯正常' : '未确认'),
+      (
+        name: '软限位反馈',
+        ok: _open && _lastStatusAt != null,
+        detail: _open
+            ? (_target == _lo() || _target == _hi() ? '当前目标在边界' : '已启用')
+            : '未连接',
+      ),
+      (
+        name: '待机唤醒',
+        ok: _open && (_enabled || _standbyOff),
+        detail: _standbyOff ? '待机释放，运动时自动唤醒' : '可用',
+      ),
+      (
+        name: '目标追踪',
+        ok: _open && _target == _pos && !_moving,
+        detail: _moving ? '正在追踪 $_target' : '位置 $_pos / 目标 $_target',
+      ),
+    ];
+    return ExpansionTile(
+      tilePadding: EdgeInsets.zero,
+      title: const Text('功能可用性诊断'),
+      subtitle: Text(statusLive ? '链路正常' : '等待设备状态'),
+      children: [
+        for (final row in rows)
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              row.ok ? Icons.check_circle : Icons.error_outline,
+              color: row.ok ? Colors.greenAccent : Colors.orangeAccent,
+              size: 20,
+            ),
+            title: Text(row.name),
+            trailing: Text(
+              row.detail,
+              style: const TextStyle(fontSize: 11),
+              textAlign: TextAlign.right,
+            ),
+          ),
+      ],
     );
   }
 

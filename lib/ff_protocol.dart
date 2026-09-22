@@ -191,8 +191,10 @@ class MotorLink {
   int port = 4210;
   RawDatagramSocket? _sock;
   int _nextSequence = 0;
+  int get lastSequence => _nextSequence;
   void Function(MotorStatus)? onStatus;
   void Function(TmcDump)? onTmc;
+  void Function(int)? onSent;
 
   bool get isOpen => _sock != null;
 
@@ -235,6 +237,7 @@ class MotorLink {
       host,
       port,
     );
+    onSent?.call(_nextSequence);
   }
 
   void setPos(int steps) => _send(FfPacket(cmd: kFfSetPos, a: steps));
