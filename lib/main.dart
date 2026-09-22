@@ -590,6 +590,11 @@ class _FollowPageState extends State<FollowPage> {
                     '中途降速是正常减速段；短行程会更早进入减速。',
                     style: TextStyle(fontSize: 11),
                   ),
+                  const Text(
+                    '手动 JOG 会先清除正在执行的旧目标，再从当前位置精确执行本次脉冲，'
+                    '用于验证 +8 与 +80 的实际差异；自动跟焦仍使用 SET_POS 平滑追踪。',
+                    style: TextStyle(fontSize: 11),
+                  ),
                   Row(
                     children: [
                       const Text(

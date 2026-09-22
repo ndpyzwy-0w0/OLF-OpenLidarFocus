@@ -335,6 +335,7 @@ static void wake() {
 }
 
 static void recoverRunningAtTarget();
+static void resetStepperOutput(int32_t position);
 static const int32_t kTargetPositionSlack = 4;
 
 static bool positionNearTarget(int32_t position) {
@@ -413,12 +414,11 @@ void motorJog(int32_t delta) {
     return;
   }
   wake();
-  const bool needsRecovery =
-      stepper->isRunning() && positionNearTarget(stepper->getCurrentPosition());
-  if (needsRecovery) {
-    recoverRunningAtTarget();
+  const int32_t current = stepper->getCurrentPosition();
+  if (stepper->isRunning()) {
+    resetStepperOutput(current);
   }
-  const int32_t requested = stepper->getCurrentPosition() + delta;
+  const int32_t requested = current + delta;
   target = clampLim(requested);
   limitHit = target != requested;
   commandResult = limitHit ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_ACCEPTED;
