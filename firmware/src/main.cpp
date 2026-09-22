@@ -8,32 +8,15 @@
 #include "protocol.h"
 #include "oled.h"
 
-static const int PIN_LED = 48;
 static const int PIN_BTN = 0;
 
 static const char *kSsid = "FF-debug";
 static const char *kPass = "ffdebug1";
 
-static const uint8_t B = 80;
-
 static DNSServer dns;
 static WebServer http(80);
 static WiFiUDP udp;
 static bool lastBtn = true;
-static uint8_t lastLed = 255;
-
-static void setLed(uint8_t r, uint8_t g, uint8_t b) {
-  uint8_t key = (uint8_t)((r ? 1 : 0) | (g ? 2 : 0) | (b ? 4 : 0));
-  if (key == lastLed) return;
-  lastLed = key;
-  neopixelWrite(PIN_LED, r, g, b);
-}
-
-static void updateLed() {
-  if (!motorEnabled()) setLed(B, 0, 0);
-  else if (motorMoving()) setLed(B, B, 0);
-  else setLed(0, B, 0);
-}
 
 static const char kPage[] = R"html(
 <!doctype html>
@@ -75,8 +58,6 @@ void setup() {
   pinMode(PIN_BTN, INPUT_PULLUP);
 
   motorBegin();
-  neopixelWrite(PIN_LED, 80, 0, 0);
-  delay(50);
   oledBegin();
 
   btStop();
@@ -98,7 +79,6 @@ void setup() {
   udp.begin(kUdpPort);
   protocolBegin(&udp);
 
-  updateLed();
   Serial.printf("AP %s  pass %s  http://%s  udp %u\n",
                 kSsid, kPass, ip.toString().c_str(), kUdpPort);
 }
@@ -117,7 +97,6 @@ void loop() {
   dns.processNextRequest();
   http.handleClient();
   protocolPoll();
-  updateLed();
   oledPoll();
 
   bool btn = digitalRead(PIN_BTN);

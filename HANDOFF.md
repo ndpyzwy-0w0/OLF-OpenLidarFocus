@@ -74,7 +74,7 @@ drv_status=0xC0060000  sg=0  tstep=65535  flags=0xC0   (stst, stealth；无 OT/O
 | OLED SDA / SCL | 8 / 9 |
 | TMC UART（同脚半双工） | **12 → 模块 RX 脚** |
 | （未使用） | 11 |
-| WS2812 | 48 |
+| WS2812 | 48（**当前未使用，见下**） |
 | USB D−/D+ | 19/20 |
 
 Super Mini 丝印 **TX/RX 是 GPIO43/44**（USB 串口），**不要**接到 TMC。
@@ -109,10 +109,11 @@ UART 已通，硬件排查结束。剩下的都是软件/产品：
 1. **先按审查画布修那两个真问题**（都不依赖硬件）：
    - 软限位默认值 `±1,000,000` → 与 App 的 `±20000` 一致（`motor.cpp` 两行）
    - iOS 预览 `.resizeAspectFill` 与点击坐标的换算（标定精度前提）
-2. **确认电流合适**：现在寄存器默认 **800 mA RMS**。若镜头环发烫或丢步，在 Flutter TMC 面板调（参考工程用 400 mA）。
-3. 在 Flutter 里跑一遍 TMC 面板：改 mA / toff / 细分 / StealthChop，看日志是否有异常位。
-4. 上 Mac 编 iOS 真机包，测 LiDAR 距离与人脸跟踪，再做镜头标定。
-5. 不要把主控改成 `VACTUAL`。不要为 UART 再引入 TMCStepper。
+2. **在 Flutter 里实测一遍**：连接 → 使能 → Jog/滑条 → 确认轴真的转（别只看界面的 pos 数字；`pos` 是开环计数）。
+3. **确认电流合适**：现在寄存器默认 **800 mA RMS**。若镜头环发烫或丢步，在 Flutter TMC 面板调（参考工程用 400 mA）。
+4. 在 Flutter 里跑一遍 TMC 面板：改 mA / toff / 细分 / StealthChop，看日志是否有异常位。
+5. 上 Mac 编 iOS 真机包，测 LiDAR 距离与人脸跟踪，再做镜头标定。
+6. 不要把主控改成 `VACTUAL`。不要为 UART 再引入 TMCStepper。**不要加回 `neopixelWrite`。**
 
 ## 固件要点
 
@@ -126,12 +127,30 @@ pio run -e s3mini -t upload --upload-port COM19
 
 启动顺序（故意的）：
 
-1. `motorBegin()`：FastAccelStepper RMT，**先于** `neopixelWrite`（RGB 也占 RMT，反了会 `step pin busy`，EN 拉不下来）。
-2. OLED、WiFi AP。
-3. **`loop` 里第一次** `motorUartBegin()`，避免 UART `flush` 卡死时按键/热点都不工作。
-4. **不要** `setCpuFrequencyMhz(80)`：WS2812 会灭。
+1. `motorBegin()`：FastAccelStepper RMT。OLED、WiFi AP。
+2. **`loop` 里第一次** `motorUartBegin()`，避免 UART 卡死时按键/热点都不工作。
+3. **不要** `setCpuFrequencyMhz(80)`。
 
-BOOT：只切换使能（OLED `OFF`↔`EN`，灯红/绿），**不会自己转**。转要用 Flutter Jog/`SET_POS`。EN 在 `applyEnable` 里直接 `digitalWrite`（低=使能）。
+### 绝对不要用 `neopixelWrite` 驱动 GPIO48 的 WS2812（已删除）
+
+**这是修了好几轮才找到的坑，务必别再引入。**
+
+Arduino 的 `esp32-hal-rmt.c` 里 `neopixelWrite` 用**旧版 `rmt_*` API + 自己的私有通道分配表 `g_rmt_objects[]`**；而 FastAccelStepper 在 IDF5 下用**新版 `driver/rmt_tx.h`（`rmt_channel_handle_t`）**。**两套分配器各自记账、看不到对方，会同时抢到同一个硬件 RMT 通道。**
+
+后果不是报错，而是**静默错乱**，而且症状随分配顺序变：
+
+| 现象 | 含义 |
+| --- | --- |
+| ESP 侧 `pos` 平滑推进、`run=1` | 固件以为在动 |
+| 芯片侧 `STST=1`、`CS_ACTUAL` 停在 IHOLD | **驱动根本没收到脉冲** |
+| 有时 `STST=0` 但 `pos` 卡死不动 | 通道被抢，ISR 记账和输出脱节 |
+| 偶发 `OT` | 电机堵转发热 |
+
+所以**不要用 `pos` 变化判断电机是否在转**——那是开环计数，跟轴无关。**看 `STST` 和 `TSTEP` 才是真相**：运动时 `TSTEP` 会掉到小数值（如 94→2047），静止时是 65535。`CS_ACTUAL` 运动时应升到 IRUN（13），静止回 IHOLD（6）。
+
+LED 已整段删除（`PIN_LED` / `setLed` / `updateLed` / `neopixelWrite`），OLED 已经显示 OFF/EN/RUN 和 UART 状态，功能不丢。**要恢复 RGB 灯，必须用 IDF5 新版 RMT 驱动（和 FastAccelStepper 同一个分配器），不要用 `neopixelWrite`；MCPWM 在 IDF5 下没有后端可用（`StepperISR_idf4_esp32_mcpwm_pcnt.cpp` 只有 IDF4 版）。**
+
+BOOT：只切换使能（OLED `OFF`↔`EN`），**不会自己转**。转要用 Flutter Jog/`SET_POS`。EN 在 `applyEnable` 里直接 `digitalWrite`（低=使能）。
 
 TMC 报文（和 [这篇](https://blog.csdn.net/m0_64386340/article/details/141472069) 一样，不要用串口助手当产品）：
 
