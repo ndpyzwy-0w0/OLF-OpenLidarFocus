@@ -416,7 +416,9 @@ void motorJog(int32_t delta) {
   wake();
   const int32_t current = stepper->getCurrentPosition();
   if (stepper->isRunning()) {
-    resetStepperOutput(current);
+    // Cancel the previous move without rebuilding the RMT channel. Reattaching
+    // the pin here can leave a new jog accepted in software but without pulses.
+    stepper->forceStopAndNewPosition(current);
   }
   const int32_t requested = current + delta;
   target = clampLim(requested);
