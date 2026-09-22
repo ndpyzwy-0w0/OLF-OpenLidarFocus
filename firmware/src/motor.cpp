@@ -413,6 +413,13 @@ static int32_t wdPos = 0x7fffffff;
 static uint32_t wdSince = 0;
 static uint16_t wdCount = 0;
 
+static void resetStepperOutput(int32_t position) {
+  stepper->forceStopAndNewPosition(position);
+  stepper->detachFromPin();
+  stepper->reAttachToPin();
+  if (enabled && !standbyOff) stepper->enableOutputs();
+}
+
 static void wedgedTick() {
   if (!stepper) return;
   int32_t p = stepper->getCurrentPosition();
@@ -426,7 +433,7 @@ static void wedgedTick() {
   if (p == target) {
     if (now - wdSince < kRunningAtTargetMs) return;
     wdCount++;
-    stepper->forceStopAndNewPosition(p);
+    resetStepperOutput(p);
     wdSince = now;
     Serial.printf("stepper running at target %ld - force stop #%u\n", (long)p,
                   wdCount);
@@ -436,7 +443,7 @@ static void wedgedTick() {
   wdCount++;
   Serial.printf("stepper wedged at %ld (target %ld) - force stop #%u\n", (long)p,
                 (long)target, wdCount);
-  stepper->forceStopAndNewPosition(p);
+  resetStepperOutput(p);
   target = p;
   wdPos = p;
   wdSince = now;
@@ -447,7 +454,7 @@ static void recoverRunningAtTarget() {
   if (!stepper || !stepper->isRunning()) return;
   const int32_t p = stepper->getCurrentPosition();
   if (p != target) return;
-  stepper->forceStopAndNewPosition(p);
+  resetStepperOutput(p);
   wdPos = p;
   wdSince = millis();
   Serial.printf("stepper running at target %ld - force stop\n", (long)p);
