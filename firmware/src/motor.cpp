@@ -408,7 +408,7 @@ void motorJog(int32_t delta) {
 // 让它停下而不是继续空转。App／自动跟焦需要时会重新下发目标。
 // 必须定义在 motorStandbyTick() 之前。
 static const uint32_t kWedgedMs = 700;
-static const uint32_t kRunningAtTargetMs = 300;
+static const uint32_t kRunningAtTargetMs = 1000;
 static int32_t wdPos = 0x7fffffff;
 static uint32_t wdSince = 0;
 static uint16_t wdCount = 0;
@@ -424,14 +424,18 @@ static void wedgedTick() {
   if (!stepper) return;
   int32_t p = stepper->getCurrentPosition();
   uint32_t now = millis();
-  if (p != wdPos) {
+  if (p == target && wdPos != p) {
+    wdPos = p;
+    wdSince = now;
+  } else if (p != wdPos) {
     wdPos = p;
     wdSince = now;
     return;
   }
   if (!stepper->isRunning()) return;
   if (p == target) {
-    if (now - wdSince < kRunningAtTargetMs) return;
+    stepper->stopMove();
+    if (!stepper->isRunning() || now - wdSince < kRunningAtTargetMs) return;
     wdCount++;
     resetStepperOutput(p);
     wdSince = now;
