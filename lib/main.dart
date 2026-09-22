@@ -478,10 +478,10 @@ class _FollowPageState extends State<FollowPage> {
                     ],
                   ),
                   const Divider(height: 16),
-                  // 步 / 圈，对照 esp32s3-tb6600-stepper 上位机。
+                  // 脉冲 / 圈。这里的“步”是 STEP 脉冲（微步），不是整步。
                   Row(
                     children: [
-                      const Text('步'),
+                      const Text('脉冲'),
                       const SizedBox(width: 6),
                       SizedBox(
                         width: 90,
@@ -535,16 +535,21 @@ class _FollowPageState extends State<FollowPage> {
                     ],
                   ),
                   Text(
-                    '脉冲/圈 $_spr（0.9° 电机 = ${_cal.fullStepsPerRev} 整步/圈 × '
+                    '输入单位：脉冲/微步；脉冲/圈 $_spr（0.9° 电机 = ${_cal.fullStepsPerRev} 整步/圈 × '
                     '1/$_ms 细分）；当前位置 '
                     '${_cal.stepsToRevs(_pos, _ms).toStringAsFixed(2)} 圈',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  Text(
+                    '每个脉冲约 ${(360 / _spr).toStringAsFixed(4)}°；'
+                    '8 脉冲 = ${(360 * 8 / _spr).toStringAsFixed(3)}°',
                     style: const TextStyle(fontSize: 11),
                   ),
                   // 直接说明“为什么 80 步比 800 步慢”：峰值速度由距离决定。
                   _peakHint(),
                   Text(
                     '速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒'
-                    '（${(_speedRevS * 60).round()} 转/分 · ${(_speedRevS * _spr).round()} 步/秒）',
+                    '（${(_speedRevS * 60).round()} 转/分 · ${(_speedRevS * _spr).round()} 脉冲/秒）',
                   ),
                   Slider(
                     min: 0.05,
@@ -560,7 +565,7 @@ class _FollowPageState extends State<FollowPage> {
                     Text(
                       '⚠ 1/$_ms 细分下最高只有 '
                       '${_cal.maxRevsPerSec(_ms).toStringAsFixed(2)} 圈/秒'
-                      '（固件上限 $kMaxStepHz 步/秒）。'
+                      '（固件上限 $kMaxStepHz 脉冲/秒）。'
                       '要更快就用更低细分：1/16 配「微步插值」内部同样是 1/256，'
                       '但脉冲只有 1/16。',
                       style: const TextStyle(
@@ -581,8 +586,8 @@ class _FollowPageState extends State<FollowPage> {
                   ),
                   const Text(
                     '速度和加速度按“圈/秒”给，换细分不会改变物理速度。'
-                    '短行程达不到巡航速度（峰值 ≈ √(2×加速度×步数)），'
-                    '80/800 步这种 Jog 想更快就加大加速度。',
+                    '1600 脉冲会先加速、达到巡航后再减速，'
+                    '中途降速是正常减速段；短行程会更早进入减速。',
                     style: TextStyle(fontSize: 11),
                   ),
                   Row(
@@ -950,7 +955,7 @@ class _FollowPageState extends State<FollowPage> {
     );
   }
 
-  /// 为什么“走 80 步比走 800 步慢”：峰值速度 ≈ √(加速度 × 距离)，
+  /// 为什么“走 80 脉冲比走 800 脉冲慢”：峰值速度 ≈ √(加速度 × 距离)，
   /// 短行程根本来不及加到巡航速度。把预测值摆出来，用户就知道该调哪个旋钮。
   Widget _peakHint() {
     final n = int.tryParse(_stepsText.text.trim()) ?? 0;
