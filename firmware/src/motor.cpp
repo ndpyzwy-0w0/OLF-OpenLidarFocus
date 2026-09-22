@@ -493,6 +493,7 @@ void motorSetEnabled(bool on) {
 }
 
 void motorStandbyTick() {
+  engine.manageSteppers();
   wedgedTick();  // 每 loop 都要跑，与待机无关
   if (movePending && stepper && millis() - pendingSince >= 50) {
     movePending = false;
