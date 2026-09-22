@@ -648,6 +648,7 @@ class _FollowPageState extends State<FollowPage> {
         _open && statusAge != null && statusAge < const Duration(seconds: 1);
     final sequenceOk =
         _lastSentSequence != 0 && _lastSentSequence == _lastEchoedSequence;
+    final linkLive = statusLive;
     final rows = <({String name, bool ok, String detail})>[
       (
         name: 'UDP 状态回包',
@@ -688,7 +689,7 @@ class _FollowPageState extends State<FollowPage> {
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       title: const Text('功能可用性诊断'),
-      subtitle: Text(statusLive ? '链路正常' : '等待设备状态'),
+      subtitle: Text(linkLive ? '链路正常' : (_open ? '状态超时，请检查 Wi-Fi' : '等待设备连接')),
       children: [
         for (final row in rows)
           ListTile(

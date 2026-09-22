@@ -100,6 +100,7 @@ void setup() {
   WiFi.persistent(false);
   WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_AP);
+  WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   WiFi.softAP(kSsid, kPass, kApChannel, false, 1);
   delay(100);
