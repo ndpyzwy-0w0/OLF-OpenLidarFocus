@@ -327,6 +327,7 @@ static volatile int32_t stepTarget = 0;
 static volatile uint32_t stepRate = 0;
 static volatile int8_t stepSign = 1;
 static volatile uint32_t phase = 0;
+static int8_t outputSign = -1;
 static int32_t speedLimit = (int32_t)kDefaultHz;
 static int32_t accelLimit = (int32_t)kDefaultAccel;
 static float plannedRate = 0.0f;
@@ -360,12 +361,32 @@ static void setStepRate(int32_t rate) {
   bool forward = rate >= 0;
   uint32_t absolute = (uint32_t)(forward ? rate : -rate);
   if (absolute > (uint32_t)speedLimit) absolute = (uint32_t)speedLimit;
-  digitalWrite(PIN_DIR, forward ? HIGH : LOW);
-  if (absolute) delayMicroseconds(3);
+  const int8_t requestedSign = forward ? 1 : -1;
+  if (absolute == 0) {
+    portENTER_CRITICAL(&stepMux);
+    stepRate = 0;
+    phase = 0;
+    portEXIT_CRITICAL(&stepMux);
+    return;
+  }
   portENTER_CRITICAL(&stepMux);
-  stepSign = forward ? 1 : -1;
+  const bool reversingWhileActive =
+      stepRate != 0 && stepSign != requestedSign;
+  const bool directionChanged = outputSign != requestedSign;
+  if (reversingWhileActive) {
+    stepRate = 0;
+    phase = 0;
+  }
+  portEXIT_CRITICAL(&stepMux);
+  if (reversingWhileActive) return;
+  if (directionChanged) {
+    digitalWrite(PIN_DIR, forward ? HIGH : LOW);
+    delayMicroseconds(3);
+    outputSign = requestedSign;
+  }
+  portENTER_CRITICAL(&stepMux);
+  stepSign = requestedSign;
   stepRate = absolute;
-  if (!absolute) phase = 0;
   portEXIT_CRITICAL(&stepMux);
 }
 

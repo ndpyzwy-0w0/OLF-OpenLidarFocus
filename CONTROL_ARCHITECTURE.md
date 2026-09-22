@@ -22,7 +22,7 @@ flowchart LR
     Link --> Protocol[ESP32 协议层]
     Protocol --> Safety[限位、参数校验、通信状态]
     Safety --> Planner[实时运动规划器]
-    Planner --> Pulse[STEP/DIR + FastAccelStepper/RMT]
+    Planner --> Pulse[ESP32 hw_timer_t ISR + STEP/DIR]
     Pulse --> Driver[TMC2209]
     Driver --> Motor[步进电机与镜头机构]
     Protocol -->|位置、目标、状态、故障| Link
@@ -60,7 +60,7 @@ ESP32 是实时运动控制器，负责：
 - `JOG` 相对目标累计；
 - STOP 和使能状态；
 - 速度、加速度、减速度和 jerk 上限；
-- 步进脉冲生成；
+- 由硬件定时器 ISR 生成 STEP 脉冲；
 - TMC2209 参数与故障诊断；
 - 通信断开后的安全策略；
 - 返回位置、目标、运动、限位和故障状态。
@@ -165,8 +165,10 @@ JOG：以收到命令时的实际软件位置为基准，加上 delta 后立即�
 适合 +800 / -800；不会继承一个尚未完成的远距离绝对目标。
 ```
 
-当前固件已经对 `SET_POS` 做了短暂合并，避免高频滑条目标破坏
-FastAccelStepper 队列；`JOG` 则基于收到命令时的位置生成局部目标。
+当前固件由主循环更新目标和规划速度，由 ESP32 硬件定时器 ISR
+输出 STEP。每输出一个实际脉冲才推进一次 `pos`，因此 `+8` 就是
+8 个脉冲；`JOG` 基于收到命令时的位置生成局部目标，不依赖脉冲队列。
+高频 `SET_POS` 仍采用最新目标覆盖语义，避免积累过期目标。
 
 ### 当前反馈的限制
 
@@ -266,10 +268,10 @@ RESET_PROFILE
 
 ### P0：实时可靠性
 
-1. **统一步进调度上下文**
-   - 当前 `engine.init(1)` 后，库后台任务和主循环仍可能共同调用
-     `manageSteppers()`。
-   - 应保留一个唯一的规划/队列服务者，避免 ramp 和 RMT queue 竞争。
+1. **保持单一脉冲输出路径**
+   - 当前由硬件定时器 ISR 直接输出 STEP，已经移除
+     FastAccelStepper/RMT 及 `manageSteppers()`。
+   - 后续修改运动规划时必须保持“实际输出脉冲后才推进 `pos`”这一约束。
 
 2. **命令确认与结果状态**
    - 请求序号回显和 3-bit 命令结果已经加入，保持 12 字节协议兼容。
@@ -295,7 +297,7 @@ RESET_PROFILE
 2. 速度、加速度、减速度、jerk 做固件上限校验；
 3. `SET_POS`、`JOG`、`STOP` 共用明确的目标状态机；
 4. 为软限位返回明确错误/夹紧后的目标；
-5. 将恢复逻辑从常规路径中隔离，减少 `detach/reAttach` 的依赖；
+5. 将恢复逻辑从常规路径中隔离，避免把脉冲输出重建作为正常运动流程；
 6. 增加运动状态字段：当前 profile、故障码、恢复计数。
 
 ### P2：位置可信度
