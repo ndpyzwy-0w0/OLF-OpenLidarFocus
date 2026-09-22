@@ -21,6 +21,7 @@ void motorSetPos(int32_t steps);
 void motorJog(int32_t delta);
 void motorStop();
 void motorSetEnabled(bool on);
+bool motorSetHome();
 void motorSetLimits(int32_t minSteps, int32_t maxSteps);
 // hz 巡航速度（步/秒），accel 加速度（步/秒²）。
 // 短行程跑不到巡航速度，峰值 ≈ sqrt(2*accel*距离)——想“更快”通常要加大 accel。
@@ -33,6 +34,9 @@ bool motorEnabled();
 bool motorMoving();
 bool motorLimitHit();
 bool motorUartOk();
+bool motorPositionTrusted();
+void motorNoteControlPacket();
+void motorCommunicationTick();
 const char *motorUartHint();
 
 enum TmcFlag : uint8_t {

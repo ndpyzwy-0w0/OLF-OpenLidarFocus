@@ -99,4 +99,20 @@ void main() {
     expect(t.sg, 7);
     expect(t.logLine(), contains('800'));
   });
+
+  test('status v2 decodes trusted position', () {
+    final raw = Uint8List(16);
+    final d = ByteData.sublistView(raw);
+    d.setUint8(0, kFfMagic);
+    d.setUint8(1, kFfStatusV2);
+    d.setUint8(2, kFlagEnabled | (kResultCompleted << kFlagResultShift));
+    d.setUint8(3, 9);
+    d.setInt32(4, 12, Endian.little);
+    d.setInt32(8, 12, Endian.little);
+    d.setUint8(12, 1);
+    final s = MotorStatusV2.decode(raw)!;
+    expect(s.sequence, 9);
+    expect(s.positionTrusted, isTrue);
+    expect(s.result, kResultCompleted);
+  });
 }

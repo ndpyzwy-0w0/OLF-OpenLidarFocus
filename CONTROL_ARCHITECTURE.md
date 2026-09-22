@@ -120,6 +120,7 @@ b     int32
 | `QUERY` | 请求状态 | 无 |
 | `TMC_QUERY` | 请求 TMC 诊断 | 无 |
 | `TMC_SET` | 修改 TMC 参数 | `a = key, b = value` |
+| `HOME` | 将当前静止位置建立为可信原点 | 无物理限位开关时为手动校零 |
 
 ### 请求序号回显
 
@@ -186,7 +187,23 @@ STST、TSTEP、CS_ACTUAL、DRV_STATUS
 
 当前 UDP 状态已经返回：
 
+```
+
+### 位置可信度与手动 HOME
+
+上电、复位或禁用电机后，`positionTrusted = false`。在没有物理限位
+开关的版本中，`HOME` 不会自动寻找机械端点，而是在电机完全停止后把
+当前软件位置设为 0，并将 `positionTrusted` 设为 true。未来接入限位
+开关后，可以复用同一命令语义扩展为真实回零流程。
+
+`STATUS_V2` 在保留旧 12 字节状态包的同时返回：
+
 ```text
+position_trusted
+fault
+```
+
+旧客户端继续使用 `STATUS`，新客户端应优先读取 `STATUS_V2`。text
 enabled
 moving
 uart_ok
@@ -285,6 +302,8 @@ RESET_PROFILE
      - 禁止继续追踪；
      - 保持当前位置并释放电机。
    - 默认不应因为短暂丢一个 UDP 包就急停，但长时间失联必须安全。
+   - 当前固件对 `SET_POS`/`JOG` 控制包启动 1000 ms 看门狗；超时后
+     停止当前运动并清除看门狗。自动跟焦应持续发送最新 `SET_POS`。
 
 4. **不要把开环位置当作真实运动确认**
    - 将 TMC `TSTEP/STST` 异常纳入状态机。

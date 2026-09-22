@@ -33,6 +33,10 @@ static bool enabled = false;
 static bool uartOk = false;
 static bool limitHit = false;
 static MotorCommandResult commandResult = MOTOR_RESULT_IDLE;
+static bool positionTrusted = false;
+static bool communicationWatchdogArmed = false;
+static uint32_t lastControlPacketMs = 0;
+static const uint32_t kControlTimeoutMs = 1000;
 
 // 待机断电：用户仍处于“使能”意图，但物理上已释放驱动，避免静止时发热和轻微震动。
 static bool standbyOff = false;
@@ -449,6 +453,19 @@ static void wake() {
   applyEnable();
 }
 
+void motorNoteControlPacket() {
+  lastControlPacketMs = millis();
+  communicationWatchdogArmed = true;
+}
+
+void motorCommunicationTick() {
+  if (!communicationWatchdogArmed || !enabled || !motorMoving()) return;
+  if (millis() - lastControlPacketMs < kControlTimeoutMs) return;
+  motorStop();
+  communicationWatchdogArmed = false;
+  Serial.println("control timeout: motion stopped");
+}
+
 void motorBegin() {
   pinMode(PIN_EN, OUTPUT);
   pinMode(PIN_STEP, OUTPUT);
@@ -511,6 +528,25 @@ void motorJog(int32_t delta) {
   portEXIT_CRITICAL(&stepMux);
 }
 
+bool motorSetHome() {
+  if (!stepTimer || motorMoving()) {
+    commandResult = MOTOR_RESULT_REJECTED;
+    return false;
+  }
+  portENTER_CRITICAL(&stepMux);
+  currentPos = 0;
+  stepTarget = 0;
+  stepRate = 0;
+  phase = 0;
+  portEXIT_CRITICAL(&stepMux);
+  target = 0;
+  limitHit = false;
+  positionTrusted = true;
+  commandResult = MOTOR_RESULT_COMPLETED;
+  communicationWatchdogArmed = false;
+  return true;
+}
+
 void motorStop() {
   if (!stepTimer) return;
   const int32_t p = readPosition();
@@ -528,7 +564,11 @@ void motorStop() {
 
 void motorSetEnabled(bool on) {
   enabled = on;
-  if (!on) motorStop();
+  if (!on) {
+    motorStop();
+    positionTrusted = false;
+    communicationWatchdogArmed = false;
+  }
   standbyOff = false;
   lastMoveMs = millis();
   applyEnable();
@@ -536,6 +576,7 @@ void motorSetEnabled(bool on) {
 
 void motorStandbyTick() {
   planMotion();
+  motorCommunicationTick();
   if (!enabled || !tmcStandby || standbyOff) return;
   if (motorMoving()) { lastMoveMs = millis(); return; }
   if (millis() - lastMoveMs < kStandbyDelayMs) return;
@@ -579,6 +620,7 @@ bool motorMoving() {
   return moving;
 }
 bool motorUartOk() { return uartOk; }
+bool motorPositionTrusted() { return positionTrusted; }
 const char *motorUartHint() { return uartHint; }
 MotorCommandResult motorCommandResult() { return commandResult; }
 void motorTmcSnap(TmcSnap *o) {

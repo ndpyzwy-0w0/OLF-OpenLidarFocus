@@ -13,6 +13,8 @@ const int kFfTmcQuery = 0x08;
 const int kFfTmcSet = 0x09;
 const int kFfStatus = 0x81;
 const int kFfTmcDump = 0x82;
+const int kFfHome = 0x0a;
+const int kFfStatusV2 = 0x83;
 
 const int kTmcRms = 1;
 const int kTmcMicrosteps = 2;
@@ -170,6 +172,7 @@ class MotorStatus {
   /// 处于待机断电：用户仍使能，但驱动已释放（不发热、不震动）。
   final bool standby;
   final int result;
+  final bool? positionTrusted;
 
   const MotorStatus({
     this.sequence = 0,
@@ -181,6 +184,7 @@ class MotorStatus {
     this.limited = false,
     this.standby = false,
     this.result = kResultIdle,
+    this.positionTrusted,
   });
 
   factory MotorStatus.fromPacket(FfPacket p) {
@@ -196,6 +200,42 @@ class MotorStatus {
       result: (p.flags & kFlagResultMask) >> kFlagResultShift,
     );
   }
+
+}
+
+class MotorStatusV2 extends MotorStatus {
+  const MotorStatusV2({
+    required super.sequence,
+    required super.pos,
+    required super.target,
+    required super.enabled,
+    required super.moving,
+    required super.uartOk,
+    required super.limited,
+    required super.standby,
+    required super.result,
+    required bool trusted,
+  }) : super(positionTrusted: trusted);
+
+  static MotorStatusV2? decode(List<int> bytes) {
+    if (bytes.length < 16 || bytes[0] != kFfMagic || bytes[1] != kFfStatusV2) {
+      return null;
+    }
+    final d = ByteData.sublistView(Uint8List.fromList(bytes), 0, 16);
+    final flags = d.getUint8(2);
+    return MotorStatusV2(
+      sequence: d.getUint8(3),
+      pos: d.getInt32(4, Endian.little),
+      target: d.getInt32(8, Endian.little),
+      enabled: flags & kFlagEnabled != 0,
+      moving: flags & kFlagMoving != 0,
+      uartOk: flags & kFlagUartOk != 0,
+      limited: flags & kFlagLimited != 0,
+      standby: flags & kFlagStandby != 0,
+      result: (flags & kFlagResultMask) >> kFlagResultShift,
+      trusted: d.getUint8(12) != 0,
+    );
+  }
 }
 
 class MotorLink {
@@ -205,6 +245,7 @@ class MotorLink {
   int _nextSequence = 0;
   int get lastSequence => _nextSequence;
   void Function(MotorStatus)? onStatus;
+  void Function(MotorStatusV2)? onStatusV2;
   void Function(TmcDump)? onTmc;
   void Function(int)? onSent;
 
@@ -221,6 +262,11 @@ class MotorLink {
       if (dg.data[1] == kFfTmcDump) {
         final t = TmcDump.decode(dg.data);
         if (t != null) onTmc?.call(t);
+        return;
+      }
+      if (dg.data[1] == kFfStatusV2) {
+        final s = MotorStatusV2.decode(dg.data);
+        if (s != null) onStatusV2?.call(s);
         return;
       }
       if (dg.data[1] != kFfStatus) return;
@@ -253,6 +299,7 @@ class MotorLink {
   }
 
   void setPos(int steps) => _send(FfPacket(cmd: kFfSetPos, a: steps));
+  void home() => _send(const FfPacket(cmd: kFfHome));
   void jog(int delta) => _send(FfPacket(cmd: kFfJog, a: delta));
   void stop() => _send(const FfPacket(cmd: kFfStop));
   void enable(bool on) => _send(FfPacket(cmd: kFfEnable, a: on ? 1 : 0));

@@ -68,6 +68,7 @@ class _FollowPageState extends State<FollowPage> {
   int _appliedSpr = 0;
   bool _standbyFeature = true; // 待机自动断电开关（固件默认开）
   bool _standbyOff = false; // 当前是否已断电（来自固件状态位）
+  bool _positionTrusted = false;
   // 用户意图：板子重启后固件 enabled 会归零，这里负责自动补一次使能，
   // 否则点“走步”会被电机端的 `if (!enabled) return;` 静默忽略。
   bool _wantEnabled = false;
@@ -126,6 +127,14 @@ class _FollowPageState extends State<FollowPage> {
         if (s.limited) {
           _msg = '已到软限位：$s.pos 步';
         }
+      });
+    };
+    _link.onStatusV2 = (s) {
+      if (!mounted) return;
+      setState(() {
+        _positionTrusted = s.positionTrusted ?? false;
+        _pos = s.pos;
+        _target = s.target;
       });
     };
     _link.onSent = (sequence) {
@@ -451,6 +460,12 @@ class _FollowPageState extends State<FollowPage> {
                       OutlinedButton(
                         onPressed: _open ? _stopPressed : null,
                         child: const Text('停'),
+                      ),
+                      OutlinedButton(
+                        onPressed: _open && !_moving
+                            ? () => _link.home()
+                            : null,
+                        child: Text(_positionTrusted ? '已校零' : '设当前位置为原点'),
                       ),
                     ],
                   ),

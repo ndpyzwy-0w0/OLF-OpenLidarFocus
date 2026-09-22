@@ -27,6 +27,29 @@ static void fillStatus(FfPacket *p, uint8_t sequence = 0) {
   p->b = motorTarget();
 }
 
+void protocolSendStatusV2(const IPAddress &ip, uint16_t port, uint8_t sequence) {
+  if (!udp) return;
+  FfStatusV2 p{};
+  p.magic = kFfMagic;
+  p.cmd = FF_STATUS_V2;
+  p.sequence = sequence;
+  p.flags = 0;
+  if (motorEnabled()) p.flags |= FF_FLAG_ENABLED;
+  if (motorMoving()) p.flags |= FF_FLAG_MOVING;
+  if (motorUartOk()) p.flags |= FF_FLAG_UART_OK;
+  if (motorStandbyOff()) p.flags |= FF_FLAG_STANDBY;
+  if (motorLimitHit()) p.flags |= FF_FLAG_LIMITED;
+  p.flags |= (static_cast<uint8_t>(motorCommandResult()) << FF_RESULT_SHIFT) &
+             FF_RESULT_MASK;
+  p.pos = motorPos();
+  p.target = motorTarget();
+  p.position_trusted = motorPositionTrusted() ? 1 : 0;
+  p.fault = 0;
+  udp->beginPacket(ip, port);
+  udp->write(reinterpret_cast<uint8_t *>(&p), sizeof(p));
+  udp->endPacket();
+}
+
 void protocolSendStatus(const IPAddress &ip, uint16_t port, uint8_t sequence) {
   if (!udp) return;
   FfPacket p;
@@ -69,9 +92,11 @@ static void protocolSendTmc(const IPAddress &ip, uint16_t port) {
 static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
   switch (in.cmd) {
     case FF_SET_POS:
+      motorNoteControlPacket();
       motorSetPos(in.a);
       break;
     case FF_JOG:
+      motorNoteControlPacket();
       motorJog(in.a);
       break;
     case FF_STOP:
@@ -80,6 +105,11 @@ static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
     case FF_ENABLE:
       motorSetEnabled(in.a != 0);
       break;
+    case FF_HOME:
+      motorSetHome();
+      protocolSendStatus(ip, port, in.pad);
+      protocolSendStatusV2(ip, port, in.pad);
+      return;
     case FF_SET_LIMITS:
       motorSetLimits(in.a, in.b);
       break;

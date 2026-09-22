@@ -14,8 +14,10 @@ enum FfCmd : uint8_t {
   FF_SET_SPEED = 0x07,
   FF_TMC_QUERY = 0x08,
   FF_TMC_SET = 0x09,
+  FF_HOME = 0x0A,  // Establish the current stopped position as the trusted origin.
   FF_STATUS = 0x81,
   FF_TMC_DUMP = 0x82,
+  FF_STATUS_V2 = 0x83,
 };
 
 enum FfTmcKey : int32_t {
@@ -71,6 +73,20 @@ struct FfTmcDump {
 
 static_assert(sizeof(FfTmcDump) == 22, "FfTmcDump must be 22 bytes");
 
+struct FfStatusV2 {
+  uint8_t magic;
+  uint8_t cmd;
+  uint8_t flags;
+  uint8_t sequence;
+  int32_t pos;
+  int32_t target;
+  uint8_t position_trusted;
+  uint8_t fault;
+  uint16_t reserved;
+} __attribute__((packed));
+
+static_assert(sizeof(FfStatusV2) == 16, "FfStatusV2 must be 16 bytes");
+
 static const uint8_t kFfMagic = 0x46;
 static const uint16_t kUdpPort = 4210;
 
@@ -78,3 +94,4 @@ void protocolBegin(WiFiUDP *udp);
 void protocolPoll();
 // The packet pad byte is an optional request sequence. Legacy clients may send 0.
 void protocolSendStatus(const IPAddress &ip, uint16_t port, uint8_t sequence = 0);
+void protocolSendStatusV2(const IPAddress &ip, uint16_t port, uint8_t sequence = 0);
