@@ -15,9 +15,11 @@ enum FfCmd : uint8_t {
   FF_TMC_QUERY = 0x08,
   FF_TMC_SET = 0x09,
   FF_HOME = 0x0A,  // Establish the current stopped position as the trusted origin.
+  FF_DISCOVER = 0x0B,  // Identify the board; answered with FF_DISCOVER_REPLY.
   FF_STATUS = 0x81,
   FF_TMC_DUMP = 0x82,
   FF_STATUS_V2 = 0x83,
+  FF_DISCOVER_REPLY = 0x84,
 };
 
 enum FfTmcKey : int32_t {
@@ -87,6 +89,29 @@ struct FfStatusV2 {
 
 static_assert(sizeof(FfStatusV2) == 16, "FfStatusV2 must be 16 bytes");
 
+// Discovery reply. A host that has just associated with an AP uses this to tell
+// whether it is talking to this firmware and which board it is. `mac` matches
+// the BSSID a scan reports and `device_id` matches the SSID, so a scan result,
+// a device id and a control connection can all be tied to the same board.
+static const uint8_t kFfKindFollowFocus = 1;
+static const uint8_t kFfProtocolVersion = 1;
+
+struct FfDiscovery {
+  uint8_t magic;
+  uint8_t cmd;
+  uint8_t kind;      // kFfKindFollowFocus
+  uint8_t protocol;  // kFfProtocolVersion
+  uint16_t udp_port;
+  uint8_t fw_major;
+  uint8_t fw_minor;
+  uint8_t fw_patch;
+  uint8_t mac[6];
+  char device_id[16];  // NUL terminated, e.g. "FF-75A578"
+  uint8_t reserved;
+} __attribute__((packed));
+
+static_assert(sizeof(FfDiscovery) == 32, "FfDiscovery must be 32 bytes");
+
 static const uint8_t kFfMagic = 0x46;
 static const uint16_t kUdpPort = 4210;
 
@@ -95,3 +120,4 @@ void protocolPoll();
 // The packet pad byte is an optional request sequence. Legacy clients may send 0.
 void protocolSendStatus(const IPAddress &ip, uint16_t port, uint8_t sequence = 0);
 void protocolSendStatusV2(const IPAddress &ip, uint16_t port, uint8_t sequence = 0);
+void protocolSendDiscovery(const IPAddress &ip, uint16_t port);

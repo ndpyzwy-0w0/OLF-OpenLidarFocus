@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "device.h"
 #include "motor.h"
 
 #include <Arduino.h>
@@ -66,6 +67,26 @@ void protocolSendStatus(const IPAddress &ip, uint16_t port, uint8_t sequence) {
   udp->endPacket();
 }
 
+void protocolSendDiscovery(const IPAddress &ip, uint16_t port) {
+  if (!udp) return;
+  FfDiscovery d{};
+  d.magic = kFfMagic;
+  d.cmd = FF_DISCOVER_REPLY;
+  d.kind = kFfKindFollowFocus;
+  d.protocol = kFfProtocolVersion;
+  d.udp_port = kUdpPort;
+  d.fw_major = kFwMajor;
+  d.fw_minor = kFwMinor;
+  d.fw_patch = kFwPatch;
+  memcpy(d.mac, deviceMac(), sizeof(d.mac));
+  strncpy(d.device_id, deviceId(), sizeof(d.device_id) - 1);
+  udp->beginPacket(ip, port);
+  udp->write(reinterpret_cast<uint8_t *>(&d), sizeof(d));
+  udp->endPacket();
+  Serial.printf("discover %s -> %s:%u\n", d.device_id, ip.toString().c_str(),
+                port);
+}
+
 static void protocolSendTmc(const IPAddress &ip, uint16_t port) {
   if (!udp) return;
   TmcSnap s;
@@ -131,6 +152,9 @@ static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
       motorTmcSet(in.a, in.b);
       protocolSendTmc(ip, port);
       return;
+    case FF_DISCOVER:
+      protocolSendDiscovery(ip, port);
+      return;  // Motion state is irrelevant here; skip the status replies.
     case FF_QUERY:
       break;
     default:

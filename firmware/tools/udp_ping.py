@@ -1,4 +1,4 @@
-"""Join WiFi SSID FF-debug (pass ffdebug1), then: python udp_ping.py"""
+"""Join the board's AP (SSID FF-XXXXXX, pass ffdebug1), then: python udp_ping.py"""
 import socket
 import time
 

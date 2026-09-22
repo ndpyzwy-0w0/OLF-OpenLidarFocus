@@ -1,4 +1,4 @@
-"""Join WiFi SSID FF-debug (pass ffdebug1), then:
+"""Join the board's AP (SSID FF-XXXXXX, pass ffdebug1), then:
   python jog.py selfcheck
   python jog.py status
   python jog.py enable
@@ -56,7 +56,7 @@ def send(sock, cmd, a=0, b=0):
     try:
         data, _ = sock.recvfrom(64)
     except socket.timeout:
-        print("timeout (join FF-debug first)")
+        print("timeout (join FF-XXXXXX first)")
         return None
     p = unpack(data)
     if not p or p["magic"] != MAGIC:

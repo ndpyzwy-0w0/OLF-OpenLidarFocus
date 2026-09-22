@@ -5,13 +5,13 @@
 #include <DNSServer.h>
 #include <esp_system.h>
 
+#include "device.h"
 #include "motor.h"
 #include "protocol.h"
 #include "oled.h"
 
 static const int PIN_BTN = 0;
 
-static const char *kSsid = "FF-debug";
 static const char *kPass = "ffdebug1";
 static const uint8_t kApChannel = 1;
 
@@ -102,7 +102,8 @@ void setup() {
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  WiFi.softAP(kSsid, kPass, kApChannel, false, 1);
+  deviceBegin();
+  WiFi.softAP(deviceId(), kPass, kApChannel, false, 1);
   delay(100);
 
   IPAddress ip = WiFi.softAPIP();
@@ -117,8 +118,8 @@ void setup() {
   udp.begin(kUdpPort);
   protocolBegin(&udp);
 
-  Serial.printf("AP %s  pass %s  http://%s  udp %u\n",
-                kSsid, kPass, ip.toString().c_str(), kUdpPort);
+  Serial.printf("AP %s  pass %s  mac %s  http://%s  udp %u\n", deviceId(), kPass,
+                deviceMacText(), ip.toString().c_str(), kUdpPort);
   logWiFiState();
 }
 
