@@ -328,6 +328,8 @@ static void wake() {
   applyEnable();
 }
 
+static void recoverRunningAtTarget();
+
 void motorBegin() {
   pinMode(PIN_EN, OUTPUT);
   digitalWrite(PIN_EN, HIGH);
@@ -364,6 +366,7 @@ void motorUartBegin() {
 void motorSetPos(int32_t steps) {
   if (!stepper || !enabled) return;
   wake();
+  recoverRunningAtTarget();
   target = clampLim(steps);
   stepper->moveTo(target);
 }
@@ -371,6 +374,7 @@ void motorSetPos(int32_t steps) {
 void motorJog(int32_t delta) {
   if (!stepper || !enabled) return;
   wake();
+  recoverRunningAtTarget();
   target = clampLim(target + delta);
   stepper->moveTo(target);
 }
@@ -384,6 +388,7 @@ void motorJog(int32_t delta) {
 // 让它停下而不是继续空转。App／自动跟焦需要时会重新下发目标。
 // 必须定义在 motorStandbyTick() 之前。
 static const uint32_t kWedgedMs = 700;
+static const uint32_t kRunningAtTargetMs = 300;
 static int32_t wdPos = 0x7fffffff;
 static uint32_t wdSince = 0;
 static uint16_t wdCount = 0;
@@ -398,7 +403,15 @@ static void wedgedTick() {
     return;
   }
   if (!stepper->isRunning()) return;
-  if (p == target) return;
+  if (p == target) {
+    if (now - wdSince < kRunningAtTargetMs) return;
+    wdCount++;
+    stepper->forceStopAndNewPosition(p);
+    wdSince = now;
+    Serial.printf("stepper running at target %ld - force stop #%u\n", (long)p,
+                  wdCount);
+    return;
+  }
   if (now - wdSince < kWedgedMs) return;
   wdCount++;
   Serial.printf("stepper wedged at %ld (target %ld) - force stop #%u\n", (long)p,
@@ -408,6 +421,16 @@ static void wedgedTick() {
   wdPos = p;
   wdSince = now;
   lastMoveMs = now;
+}
+
+static void recoverRunningAtTarget() {
+  if (!stepper || !stepper->isRunning()) return;
+  const int32_t p = stepper->getCurrentPosition();
+  if (p != target) return;
+  stepper->forceStopAndNewPosition(p);
+  wdPos = p;
+  wdSince = millis();
+  Serial.printf("stepper running at target %ld - force stop\n", (long)p);
 }
 
 uint16_t motorRecoverCount() { return wdCount; }
