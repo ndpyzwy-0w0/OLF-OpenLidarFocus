@@ -66,10 +66,11 @@ class _FollowPageState extends State<FollowPage> {
   double _accelRevS2 = 30;
   int _appliedSpr = 0;
   bool _standbyFeature = true; // 待机自动断电开关（固件默认开）
-  bool _standbyOff = false;    // 当前是否已断电（来自固件状态位）
+  bool _standbyOff = false; // 当前是否已断电（来自固件状态位）
   // 用户意图：板子重启后固件 enabled 会归零，这里负责自动补一次使能，
   // 否则点“走步”会被电机端的 `if (!enabled) return;` 静默忽略。
   bool _wantEnabled = false;
+  int _pendingJog = 0;
   DateTime _lastEnableAttempt = DateTime.fromMillisecondsSinceEpoch(0);
   // 自动跟焦的去抖：距离抖动会让目标每 20ms 变几步，变成“一直慢慢转停不下来”。
   DateTime _lastAutoSend = DateTime.fromMillisecondsSinceEpoch(0);
@@ -105,6 +106,15 @@ class _FollowPageState extends State<FollowPage> {
         _moving = s.moving;
         _uartOk = s.uartOk;
         _standbyOff = s.standby;
+        if (s.enabled && _pendingJog != 0) {
+          final delta = _pendingJog;
+          _pendingJog = 0;
+          _takeManual('走步');
+          _stopLatched = false;
+          _lastSent = null;
+          _sliderDirty = false;
+          _link.jog(delta);
+        }
         if (s.limited) {
           _msg = '已到软限位：$s.pos 步';
         }
@@ -142,7 +152,10 @@ class _FollowPageState extends State<FollowPage> {
       _distance = filtered;
       _u = s.u;
       _v = s.v;
-      if (s.faceU != null && s.faceV != null && s.faceW != null && s.faceH != null) {
+      if (s.faceU != null &&
+          s.faceV != null &&
+          s.faceW != null &&
+          s.faceH != null) {
         _face = Rect.fromLTWH(s.faceU!, s.faceV!, s.faceW!, s.faceH!);
       } else {
         _face = null;
@@ -170,13 +183,14 @@ class _FollowPageState extends State<FollowPage> {
       }
     }
     // 板子重启后固件 enabled=0，App 这边补一次使能，让状态自愈。
-    if (_wantEnabled && !_enabled &&
+    if (_wantEnabled &&
+        !_enabled &&
         now.difference(_lastEnableAttempt) > const Duration(seconds: 1)) {
       _lastEnableAttempt = now;
       _link.enable(true);
     }
     if (!_enabled) return;
-    if (_stopLatched) return;  // 点了“停”，不要被自动跟焦重新拉起来
+    if (_stopLatched) return; // 点了“停”，不要被自动跟焦重新拉起来
     int? want;
     if (_auto) {
       final d = _distance;
@@ -192,7 +206,8 @@ class _FollowPageState extends State<FollowPage> {
     // 表现就是“一直缓慢转动、永远停不下来”。
     if (_auto) {
       if ((want - (_lastSent ?? want)).abs() < kAutoDeadbandSteps) return;
-      if (now.difference(_lastAutoSend) < const Duration(milliseconds: 60)) return;
+      if (now.difference(_lastAutoSend) < const Duration(milliseconds: 60))
+        return;
       _lastAutoSend = now;
     } else if (want == _lastSent) {
       return;
@@ -235,21 +250,27 @@ class _FollowPageState extends State<FollowPage> {
   /// 走步/走圈都走同一条相对运动命令（JOG），不在固件里另加指令。
   void _jog(int delta) {
     if (!_open || delta == 0) return;
-    if (!_enabled) {
-      // 板子重启后固件是关的；先补使能，否则这一步会被静默忽略。
-      _wantEnabled = true;
-      _lastEnableAttempt = DateTime.now();
-      _link.enable(true);
-      setState(() => _msg = '已发送使能，再点一次走步');
-      return;
-    }
     // 提前拦下会被固件软限位夹掉的命令——否则表现就是“点了没反应”。
     final lo = _lo();
     final hi = _hi();
     final want = _pos + delta;
     if (want < lo || want > hi) {
-      setState(() => _msg = '超出软限位 $lo..$hi 步（当前 $_pos，请求 $want）。'
-          '换细分会改变步数尺度；可先回中点，或完成标定后由标定值决定限位。');
+      setState(
+        () => _msg =
+            '超出软限位 $lo..$hi 步（当前 $_pos，请求 $want）。'
+            '换细分会改变步数尺度；可先回中点，或完成标定后由标定值决定限位。',
+      );
+      return;
+    }
+    if (!_enabled) {
+      // 板子重启后固件是关的；先补使能，并保留这次 JOG，待状态确认后执行。
+      _pendingJog += delta;
+      _wantEnabled = true;
+      _lastEnableAttempt = DateTime.now();
+      _link.enable(true);
+      setState(
+        () => _msg = '正在使能，已暂存 ${_pendingJog > 0 ? '+' : ''}$_pendingJog 步',
+      );
       return;
     }
     _takeManual('走步');
@@ -328,7 +349,9 @@ class _FollowPageState extends State<FollowPage> {
 
   @override
   Widget build(BuildContext context) {
-    final distText = _distance == null ? '--' : '${_distance!.toStringAsFixed(2)} m';
+    final distText = _distance == null
+        ? '--'
+        : '${_distance!.toStringAsFixed(2)} m';
     return Scaffold(
       appBar: AppBar(
         title: const Text('跟焦器'),
@@ -359,8 +382,10 @@ class _FollowPageState extends State<FollowPage> {
                   child: Text(
                     distText,
                     style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                          shadows: const [Shadow(blurRadius: 8, color: Colors.black)],
-                        ),
+                      shadows: const [
+                        Shadow(blurRadius: 8, color: Colors.black),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -373,7 +398,10 @@ class _FollowPageState extends State<FollowPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('电机 $_pos → $_target    $_msg', style: const TextStyle(fontSize: 13)),
+                  Text(
+                    '电机 $_pos → $_target    $_msg',
+                    style: const TextStyle(fontSize: 13),
+                  ),
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
@@ -397,12 +425,13 @@ class _FollowPageState extends State<FollowPage> {
                         selected: _auto && _lut.ready,
                         onSelected: _lut.ready
                             ? (v) => setState(() {
-                                  _auto = v;
-                                  _lastSent = null;
-                                  _stopLatched = false;
-                                  _lastAutoSend = DateTime.fromMillisecondsSinceEpoch(0);
-                                  _filter.reset();
-                                })
+                                _auto = v;
+                                _lastSent = null;
+                                _stopLatched = false;
+                                _lastAutoSend =
+                                    DateTime.fromMillisecondsSinceEpoch(0);
+                                _filter.reset();
+                              })
                             : null,
                       ),
                       FilterChip(
@@ -415,7 +444,10 @@ class _FollowPageState extends State<FollowPage> {
                               }
                             : null,
                       ),
-                      OutlinedButton(onPressed: _open ? _stopPressed : null, child: const Text('停')),
+                      OutlinedButton(
+                        onPressed: _open ? _stopPressed : null,
+                        child: const Text('停'),
+                      ),
                     ],
                   ),
                   Text(_auto ? '手动滑条（自动开时无效）' : '手动焦点'),
@@ -424,11 +456,11 @@ class _FollowPageState extends State<FollowPage> {
                     onChanged: _auto
                         ? null
                         : (v) => setState(() {
-                              _slider = v;
-                              _sliderDirty = true;
-                              _stopLatched = false;
-                              _lastSent = null;
-                            }),
+                            _slider = v;
+                            _sliderDirty = true;
+                            _stopLatched = false;
+                            _lastSent = null;
+                          }),
                   ),
                   Wrap(
                     spacing: 8,
@@ -459,8 +491,14 @@ class _FollowPageState extends State<FollowPage> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      OutlinedButton(onPressed: () => _goSteps(1), child: const Text('走步')),
-                      OutlinedButton(onPressed: () => _goSteps(-1), child: const Text('反向')),
+                      OutlinedButton(
+                        onPressed: () => _goSteps(1),
+                        child: const Text('走步'),
+                      ),
+                      OutlinedButton(
+                        onPressed: () => _goSteps(-1),
+                        child: const Text('反向'),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -472,7 +510,9 @@ class _FollowPageState extends State<FollowPage> {
                         width: 90,
                         child: TextField(
                           controller: _revsText,
-                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
                           decoration: const InputDecoration(
                             isDense: true,
                             border: OutlineInputBorder(),
@@ -480,8 +520,14 @@ class _FollowPageState extends State<FollowPage> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      OutlinedButton(onPressed: () => _goRevs(1), child: const Text('走圈')),
-                      OutlinedButton(onPressed: () => _goRevs(-1), child: const Text('反向')),
+                      OutlinedButton(
+                        onPressed: () => _goRevs(1),
+                        child: const Text('走圈'),
+                      ),
+                      OutlinedButton(
+                        onPressed: () => _goRevs(-1),
+                        child: const Text('反向'),
+                      ),
                     ],
                   ),
                   Text(
@@ -492,8 +538,10 @@ class _FollowPageState extends State<FollowPage> {
                   ),
                   // 直接说明“为什么 80 步比 800 步慢”：峰值速度由距离决定。
                   _peakHint(),
-                  Text('速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒'
-                      '（${(_speedRevS * 60).round()} 转/分 · ${(_speedRevS * _spr).round()} 步/秒）'),
+                  Text(
+                    '速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒'
+                    '（${(_speedRevS * 60).round()} 转/分 · ${(_speedRevS * _spr).round()} 步/秒）',
+                  ),
                   Slider(
                     min: 0.05,
                     max: 3.0,
@@ -511,7 +559,10 @@ class _FollowPageState extends State<FollowPage> {
                       '（固件上限 $kMaxStepHz 步/秒）。'
                       '要更快就用更低细分：1/16 配「微步插值」内部同样是 1/256，'
                       '但脉冲只有 1/16。',
-                      style: const TextStyle(fontSize: 11, color: Color(0xFFFFAB40)),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFFFFAB40),
+                      ),
                     ),
                   Text('加速度 ${_accelRevS2.toStringAsFixed(0)} 圈/秒²'),
                   Slider(
@@ -532,23 +583,28 @@ class _FollowPageState extends State<FollowPage> {
                   ),
                   Row(
                     children: [
-                      const Text('镜头标定', style: TextStyle(fontWeight: FontWeight.bold)),
+                      const Text(
+                        '镜头标定',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
                       const Spacer(),
                       FilledButton.tonal(
                         onPressed: _distance == null
                             ? null
                             : () => _setLut(
-                                  _lut.adding(
-                                    LutPoint(meters: _distance!, steps: _pos),
-                                    microsteps: _ms,
-                                  ),
+                                _lut.adding(
+                                  LutPoint(meters: _distance!, steps: _pos),
+                                  microsteps: _ms,
                                 ),
+                              ),
                         child: const Text('记录当前'),
                       ),
                     ],
                   ),
-                  const Text('Jog 到实焦后点记录。至少两点；按 1/距离 插值。'
-                      '标定与当前细分绑定，换细分会自动换算。'),
+                  const Text(
+                    'Jog 到实焦后点记录。至少两点；按 1/距离 插值。'
+                    '标定与当前细分绑定，换细分会自动换算。',
+                  ),
                   for (var i = 0; i < _lutNow.points.length; i++)
                     ListTile(
                       dense: true,
@@ -583,31 +639,62 @@ class _FollowPageState extends State<FollowPage> {
         t == null
             ? 'TMC2209 驱动参数'
             : (t.uartOk
-                ? 'TMC2209 UART  ver=0x${t.version.toRadixString(16)}'
-                : 'TMC2209 无 UART（仅待机设置可用）'),
+                  ? 'TMC2209 UART  ver=0x${t.version.toRadixString(16)}'
+                  : 'TMC2209 无 UART（仅待机设置可用）'),
       ),
       subtitle: t == null
           ? const Text('连接后自动刷新')
-          : Text('${t.rmsMa} mA · 1/${t.microsteps} · '
-              '${t.stealth ? "StealthChop 静音" : "SpreadCycle"}'),
+          : Text(
+              '${t.rmsMa} mA · 1/${t.microsteps} · '
+              '${t.stealth ? "StealthChop 静音" : "SpreadCycle"}',
+            ),
       children: [
         // 每个可编辑参数：中文名 + 当前值 + 一行中文说明，点一下写入。
-        _tmcRow('运行电流', t == null ? '--' : '${t.rmsMa} mA', kTmcRms, live, t?.rmsMa,
-            '电机转动时的电流。越大越有力，也越热。建议 300–1200 mA，默认 800。'),
-        _tmcRow('保持电流', t == null ? '--' : '${t.ihold} / 31', kTmcIhold, live, t?.ihold,
-            '停止时维持的电流档位（相对运行电流）。0 = 完全不锁轴，不发热也不震。'),
-        _tmcRow('运行电流档', t == null ? '--' : '${t.irun} / 31', kTmcIrun, live, t?.irun,
-            '直接写 IRUN 的 CS 值 0–31。一般不用改，改上面的“运行电流”就行。'),
-        _tmcRow('toff 关断时间', t == null ? '--' : '${t.toff}', kTmcToff, live, t?.toff,
-            '斩波器关断时间 1–15。影响电流纹波与噪声，一般 3–5。'),
+        _tmcRow(
+          '运行电流',
+          t == null ? '--' : '${t.rmsMa} mA',
+          kTmcRms,
+          live,
+          t?.rmsMa,
+          '电机转动时的电流。越大越有力，也越热。建议 300–1200 mA，默认 800。',
+        ),
+        _tmcRow(
+          '保持电流',
+          t == null ? '--' : '${t.ihold} / 31',
+          kTmcIhold,
+          live,
+          t?.ihold,
+          '停止时维持的电流档位（相对运行电流）。0 = 完全不锁轴，不发热也不震。',
+        ),
+        _tmcRow(
+          '运行电流档',
+          t == null ? '--' : '${t.irun} / 31',
+          kTmcIrun,
+          live,
+          t?.irun,
+          '直接写 IRUN 的 CS 值 0–31。一般不用改，改上面的“运行电流”就行。',
+        ),
+        _tmcRow(
+          'toff 关断时间',
+          t == null ? '--' : '${t.toff}',
+          kTmcToff,
+          live,
+          t?.toff,
+          '斩波器关断时间 1–15。影响电流纹波与噪声，一般 3–5。',
+        ),
         ListTile(
           dense: true,
           contentPadding: EdgeInsets.zero,
           title: Row(
             children: [
               const Text('细分  '),
-              Text('1/${t?.microsteps ?? "--"}',
-                  style: const TextStyle(fontFamily: 'Consolas', fontWeight: FontWeight.bold)),
+              Text(
+                '1/${t?.microsteps ?? "--"}',
+                style: const TextStyle(
+                  fontFamily: 'Consolas',
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
               const Spacer(),
               DropdownButton<int>(
                 value: _msValue(t?.microsteps),
@@ -661,7 +748,9 @@ class _FollowPageState extends State<FollowPage> {
           children: [
             const Spacer(),
             OutlinedButton(
-                onPressed: _open ? _link.queryTmc : null, child: const Text('刷新日志')),
+              onPressed: _open ? _link.queryTmc : null,
+              child: const Text('刷新日志'),
+            ),
           ],
         ),
         if (t != null)
@@ -684,12 +773,18 @@ class _FollowPageState extends State<FollowPage> {
           color: const Color(0xFF111111),
           padding: const EdgeInsets.all(8),
           child: _tmcLog.isEmpty
-              ? const Text('还没有 TMC 日志', style: TextStyle(fontFamily: 'Consolas', fontSize: 11))
+              ? const Text(
+                  '还没有 TMC 日志',
+                  style: TextStyle(fontFamily: 'Consolas', fontSize: 11),
+                )
               : ListView.builder(
                   itemCount: _tmcLog.length,
                   itemBuilder: (_, i) => Text(
                     _tmcLog[i],
-                    style: const TextStyle(fontFamily: 'Consolas', fontSize: 11),
+                    style: const TextStyle(
+                      fontFamily: 'Consolas',
+                      fontSize: 11,
+                    ),
                   ),
                 ),
         ),
@@ -703,15 +798,27 @@ class _FollowPageState extends State<FollowPage> {
     return ms;
   }
 
-  Widget _tmcRow(String name, String value, int key, bool live, int? cur, String hint) {
+  Widget _tmcRow(
+    String name,
+    String value,
+    int key,
+    bool live,
+    int? cur,
+    String hint,
+  ) {
     return ListTile(
       dense: true,
       contentPadding: EdgeInsets.zero,
       title: Row(
         children: [
           Text('$name  '),
-          Text(value,
-              style: const TextStyle(fontFamily: 'Consolas', fontWeight: FontWeight.bold)),
+          Text(
+            value,
+            style: const TextStyle(
+              fontFamily: 'Consolas',
+              fontWeight: FontWeight.bold,
+            ),
+          ),
           const Spacer(),
           if (live) const Icon(Icons.edit, size: 14),
         ],
@@ -738,7 +845,10 @@ class _FollowPageState extends State<FollowPage> {
           autofocus: true,
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, int.tryParse(c.text.trim())),
             child: const Text('写入'),
@@ -755,14 +865,13 @@ class _FollowPageState extends State<FollowPage> {
     if (n <= 0) return const SizedBox.shrink();
     final accelSteps = (_accelRevS2 * _spr).round();
     final cruiseSteps = (_speedRevS * _spr).round();
-    final peak =
-        _cal.peakRevsPerSec(n, accelSteps, cruiseSteps, _ms);
+    final peak = _cal.peakRevsPerSec(n, accelSteps, cruiseSteps, _ms);
     final limited = peak < _speedRevS * 0.98;
     return Text(
       limited
           ? '走 $n 步的峰值约 ${peak.toStringAsFixed(2)} 圈/秒，'
-              '达不到巡航 ${_speedRevS.toStringAsFixed(2)} 圈/秒（短行程加不完速）。'
-              '想更快就加大加速度。'
+                '达不到巡航 ${_speedRevS.toStringAsFixed(2)} 圈/秒（短行程加不完速）。'
+                '想更快就加大加速度。'
           : '走 $n 步可以达到巡航速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒。',
       style: TextStyle(
         fontSize: 11,
