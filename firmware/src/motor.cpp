@@ -38,6 +38,8 @@ static bool standbyOff = false;
 static uint8_t tmcStandby = 1;  // 1 = 开启待机断电
 static uint32_t lastMoveMs = 0;
 static const uint32_t kStandbyDelayMs = 2500;
+static bool movePending = false;
+static int32_t pendingTarget = 0;
 
 static uint8_t tmcSlave = 0;
 static uint8_t tmcVer = 0;
@@ -366,16 +368,34 @@ void motorUartBegin() {
 void motorSetPos(int32_t steps) {
   if (!stepper || !enabled) return;
   wake();
-  recoverRunningAtTarget();
+  const bool needsRecovery =
+      stepper->isRunning() && stepper->getCurrentPosition() == target;
+  if (needsRecovery) {
+    recoverRunningAtTarget();
+  }
   target = clampLim(steps);
+  if (needsRecovery) {
+    pendingTarget = target;
+    movePending = true;
+    return;
+  }
   stepper->moveTo(target);
 }
 
 void motorJog(int32_t delta) {
   if (!stepper || !enabled) return;
   wake();
-  recoverRunningAtTarget();
+  const bool needsRecovery =
+      stepper->isRunning() && stepper->getCurrentPosition() == target;
+  if (needsRecovery) {
+    recoverRunningAtTarget();
+  }
   target = clampLim(target + delta);
+  if (needsRecovery) {
+    pendingTarget = target;
+    movePending = true;
+    return;
+  }
   stepper->moveTo(target);
 }
 
@@ -452,6 +472,10 @@ void motorSetEnabled(bool on) {
 
 void motorStandbyTick() {
   wedgedTick();  // 每 loop 都要跑，与待机无关
+  if (movePending && stepper && !stepper->isRunning()) {
+    movePending = false;
+    stepper->moveTo(pendingTarget);
+  }
   if (!enabled || !tmcStandby || standbyOff) return;
   if (motorMoving()) {
     lastMoveMs = millis();
