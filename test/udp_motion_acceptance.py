@@ -141,6 +141,37 @@ class MotionAcceptance:
     def query(self):
         return self.command(CMD_QUERY)
 
+    def query_v2(self):
+        """Send QUERY and return its (legacy, STATUS_V2) replies.
+
+        QUERY answers with two packets, so both must be consumed to keep the
+        socket free of stale replies.
+        """
+        sequence = self._next_sequence()
+        self.sock.send(struct.pack(PACKET, MAGIC, CMD_QUERY, 0, sequence, 0, 0))
+        legacy = None
+        deadline = time.monotonic() + self.args.timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AcceptanceError("timeout waiting for QUERY replies")
+            self.sock.settimeout(remaining)
+            try:
+                data = self.sock.recv(64)
+            except socket.timeout:
+                missing = "STATUS" if legacy is None else "STATUS_V2"
+                raise AcceptanceError("timeout waiting for QUERY %s reply" % missing)
+            if not data or data[0] != MAGIC:
+                continue
+            status = self._status(data)
+            if status["sequence"] != sequence:
+                continue
+            if status["trusted"] is not None:
+                self.expect(legacy is not None,
+                            "QUERY returned STATUS_V2 before STATUS")
+                return legacy, status
+            legacy = status
+
     def wait_for(self, predicate, description):
         deadline = time.monotonic() + self.args.settle_timeout
         status = self.query()
@@ -181,6 +212,13 @@ class MotionAcceptance:
         status = self.command(CMD_SET_POS, 32)
         self.expect(status["target"] == 32, "SET_POS target was not 32")
         self.move_to(32)
+        legacy, v2 = self.query_v2()
+        self.expect(v2["pos"] == legacy["pos"] and v2["target"] == legacy["target"],
+                    "STATUS and STATUS_V2 disagreed on position/target")
+        self.expect(legacy["result"] == "completed",
+                    "STATUS did not report the finished move as completed")
+        self.expect(v2["result"] == "completed",
+                    "STATUS_V2 did not report the finished move as completed")
 
     def test_home_status_v2(self):
         status = self.home()
@@ -235,8 +273,12 @@ class MotionAcceptance:
         time.sleep(1.25)
         status = self.query()
         self.expect(not status["moving"], "communication timeout did not stop motion")
-        self.expect(status["pos"] != status["target"],
-                    "motion reached target despite communication timeout")
+        # motorStop() re-anchors target to the stop position, so pos == target is
+        # expected here; what must not happen is reaching the requested 19000.
+        self.expect(status["pos"] < 19000,
+                    "motion reached the requested target despite timeout")
+        self.expect(status["result"] == "stopped",
+                    "communication timeout reported result %r" % status["result"])
 
     def run(self):
         tests = (
