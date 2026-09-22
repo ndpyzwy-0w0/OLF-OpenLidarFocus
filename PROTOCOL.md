@@ -486,7 +486,7 @@ if (_moving) _link.setPos(_targetSteps);
 | 工具 | 用途 |
 | --- | --- |
 | `python firmware/tools/discover.py` | 逐网卡广播发现，打印 device_id / fw / mac / IP（多网卡机器必须用它，别用普通 socket 广播） |
-| `python firmware/tools/jog.py status|enable|pos N|jog N|stop|limits MIN MAX|speed HZ ACCEL` | 手工点动；加 `--latch` 走单次锁存 |
+| `python firmware/tools/jog.py status|enable|pos N|jog N|stop|limits MIN MAX|speed HZ ACCEL` | 手工点动；加 `--latch` 走单次锁存。注意 `pos N` 是**移动到** N（`a` 省略时为 0），读当前状态用 `status` —— 未使能时 `pos 0` 会被拒绝，并留下 `armed = 1` / `result = rejected` |
 | `python test/udp_motion_acceptance.py [--host 192.168.4.1]` | 黑盒运动验收，9 组用例，`exit 0` = 全过 |
 | `python test/repro_jog_truncation.py [--reps 3]` | 复现"单发 JOG 被 1 s 看门狗截断"：流式/锁存四种模式对照，`exit 0` = 与文档一致。会真实驱动电机 |
 
