@@ -19,18 +19,20 @@ enum FfCmd : uint8_t {
 };
 
 enum FfTmcKey : int32_t {
-  TMC_RMS = 1,
-  TMC_MICROSTEPS = 2,
-  TMC_STEALTH = 3,
-  TMC_TOFF = 4,
-  TMC_IHOLD = 5,
-  TMC_IRUN = 6,
+  TMC_RMS = 1,         // 运行电流 mA：转动时的电流，越大越有力也越热。建议 300–1200，默认 800
+  TMC_MICROSTEPS = 2,  // 细分：每整步细分数，越高越平滑，同样转速需要更多脉冲。8/16/…/256
+  TMC_STEALTH = 3,     // StealthChop：1=静音（静止可能有轻微嗡声），0=SpreadCycle（更响、力矩更硬）
+  TMC_TOFF = 4,        // toff 关断时间：1–15，影响电流纹波与噪声，一般 3–5
+  TMC_IHOLD = 5,       // 保持电流档：停止时维持的电流 0–31（相对 irun）。0=完全不锁轴、不发热
+  TMC_IRUN = 6,        // 运行电流档：直接写 IRUN 的 CS 值 0–31。一般不动，改用 TMC_RMS
+  TMC_STANDBY = 7,     // 待机断电：1=静止约 2.5 s 后断使能（不发热不震），0=一直保持电流
 };
 
 enum FfFlag : uint8_t {
   FF_FLAG_ENABLED = 1,
   FF_FLAG_MOVING = 2,
   FF_FLAG_UART_OK = 4,
+  FF_FLAG_STANDBY = 8,  // 处于待机断电状态：用户仍使能，但驱动已被释放
 };
 
 struct FfPacket {

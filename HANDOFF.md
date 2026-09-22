@@ -106,14 +106,11 @@ GPIO11 空着     模块 TX 空着     不要 10k
 
 UART 已通，硬件排查结束。剩下的都是软件/产品：
 
-1. **先按审查画布修那两个真问题**（都不依赖硬件）：
-   - 软限位默认值 `±1,000,000` → 与 App 的 `±20000` 一致（`motor.cpp` 两行）
-   - iOS 预览 `.resizeAspectFill` 与点击坐标的换算（标定精度前提）
-2. **在 Flutter 里实测一遍**：连接 → 使能 → Jog/滑条 → 确认轴真的转（别只看界面的 pos 数字；`pos` 是开环计数）。
-3. **确认电流合适**：现在寄存器默认 **800 mA RMS**。若镜头环发烫或丢步，在 Flutter TMC 面板调（参考工程用 400 mA）。
-4. 在 Flutter 里跑一遍 TMC 面板：改 mA / toff / 细分 / StealthChop，看日志是否有异常位。
-5. 上 Mac 编 iOS 真机包，测 LiDAR 距离与人脸跟踪，再做镜头标定。
-6. 不要把主控改成 `VACTUAL`。不要为 UART 再引入 TMCStepper。**不要加回 `neopixelWrite`。**
+1. **在 Flutter 里实测一遍**：连接 → 使能 → Jog/滑条 → 确认轴真的转（别只看界面的 pos 数字；`pos` 是开环计数）。Jog 想更快就加**加速度**，不是加巡航速度。
+2. **确认电流合适**：运行电流默认 800 mA RMS。若镜头环发烫或丢步，在 Flutter TMC 面板调（参考工程用 400 mA）。保持电流默认 200 mA，待机自动断电默认开。
+3. 在 Flutter 里跑一遍 TMC 面板：每个参数都有中文说明，改完看日志是否有异常位。
+4. 上 Mac 编 iOS 真机包，测 LiDAR 距离与人脸跟踪，再做镜头标定。
+5. 不要把主控改成 `VACTUAL`。不要为 UART 再引入 TMCStepper。**不要加回 `neopixelWrite`。**
 
 ## 固件要点
 
@@ -169,6 +166,55 @@ TMC 报文（和 [这篇](https://blog.csdn.net/m0_64386340/article/details/1414
 
 TMCStepper 已从 `platformio.ini` 拿掉。CRC 在 `motor.cpp` 里。
 
+## 速度 / 加速度（为什么“调速不生效”）
+
+`motorSetSpeed(hz, accel)` 里 **hz 是巡航速度，accel 才是短行程的瓶颈**。位置控制下跑固定距离 d：
+峰值速度 ≈ `sqrt(2 * accel * d)`，到不了 hz 就没意义。
+
+实测（800 步 jog）：
+
+| 设定 | 结果 |
+| --- | --- |
+| speed 2000 / accel 20000 | ~0.46 s（匀速段限制） |
+| speed 20000 / accel 20000 | ~0.46 s（**没变快**，被加速度卡住） |
+
+所以 App 里 `80/800` 步的 Jog 想更快，要加 **加速度**，不是加巡航速度。App 的加速度滑条范围 20000–600000，默认 200000。巡航速度的实测校正是：`TSTEP` 越小越快，2000/8000/20000 步每秒 对应 `TSTEP` ≈ 6041 / 1509 / 603。
+
+## TMC2209 可调参数
+
+App 面板每个参数都配中文说明；固件侧 `FfTmcKey`（`include/protocol.h`）与 `motorTmcSet` 的 key 一一对应。
+
+| key | 参数 | 含义 / 范围 |
+| --- | --- | --- |
+| 1 | 运行电流 | 转动时的电流 mA，300–1200，默认 800。越大越有力越热 |
+| 2 | 细分 | 每整步细分数 8/16/…/256，越高越平滑、脉冲越多 |
+| 3 | StealthChop | 1=静音（静止可能有轻微嗡声），0=SpreadCycle（响、力矩硬） |
+| 4 | toff | 斩波关断时间 1–15，一般 3–5 |
+| 5 | 保持电流 | 停止时维持的电流档 0–31（相对 irun）。**0 = 不锁轴、不发热** |
+| 6 | 运行电流档 | 直接写 IRUN 的 CS 值 0–31，一般不用动 |
+| 7 | **待机断电** | 1=静止约 2.5 s 后断使能（不发热不震），0=一直保持电流 |
+
+**注意 `CS_ACTUAL` 是“配置值”不是“实测电流”**：待机断使能后它仍显示 IHOLD 档（如 3），别据此判断待机没生效——看状态位 `FF_FLAG_STANDBY`（App 显示 `SLP`）和轴是否发烫。
+
+## 待机发热 / 轻微震动
+
+静止时的发热与嗡震都来自**保持电流**。两级处理：
+
+1. **默认保持电流从 400 mA 降到 200 mA**（`kHoldMa`），CS 档从 6 降到 3——发热约为原来 1/4。
+2. **待机自动断电**（key 7，默认开）：静止约 2.5 s 后拉高 EN 释放驱动，0 发热 0 震动；任何运动指令立刻唤醒。
+
+代价：待机时**没有锁轴力**。跟焦是开环的，若镜头环受重力/弹簧会自己走，位置就会丢——这时把待机断电关掉（App 开关），或把保持电流调到 0 之外的值。
+
+## 软限位
+
+固件默认软限位是 **±20000**，与 App 未标定前的取值一致。**不要再改回 ±1000000**：标定流程本身就是“Jog 到实焦再记录”，那一步最容易顶到镜头机械限位，而限位要到标定完成才由 App 下发。
+
+## 已知未复现的异常
+
+**一两次观察到** `run=1` 卡住、`pos` 冻结、`TSTEP` 恒定不变的“空转重放”状态（驱动在收脉冲，但固件的开环位置不推进）。之后用待机开关 A/B、200 次连续 SET_POS、JOG×10、STOP 中断恢复、把 TMC 寄存器以 12 次/秒连拉 8 秒，**都没能复现**。复位即恢复。
+
+若再遇到：**先看 `STST`/`TSTEP` 判断轴是否真在动**（`pos` 不可信），断电重启即可。这也是把软限位收到 ±20000 的原因之一——真有异常指令也不会把镜头推出很远。
+
 ## UDP 协议
 
 12 字节 LE，magic `0x46`。实现：`firmware/include/protocol.h`、`lib/ff_protocol.dart`。
@@ -183,9 +229,9 @@ TMCStepper 已从 `platformio.ini` 拿掉。CRC 在 `motor.cpp` 里。
 | 0x06 QUERY | 回 STATUS 0x81 |
 | 0x07 SET_SPEED | a=Hz b=accel |
 | 0x08 TMC_QUERY | 回 22 字节 TMC_DUMP 0x82 |
-| 0x09 TMC_SET | a=key b=val |
+| 0x09 TMC_SET | a=key b=val（key 见上面 TMC 表，7=待机断电） |
 
-flags：bit0 EN，bit1 RUN，bit2 UART_OK。
+flags：bit0 EN，bit1 RUN，bit2 UART_OK，bit3 STANDBY（待机已断使能）。
 
 TMC keys：1 rms mA，2 细分，3 stealth，4 toff，5 ihold，6 irun。
 
@@ -197,7 +243,10 @@ TMC keys：1 rms mA，2 细分，3 stealth，4 toff，5 ihold，6 irun。
 - `windows/runner/CMakeLists.txt` 已 `/utf-8`（MSVC 中文）。
 - 滑条有 `_sliderDirty`：不拖滑条时不要每 20ms 把 Jog 打回 0。
 - 连接后自动 `enable(true)`。
+- 速度与加速度是两个滑条；加速度默认 200000，别写死成 20000，否则调速滑条看起来没反应。
 - iOS：`ios/Runner/LidarPlugin.swift`，LiDAR 约 0.2–5m。Windows 不能测。
+
+**iOS 未修的已知问题（会影响标定精度）**：预览层用 `.resizeAspectFill`，竖屏 480×640 画面被裁掉两侧再铺满屏幕；但点击坐标按 view 边界直接归一化后当深度图坐标用，**取景点会系统性偏移**，越靠画面边缘越偏。这个偏移标定补不回来，必须先把 aspect-fill 的显示矩形算出来再反算，或改成 `.resizeAspect` 加黑边。
 
 ## 约束（用户规则）
 

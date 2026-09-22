@@ -20,10 +20,12 @@ const int kTmcStealth = 3;
 const int kTmcToff = 4;
 const int kTmcIhold = 5;
 const int kTmcIrun = 6;
+const int kTmcStandby = 7;
 
 const int kFlagEnabled = 1;
 const int kFlagMoving = 2;
 const int kFlagUartOk = 4;
+const int kFlagStandby = 8;
 
 class FfPacket {
   final int cmd;
@@ -147,6 +149,8 @@ class MotorStatus {
   final bool enabled;
   final bool moving;
   final bool uartOk;
+  /// 处于待机断电：用户仍使能，但驱动已释放（不发热、不震动）。
+  final bool standby;
 
   const MotorStatus({
     required this.pos,
@@ -154,6 +158,7 @@ class MotorStatus {
     required this.enabled,
     required this.moving,
     required this.uartOk,
+    this.standby = false,
   });
 
   factory MotorStatus.fromPacket(FfPacket p) {
@@ -163,6 +168,7 @@ class MotorStatus {
       enabled: p.flags & kFlagEnabled != 0,
       moving: p.flags & kFlagMoving != 0,
       uartOk: p.flags & kFlagUartOk != 0,
+      standby: p.flags & kFlagStandby != 0,
     );
   }
 }

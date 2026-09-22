@@ -14,6 +14,7 @@ static void fillStatus(FfPacket *p) {
   if (motorEnabled()) p->flags |= FF_FLAG_ENABLED;
   if (motorMoving()) p->flags |= FF_FLAG_MOVING;
   if (motorUartOk()) p->flags |= FF_FLAG_UART_OK;
+  if (motorStandbyOff()) p->flags |= FF_FLAG_STANDBY;
   p->pad = 0;
   p->a = motorPos();
   p->b = motorTarget();

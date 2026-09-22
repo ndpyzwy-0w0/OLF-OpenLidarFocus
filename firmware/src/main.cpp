@@ -97,6 +97,7 @@ void loop() {
   dns.processNextRequest();
   http.handleClient();
   protocolPoll();
+  motorStandbyTick();
   oledPoll();
 
   bool btn = digitalRead(PIN_BTN);

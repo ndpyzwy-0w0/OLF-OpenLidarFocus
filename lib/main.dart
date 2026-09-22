@@ -58,6 +58,10 @@ class _FollowPageState extends State<FollowPage> {
   int _pos = 0;
   int _target = 0;
   int _speedHz = 8000;
+  // 短行程跑不到巡航速度，峰值 ≈ √(2×加速度×步数)，所以加速度才是“快慢”的主要旋钮。
+  int _accel = 200000;
+  bool _standbyFeature = true; // 待机自动断电开关（固件默认开）
+  bool _standbyOff = false;    // 当前是否已断电（来自固件状态位）
   double _slider = 0.5;
   double? _distance;
   double _u = 0.5;
@@ -84,6 +88,7 @@ class _FollowPageState extends State<FollowPage> {
         _enabled = s.enabled;
         _moving = s.moving;
         _uartOk = s.uartOk;
+        _standbyOff = s.standby;
       });
     };
     _link.onTmc = (d) {
@@ -164,7 +169,8 @@ class _FollowPageState extends State<FollowPage> {
   Future<void> _connect() async {
     try {
       await _link.open();
-      _link.setSpeed(_speedHz, 20000);
+      _link.setSpeed(_speedHz, _accel);
+      _link.setTmc(kTmcStandby, _standbyFeature ? 1 : 0);
       _link.enable(true);
       _link.query();
       _link.queryTmc();
@@ -207,7 +213,7 @@ class _FollowPageState extends State<FollowPage> {
             child: Center(
               child: Text(
                 _open
-                    ? '${_enabled ? "EN" : "OFF"} ${_moving ? "RUN" : "IDLE"} ${_uartOk ? "UART" : ""}'
+                    ? '${_enabled ? "EN" : "OFF"} ${_moving ? "RUN" : (_standbyOff ? "SLP" : "IDLE")} ${_uartOk ? "UART" : ""}'
                     : '未连接',
                 style: const TextStyle(fontSize: 12),
               ),
@@ -313,7 +319,20 @@ class _FollowPageState extends State<FollowPage> {
                     max: 20000,
                     value: _speedHz.toDouble(),
                     onChanged: (v) => setState(() => _speedHz = v.round()),
-                    onChangeEnd: (v) => _link.setSpeed(v.round(), 20000),
+                    onChangeEnd: (v) => _link.setSpeed(v.round(), _accel),
+                  ),
+                  Text('加速度 $_accel step/s²'),
+                  Slider(
+                    min: 20000,
+                    max: 600000,
+                    value: _accel.toDouble().clamp(20000, 600000),
+                    onChanged: (v) => setState(() => _accel = v.round()),
+                    onChangeEnd: (v) => _link.setSpeed(_speedHz, v.round()),
+                  ),
+                  const Text(
+                    '短行程达不到巡航速度（峰值 ≈ √(2×加速度×步数)）。'
+                    '80/800 步这种 Jog 想更快，加大加速度，不是加大速度。',
+                    style: TextStyle(fontSize: 11),
                   ),
                   Row(
                     children: [
@@ -355,46 +374,92 @@ class _FollowPageState extends State<FollowPage> {
 
   Widget _tmcPanel() {
     final t = _tmc;
+    final live = _open && t?.uartOk == true;
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       title: Text(
         t == null
-            ? 'TMC2209'
-            : (t.uartOk ? 'TMC2209 UART  ver=0x${t.version.toRadixString(16)}' : 'TMC2209 无 UART'),
+            ? 'TMC2209 驱动参数'
+            : (t.uartOk
+                ? 'TMC2209 UART  ver=0x${t.version.toRadixString(16)}'
+                : 'TMC2209 无 UART（仅待机设置可用）'),
       ),
       subtitle: t == null
           ? const Text('连接后自动刷新')
-          : Text('${t.rmsMa} mA  1/${t.microsteps}  ${t.stealth ? "静音" : "spread"}'),
+          : Text('${t.rmsMa} mA · 1/${t.microsteps} · '
+              '${t.stealth ? "StealthChop 静音" : "SpreadCycle"}'),
       children: [
+        // 每个可编辑参数：中文名 + 当前值 + 一行中文说明，点一下写入。
+        _tmcRow('运行电流', t == null ? '--' : '${t.rmsMa} mA', kTmcRms, live, t?.rmsMa,
+            '电机转动时的电流。越大越有力，也越热。建议 300–1200 mA，默认 800。'),
+        _tmcRow('保持电流', t == null ? '--' : '${t.ihold} / 31', kTmcIhold, live, t?.ihold,
+            '停止时维持的电流档位（相对运行电流）。0 = 完全不锁轴，不发热也不震。'),
+        _tmcRow('运行电流档', t == null ? '--' : '${t.irun} / 31', kTmcIrun, live, t?.irun,
+            '直接写 IRUN 的 CS 值 0–31。一般不用改，改上面的“运行电流”就行。'),
+        _tmcRow('toff 关断时间', t == null ? '--' : '${t.toff}', kTmcToff, live, t?.toff,
+            '斩波器关断时间 1–15。影响电流纹波与噪声，一般 3–5。'),
+        ListTile(
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          title: Row(
+            children: [
+              const Text('细分  '),
+              Text('1/${t?.microsteps ?? "--"}',
+                  style: const TextStyle(fontFamily: 'Consolas', fontWeight: FontWeight.bold)),
+              const Spacer(),
+              DropdownButton<int>(
+                value: _msValue(t?.microsteps),
+                hint: const Text('改'),
+                items: const [8, 16, 32, 64, 128, 256]
+                    .map((n) => DropdownMenuItem(value: n, child: Text('1/$n')))
+                    .toList(),
+                onChanged: !live
+                    ? null
+                    : (v) {
+                        if (v != null) _link.setTmc(kTmcMicrosteps, v);
+                      },
+              ),
+            ],
+          ),
+          subtitle: const Text(
+            '每个整步细分成多少微步。越高越平滑越安静，但同样转速需要更多脉冲。',
+            style: TextStyle(fontSize: 11),
+          ),
+        ),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
+          dense: true,
           title: const Text('StealthChop 静音'),
+          subtitle: const Text(
+            '开 = 安静模式（静止时可能有轻微嗡声）；关 = SpreadCycle，响一点但力矩更硬。',
+            style: TextStyle(fontSize: 11),
+          ),
           value: t?.stealth ?? true,
-          onChanged: !_open || t?.uartOk != true
-              ? null
-              : (v) => _link.setTmc(kTmcStealth, v ? 1 : 0),
+          onChanged: !live ? null : (v) => _link.setTmc(kTmcStealth, v ? 1 : 0),
         ),
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: const Text('待机自动断电'),
+          subtitle: Text(
+            '停止约 2.5 秒后释放驱动：不发热、不震动。'
+            '代价是待机时没有锁轴力，镜头环若会自己走就关掉它。'
+            '${_standbyOff ? "（当前已断电）" : ""}',
+            style: const TextStyle(fontSize: 11),
+          ),
+          value: _standbyFeature,
+          onChanged: !_open
+              ? null
+              : (v) {
+                  setState(() => _standbyFeature = v);
+                  _link.setTmc(kTmcStandby, v ? 1 : 0);
+                },
+        ),
+        Row(
           children: [
-            _tmcChip('电流 mA', t?.rmsMa, kTmcRms),
-            _tmcChip('toff', t?.toff, kTmcToff),
-            _tmcChip('ihold', t?.ihold, kTmcIhold),
-            _tmcChip('irun', t?.irun, kTmcIrun),
-            DropdownButton<int>(
-              value: _msValue(t?.microsteps),
-              hint: const Text('细分'),
-              items: const [8, 16, 32, 64, 128, 256]
-                  .map((n) => DropdownMenuItem(value: n, child: Text('1/$n')))
-                  .toList(),
-              onChanged: !_open || t?.uartOk != true
-                  ? null
-                  : (v) {
-                      if (v != null) _link.setTmc(kTmcMicrosteps, v);
-                    },
-            ),
-            OutlinedButton(onPressed: _open ? _link.queryTmc : null, child: const Text('刷新日志')),
+            const Spacer(),
+            OutlinedButton(
+                onPressed: _open ? _link.queryTmc : null, child: const Text('刷新日志')),
           ],
         ),
         if (t != null)
@@ -436,13 +501,24 @@ class _FollowPageState extends State<FollowPage> {
     return ms;
   }
 
-  Widget _tmcChip(String label, int? value, int key) {
-    return ActionChip(
-      label: Text('$label ${value ?? "--"}'),
-      onPressed: !_open || _tmc?.uartOk != true
+  Widget _tmcRow(String name, String value, int key, bool live, int? cur, String hint) {
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      title: Row(
+        children: [
+          Text('$name  '),
+          Text(value,
+              style: const TextStyle(fontFamily: 'Consolas', fontWeight: FontWeight.bold)),
+          const Spacer(),
+          if (live) const Icon(Icons.edit, size: 14),
+        ],
+      ),
+      subtitle: Text(hint, style: const TextStyle(fontSize: 11)),
+      onTap: !live
           ? null
           : () async {
-              final v = await _askInt(label, value);
+              final v = await _askInt(name, cur);
               if (v != null) _link.setTmc(key, v);
             },
     );

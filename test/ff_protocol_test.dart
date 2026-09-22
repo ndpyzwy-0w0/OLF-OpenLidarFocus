@@ -27,8 +27,24 @@ void main() {
     expect(s.enabled, isTrue);
     expect(s.moving, isTrue);
     expect(s.uartOk, isFalse);
+    expect(s.standby, isFalse);
     expect(s.pos, -99);
     expect(s.target, 100);
+  });
+
+  test('standby flag is reported independently of enabled', () {
+    final p = FfPacket.decode(
+      const FfPacket(
+        cmd: kFfStatus,
+        flags: kFlagEnabled | kFlagUartOk | kFlagStandby,
+        a: 5,
+        b: 5,
+      ).encode(),
+    )!;
+    final s = MotorStatus.fromPacket(p);
+    expect(s.enabled, isTrue, reason: '用户仍处于使能意图');
+    expect(s.standby, isTrue, reason: '但驱动已被待机断电释放');
+    expect(s.moving, isFalse);
   });
 
   test('tmc dump 22-byte layout', () {

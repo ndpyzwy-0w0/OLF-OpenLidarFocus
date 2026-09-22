@@ -1,4 +1,5 @@
 #include "motor.h"
+#include "protocol.h"
 
 #include <Arduino.h>
 #include <string.h>
@@ -9,7 +10,7 @@
 
 static const float kRSense = 0.11f;
 static const uint16_t kRmsMa = 800;
-static const uint16_t kHoldMa = 400;
+static const uint16_t kHoldMa = 200;  // 保持电流：低一点，待机不那么烫、也不易有轻微嗡震
 static const uint16_t kMicrosteps = 16;
 static const uint32_t kDefaultHz = 8000;
 static const int32_t kDefaultAccel = 20000;
@@ -18,11 +19,19 @@ static FastAccelStepperEngine engine;
 static FastAccelStepper *stepper = nullptr;
 static char uartHint[24] = "UART ?";
 
-static int32_t minLim = -1000000;
-static int32_t maxLim = 1000000;
+// 软限位默认值与 App 一致（App 未标定前按 ±20000 取值）。
+// 之前是 ±1000000：标定流程本身要 Jog 到实焦，那一刻限位等于没有，容易顶坏镜头。
+static int32_t minLim = -20000;
+static int32_t maxLim = 20000;
 static int32_t target = 0;
 static bool enabled = false;
 static bool uartOk = false;
+
+// 待机断电：用户仍处于“使能”意图，但物理上已释放驱动，避免静止时发热和轻微震动。
+static bool standbyOff = false;
+static uint8_t tmcStandby = 1;  // 1 = 开启待机断电
+static uint32_t lastMoveMs = 0;
+static const uint32_t kStandbyDelayMs = 2500;
 
 static uint8_t tmcSlave = 0;
 static uint8_t tmcVer = 0;
@@ -142,6 +151,14 @@ static uint8_t msToMres(uint16_t ms) {
   return 8;
 }
 
+// 把当前参数写进 TMC2209。寄存器含义：
+//   0x00 GCONF       bit6 pdn_disable(用 UART 必须置1) bit7 mstep_reg(细分走寄存器)
+//                    bit8 multistep_filt(滤波) bit2 en_spreadCycle(0=StealthChop 静音)
+//   0x10 IHOLD_IRUN  bit0-4 IHOLD 保持电流档 bit8-12 IRUN 运行电流档 bit16-19 IHOLDDELAY
+//   0x11 TPOWERDOWN  静止多久后把电流降到 IHOLD（单位约 2^18 tCLK，这里约 0.1 s 级）
+//   0x6C CHOPCONF    bit0-3 toff 关断时间 bit4-6 hstrt bit7-10 hend bit15 vsense
+//                    bit24-27 MRES 细分 bit28 intpol 微步插值
+//   0x70 PWMCONF     自动缩放/频率等，0xC10D0024 是 StealthChop 的常用推荐值
 static void tmcApply() {
   tmcIrunCs = maToCs(tmcRmsMa);
   tmcIholdCs = maToCs(tmcHoldMa);
@@ -247,10 +264,19 @@ static int32_t clampLim(int32_t v) {
 }
 
 static void applyEnable() {
-  digitalWrite(PIN_EN, enabled ? LOW : HIGH);
+  bool on = enabled && !standbyOff;
+  digitalWrite(PIN_EN, on ? LOW : HIGH);
   if (!stepper) return;
-  if (enabled) stepper->enableOutputs();
+  if (on) stepper->enableOutputs();
   else stepper->disableOutputs();
+}
+
+// 运动前先唤醒：待机断电后再发位置，必须重新使能，否则只会记数不动轴。
+static void wake() {
+  lastMoveMs = millis();
+  if (!standbyOff) return;
+  standbyOff = false;
+  applyEnable();
 }
 
 void motorBegin() {
@@ -285,12 +311,14 @@ void motorUartBegin() {
 
 void motorSetPos(int32_t steps) {
   if (!stepper || !enabled) return;
+  wake();
   target = clampLim(steps);
   stepper->moveTo(target);
 }
 
 void motorJog(int32_t delta) {
   if (!stepper || !enabled) return;
+  wake();
   target = clampLim(target + delta);
   stepper->moveTo(target);
 }
@@ -299,13 +327,30 @@ void motorStop() {
   if (!stepper) return;
   stepper->stopMove();
   target = stepper->getCurrentPosition();
+  lastMoveMs = millis();
 }
 
 void motorSetEnabled(bool on) {
   enabled = on;
   if (!on) motorStop();
+  standbyOff = false;
+  lastMoveMs = millis();
   applyEnable();
 }
+
+void motorStandbyTick() {
+  if (!enabled || !tmcStandby || standbyOff) return;
+  if (stepper && stepper->isRunning()) {
+    lastMoveMs = millis();
+    return;
+  }
+  if (millis() - lastMoveMs < kStandbyDelayMs) return;
+  standbyOff = true;
+  applyEnable();
+  Serial.println("standby: driver released");
+}
+
+bool motorStandbyOff() { return standbyOff; }
 
 void motorSetLimits(int32_t minSteps, int32_t maxSteps) {
   if (minSteps > maxSteps) {
@@ -326,6 +371,7 @@ void motorSetSpeed(int32_t hz, int32_t accel) {
   if (hz < 100) hz = 100;
   if (hz > 40000) hz = 40000;
   if (accel < 100) accel = 100;
+  if (accel > 1000000) accel = 1000000;
   stepper->setSpeedInHz((uint32_t)hz);
   stepper->setAcceleration((uint32_t)accel);
 }
@@ -367,30 +413,39 @@ void motorTmcSnap(TmcSnap *o) {
 }
 
 void motorTmcSet(int32_t key, int32_t val) {
+  // 待机断电不是芯片寄存器，UART 没通也要能用。
+  if (key == TMC_STANDBY) {
+    tmcStandby = val ? 1 : 0;
+    if (!tmcStandby && standbyOff) {
+      standbyOff = false;
+      applyEnable();
+    }
+    return;
+  }
   if (!uartOk) return;
   switch (key) {
-    case 1:
+    case TMC_RMS:
       if (val < 100) val = 100;
       if (val > 2000) val = 2000;
       tmcRmsMa = (uint16_t)val;
       break;
-    case 2:
+    case TMC_MICROSTEPS:
       tmcMsSet = (uint16_t)val;
       break;
-    case 3:
+    case TMC_STEALTH:
       tmcStealthSet = val ? 1 : 0;
       break;
-    case 4:
+    case TMC_TOFF:
       if (val < 1) val = 1;
       if (val > 15) val = 15;
       tmcToffSet = (uint8_t)val;
       break;
-    case 5:
+    case TMC_IHOLD:
       if (val < 0) val = 0;
       if (val > 31) val = 31;
       tmcHoldMa = (uint16_t)((float)val / 31.0f * (float)tmcRmsMa);
       break;
-    case 6:
+    case TMC_IRUN:
       if (val < 0) val = 0;
       if (val > 31) val = 31;
       tmcRmsMa = (uint16_t)((float)(val + 1) / 32.0f * 0.325f / (kRSense + 0.02f) / 1.41421f * 1000.0f);

@@ -52,7 +52,7 @@ void oledPoll() {
   lastTarget = tgt;
   lastMs = now;
 
-  const char *st = !motorEnabled() ? "OFF" : (motorMoving() ? "RUN" : "EN");
+  const char *st = !motorEnabled() ? "OFF" : (motorStandbyOff() ? "SLP" : (motorMoving() ? "RUN" : "EN"));
   u8g2.clearBuffer();
   u8g2.setCursor(0, 7);
   u8g2.print("FF ");

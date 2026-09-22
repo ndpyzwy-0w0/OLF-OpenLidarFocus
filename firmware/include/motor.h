@@ -13,11 +13,17 @@ static const int PIN_TMC_RX = 12;
 
 void motorBegin();
 void motorUartBegin();
+// 待机省电：静止一段时间后自动断使能（不发热、不震动）。
+// 任何运动指令都会立刻唤醒；motorStandbyTick() 需要在 loop 里周期调用。
+void motorStandbyTick();
+bool motorStandbyOff();
 void motorSetPos(int32_t steps);
 void motorJog(int32_t delta);
 void motorStop();
 void motorSetEnabled(bool on);
 void motorSetLimits(int32_t minSteps, int32_t maxSteps);
+// hz 巡航速度（步/秒），accel 加速度（步/秒²）。
+// 短行程跑不到巡航速度，峰值 ≈ sqrt(2*accel*距离)——想“更快”通常要加大 accel。
 void motorSetSpeed(int32_t hz, int32_t accel);
 int32_t motorPos();
 int32_t motorTarget();
