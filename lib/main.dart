@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -89,6 +90,7 @@ class _FollowPageState extends State<FollowPage> {
   int? _lastSent;
   bool _sliderDirty = false;
   DateTime _lastQuery = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastProbe = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime? _lastStatusAt;
   int _lastSentSequence = 0;
   int _lastEchoedSequence = 0;
@@ -97,6 +99,9 @@ class _FollowPageState extends State<FollowPage> {
   String _msg = '连手机热点 FF-XXXXXX / change-me';
   TmcDump? _tmc;
   final _tmcLog = <String>[];
+  Object? _socketError;
+  DateTime? _socketErrorAt;
+  List<String> _localAddrs = const [];
   DateTime _lastTmc = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
@@ -140,6 +145,13 @@ class _FollowPageState extends State<FollowPage> {
     _link.onSent = (sequence) {
       if (!mounted) return;
       setState(() => _lastSentSequence = sequence);
+    };
+    _link.onSocketError = (e) {
+      if (!mounted) return;
+      setState(() {
+        _socketError = e;
+        _socketErrorAt = DateTime.now();
+      });
     };
     _link.onTmc = (d) {
       if (!mounted) return;
@@ -190,6 +202,18 @@ class _FollowPageState extends State<FollowPage> {
     if (now.difference(_lastQuery) > const Duration(milliseconds: 200)) {
       _lastQuery = now;
       _link.query();
+    }
+    // 链路探测：固件会把非协议包原样回显（HANDOFF §6）。
+    // 「已连接」只代表本地 bind 成功，UDP 从不验证对端，所以必须靠回显判断连通性。
+    if (now.difference(_lastProbe) > const Duration(seconds: 1)) {
+      _lastProbe = now;
+      _link.probe();
+      final echo = _link.lastEchoAt;
+      debugPrint(
+        'LINK open=$_open local=${_link.localPort} rx=${_link.rxPackets} '
+        'echo=${echo == null ? "NONE" : "${now.difference(echo).inMilliseconds}ms"} '
+        'sent=$_lastSentSequence echoed=$_lastEchoedSequence err=$_socketError',
+      );
     }
     if (now.difference(_lastTmc) > const Duration(seconds: 1)) {
       _lastTmc = now;
@@ -336,6 +360,19 @@ class _FollowPageState extends State<FollowPage> {
       _link.enable(true);
       _link.query();
       _link.queryTmc();
+      // 列出本机各网卡地址：确认 App 是否真的看到 192.168.4.x 这块网卡。
+      try {
+        final ifs = await NetworkInterface.list(
+          type: InternetAddressType.IPv4,
+          includeLoopback: false,
+        );
+        _localAddrs = [
+          for (final i in ifs)
+            for (final a in i.addresses) '${i.name}=${a.address}',
+        ];
+      } catch (e) {
+        _localAddrs = ['枚举失败 $e'];
+      }
       setState(() {
         _open = true;
         _msg = '已连接 192.168.4.1:4210';
@@ -669,7 +706,40 @@ class _FollowPageState extends State<FollowPage> {
     final sequenceOk =
         _lastSentSequence != 0 && _lastSentSequence == _lastEchoedSequence;
     final linkLive = statusLive;
+    final echoAge = _link.lastEchoAt == null
+        ? null
+        : DateTime.now().difference(_link.lastEchoAt!);
+    final echoLive = echoAge != null && echoAge < const Duration(seconds: 3);
     final rows = <({String name, bool ok, String detail})>[
+      (
+        name: '链路探测（非协议包回显）',
+        ok: echoLive,
+        detail: !_open
+            ? '未连接'
+            : '发 ${_link.probeTx} / 收 ${_link.rxPackets} · '
+                  '${echoAge == null ? "无回显" : "${echoAge.inMilliseconds} ms 前"}',
+      ),
+      (
+        name: '本机 UDP 端口',
+        ok: _open,
+        detail: _link.localPort == null
+            ? '未绑定'
+            : '${_link.localAddr}:${_link.localPort}',
+      ),
+      (
+        name: '本机网卡地址',
+        ok: _localAddrs.any((a) => a.contains('192.168.4.')),
+        detail: _localAddrs.isEmpty ? '未枚举' : _localAddrs.join(', '),
+      ),
+      if (_socketError != null)
+        (
+          name: '套接字错误',
+          ok: false,
+          detail: _socketErrorAt == null
+              ? '$_socketError'
+              : '${DateTime.now().difference(_socketErrorAt!).inSeconds}s 前：'
+                    '$_socketError',
+        ),
       (
         name: 'UDP 状态回包',
         ok: statusLive,

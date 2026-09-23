@@ -521,6 +521,49 @@ Unhandled Exception: SocketException: Send failed (OS Error: No route to host, e
 失败是以**异步 stream 错误**抛出的，所以 `_connect()` 外层的 `try/catch` 拦不住（它只能拦同步
 throw），会带着"触发发送那一行"的调用栈变成 Unhandled Exception。修法是在 `listen` 加
 `onError` 兜底（一处即可覆盖所有调用方），并把 `onPressed: _connect` 丢掉的 Future 收好。
+（已修：`listen` 带 `onError`，"功能可用性诊断"面板会把最近的套接字错误显示出来。）
+
+#### 已知运行期问题：iOS 上 App 完全没网（`errno 65`）
+
+**症状**：App 内 UDP 收发全无（诊断面板「UDP 状态回包」一直"尚未收到"、走步无反应），
+但**同一时刻 Safari 能打开 `http://192.168.4.1/`**，信号满格。
+
+**根因不是代码，是 iOS 的本地网络权限数据库损坏**：设置 → 隐私与安全性 → 本地网络里
+开关显示"已授权"，但系统实际按"拒绝"执行。表现是该 App 的**所有**出站连接 —— UDP/TCP、
+局域网、公网、**甚至发往本机自己的地址** —— 一律 `No route to host (errno = 65)`。
+
+**判定方法**（不用改代码就能区分），App 内分别对这几类目标发包：
+
+| 目标 | 权限被拦时的结果 |
+| --- | --- |
+| 同网段 `192.168.4.1` | `errno 65` |
+| 本机自己的地址（不经过 ARP/路由） | 也是 `errno 65` |
+| 公网 `8.8.8.8:53` / `1.1.1.1:443` | 也是 `errno 65` |
+| Safari 同一时刻访问同样地址 | 正常 |
+
+"连发给自己都失败 + Safari 正常"这个组合，就排除了选路、网卡、蜂窝/VPN 出口，
+只剩"按 App 拦截"。
+
+**修复**：设置 → 通用 → 传输或还原 iPhone → 还原 → **还原位置与隐私**，重启后重新授权。
+本文实测修复后：`probeTx=32 rx=396`、`errno=null`、`tcp 192.168.4.1:80 OK`、固件回显正常。
+
+**已排除的假设**（都实测过，都不是原因）：
+
+- **出口网卡选错**：显式 `bind` 到 `192.168.4.4` 仍失败。而且 Apple 明确不建议去猜本机 IP
+  （"Don't Try to Get the Device's IP Address"），所以 `open()` 保持 `anyIPv4` 通配绑定，
+  由内核按目标挑出口。
+- **蜂窝数据抢占**：关蜂窝、开飞行模式只留 Wi-Fi，一样失败。
+- **长连接 socket 坏掉**：每次新建 socket 同样失败。
+- **代理/VPN 工具残留**：关掉并删除 VPN 配置、重启手机后仍然失败。
+  但如果机器上装了 Shadowrocket 这类工具，**先关掉再排查**，否则现象会互相叠加。
+- **`NSLocalNetworkUsageDescription` 缺失**：已确认该键进了构建产物的 `Info.plist`。
+
+**注意**：重装 App 会清掉权限记录，需要重新弹窗授权；授权后若仍不通，先试上面的"还原位置与隐私"。
+
+**另一个独立限制**：往广播地址（`192.168.4.255` / `255.255.255.255`）发送会报
+`Permission denied (errno = 13)` —— iOS 的**组播需要单独的
+`com.apple.developer.networking.multicast` entitlement**。所以 §10 里计划的"用 UDP 广播发现
+设备"在 iOS 上必须先申请这个权限，否则走不通。
 
 ## 9. 测试和验收
 
@@ -692,10 +735,12 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 - 实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。
 - 把固定 `192.168.4.1` 替换为设备发现结果。
 - 完善 HOME 提示，明确它是软件校零而非机械回零。
-- **修未连电机时刷屏的未捕获 `SocketException`**（见 §8.1）：`MotorLink.open()` 的
-  `sock.listen` 缺 `onError`，UDP 发送失败会变成未处理的异步 stream 错误，
-  `_connect()` 的 `try/catch` 拦不住。在 `listen` 加 `onError` 一处兜底即可，
-  顺带把 `onPressed: _connect` 丢掉的 Future 收好。
+- ~~修未连电机时刷屏的未捕获 `SocketException`~~（见 §8.1）：已在 `MotorLink.open()` 的
+  `sock.listen` 加 `onError` 兜底，并把 `onPressed: _connect` 丢掉的 Future 收好。
+- **iOS 真机 UDP 不通的根因是本地网络权限数据库损坏**，与代码无关，修法见 §8.1
+  "已知运行期问题：iOS 上 App 完全没网"。若换新手机再遇到同样症状，直接按那节排查。
+- **UDP 广播发现在 iOS 上需要 `com.apple.developer.networking.multicast` entitlement**
+  （见 §8.1 末），要做的设备发现功能得先补这个权限。
 - **iOS 真机部署链路已打通**（见 §8.1：`DEVELOPMENT_TEAM`、profile/release 可桌面启动、
   `flutter attach` 用法、7 天 profile 有效期）。剩下的是把 LiDAR 目标跟踪、镜头标定和
   丢目标策略在真机上验证并标定。

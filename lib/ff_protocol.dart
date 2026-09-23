@@ -249,16 +249,51 @@ class MotorLink {
   void Function(TmcDump)? onTmc;
   void Function(int)? onSent;
 
+  /// 收到的数据包总数（含固件回显）。
+  ///
+  /// UDP 发送失败是以 **异步 stream 错误** 形式抛出的，`open()` 的 await 捕获不到，
+  /// 所以"发得出去、收不回来"只能靠这个计数器和 [lastEchoAt] 判断。
+  int rxPackets = 0;
+
+  /// 本机 UDP 端口。用于确认包是从哪张网卡/哪个端口出去的。
+  int? localPort;
+
+  /// 实际绑定的本机地址，用于确认出口网卡选对了。
+  String? localAddr;
+
+  /// 探测包发送次数，用于和接收数对比判断收发方向。
+  int probeTx = 0;
+
+  /// 最近一次收到固件原样回显的非协议包（链路探测，见 HANDOFF §6）。
+  DateTime? lastEchoAt;
+
+  /// 套接字层的异步错误。
+  void Function(Object error)? onSocketError;
+
   bool get isOpen => _sock != null;
 
   Future<void> open() async {
     await close();
     _nextSequence = 0;
+    rxPackets = 0;
+    probeTx = 0;
+    lastEchoAt = null;
+    // 用通配地址绑定，让内核按目标自己挑出口。
+    // 不要绑定到具体网卡的地址：地址会随 Wi-Fi 切换失效，Apple 也明确不建议
+    // 去猜本机 IP（「Don't Try to Get the Device's IP Address」）。
     final sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    localPort = sock.port;
+    localAddr = sock.address.address;
     sock.listen((event) {
       if (event != RawSocketEvent.read) return;
       final dg = sock.receive();
-      if (dg == null || dg.data.length < 12 || dg.data[0] != kFfMagic) return;
+      if (dg == null) return;
+      rxPackets++;
+      if (dg.data.length < 12 || dg.data[0] != kFfMagic) {
+        // 固件把非协议包原样回显，正好当链路探测用（HANDOFF §6）。
+        lastEchoAt = DateTime.now();
+        return;
+      }
       if (dg.data[1] == kFfTmcDump) {
         final t = TmcDump.decode(dg.data);
         if (t != null) onTmc?.call(t);
@@ -272,7 +307,7 @@ class MotorLink {
       if (dg.data[1] != kFfStatus) return;
       final p = FfPacket.decode(dg.data);
       if (p != null) onStatus?.call(MotorStatus.fromPacket(p));
-    });
+    }, onError: (Object e) => onSocketError?.call(e));
     _sock = sock;
   }
 
@@ -296,6 +331,14 @@ class MotorLink {
       port,
     );
     onSent?.call(_nextSequence);
+  }
+
+  /// 发一个非协议短报文；固件会原样回显，用来判断链路是否双向通（HANDOFF §6）。
+  ///
+  /// 长度必须 < 12 且首字节不是 0x46，否则会被固件当成普通协议包。
+  void probe() {
+    probeTx++;
+    _sock?.send(const [0xab, 0xcd], host, port);
   }
 
   void setPos(int steps) => _send(FfPacket(cmd: kFfSetPos, a: steps));
