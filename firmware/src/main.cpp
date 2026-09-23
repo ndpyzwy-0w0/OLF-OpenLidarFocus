@@ -12,7 +12,7 @@
 
 static const int PIN_BTN = 0;
 
-static const char *kPass = "ffdebug1";
+static const char *kPass = "change-me";
 static const uint8_t kApChannel = 1;
 // 允许多台设备同时接入（手机 + 调试机），协议仍约定同一时刻只有一个控制器在发命令。
 static const uint8_t kApMaxStations = 4;

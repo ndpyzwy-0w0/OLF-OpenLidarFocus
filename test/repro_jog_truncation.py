@@ -8,7 +8,7 @@ _onTick poll loop keeps running as well (QUERY every 200 ms, TMC_QUERY every
 
 Control group: the same JOG with flags = FF_REQ_LATCH (0x01) runs to completion.
 
-Usage (join the device AP first, SSID FF-XXXXXX, password ffdebug1):
+Usage (join the device AP first, SSID FF-XXXXXX, password change-me):
     python test/repro_jog_truncation.py
     python test/repro_jog_truncation.py --reps 5 --host 192.168.4.1
 
@@ -176,7 +176,7 @@ def main():
 
     link = Link(args.host, args.port)
     if not link.command(CMD_QUERY):
-        print("ERROR: no reply - join the device AP (FF-XXXXXX / ffdebug1) first")
+        print("ERROR: no reply - join the device AP (FF-XXXXXX / change-me) first")
         return 2
 
     link.command(CMD_SET_LIMITS, -20000, 20000)

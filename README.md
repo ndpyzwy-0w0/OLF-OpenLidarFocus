@@ -15,7 +15,7 @@ flutter run -d chrome
 
 Windows 桌面：`flutter run -d windows`
 
-真机 iOS 需要 macOS + Xcode，当前 Windows 环境不能打包 iPhone 安装包。
+真机 iOS 需要 macOS + Xcode，当前 Windows 环境不能打包 iPhone 安装包；需要在 macOS 上使用 Xcode 签名和部署到 iPhone 真机。
 
 ## 文档
 

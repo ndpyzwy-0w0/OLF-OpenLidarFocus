@@ -49,3 +49,16 @@ app.*.map.json
 
 # PlatformIO firmware
 .pio/
+
+# Local secrets and generated signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.mobileconfig

@@ -94,7 +94,7 @@ class _FollowPageState extends State<FollowPage> {
   int _lastEchoedSequence = 0;
   int _commandResult = kResultIdle;
   Timer? _tick;
-  String _msg = '连手机热点 FF-XXXXXX / ffdebug1';
+  String _msg = '连手机热点 FF-XXXXXX / change-me';
   TmcDump? _tmc;
   final _tmcLog = <String>[];
   DateTime _lastTmc = DateTime.fromMillisecondsSinceEpoch(0);

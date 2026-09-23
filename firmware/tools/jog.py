@@ -1,4 +1,4 @@
-"""Join the board's AP (SSID FF-XXXXXX, pass ffdebug1), then:
+"""Join the board's AP (SSID FF-XXXXXX, pass change-me), then:
   python jog.py selfcheck
   python jog.py status
   python jog.py enable

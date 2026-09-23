@@ -158,7 +158,7 @@ desired = sqrt(2 * acceleration * remaining_distance)
 
 ```text
 SSID: FF-XXXXXX   例如 FF-75A578，取自 AP 接口 MAC 末三字节
-密码: ffdebug1
+密码: change-me
 AP channel: 1
 默认地址: 192.168.4.1
 UDP: 4210

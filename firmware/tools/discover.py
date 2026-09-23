@@ -1,6 +1,6 @@
 """List follow-focus boards answering on the current network.
 
-Associate with a board's AP (SSID FF-XXXXXX, pass ffdebug1) first, then:
+Associate with a board's AP (SSID FF-XXXXXX, pass change-me) first, then:
 
     python discover.py
     python discover.py --target 192.168.4.1
