@@ -82,7 +82,6 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
     videoOut.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
     if session.canAddOutput(videoOut) { session.addOutput(videoOut) }
     depthOut.isFilteringEnabled = true
-    depthOut.alwaysDiscardsLateVideoFrames = true
     if session.canAddOutput(depthOut) { session.addOutput(depthOut) }
     if let c = videoOut.connection(with: .video), c.isVideoOrientationSupported {
       c.videoOrientation = .portrait
