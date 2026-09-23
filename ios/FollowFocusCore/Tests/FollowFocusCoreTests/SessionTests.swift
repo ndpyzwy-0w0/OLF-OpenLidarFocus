@@ -34,9 +34,15 @@ private final class FakeFirmware {
   private let _enabled = Locked(false)
   private let _microsteps = Locked(16)
   private let _commands = Locked<[[UInt8]]>([])
+  private let _target = Locked<Int32>(0)
 
   /// 关掉时，即使收到 ENABLE 也继续回 enabled=0，用来模拟板子刚重启的固件状态。
   var acksEnable = true
+
+  /// 模拟“运动还没跑完”：置位后 SET_POS 只记目标、不动位置，状态里报 moving=1。
+  /// 用来验证长行程中途的看门狗保活 —— 没有它，`moving` 永远是 0，
+  /// 保活分支就是一段测不到的代码。
+  var holdMotion = Locked(false)
 
   init() throws { try sock.open() }
   deinit { sock.close() }
@@ -85,9 +91,11 @@ private final class FakeFirmware {
     case kFfEnable:
       if acksEnable { _enabled.set(p.a != 0) }
     case kFfJog:
-      _pos.set(_pos.current + p.a)
+      _target.set(_target.current + p.a)
+      if !holdMotion.current { _pos.set(_pos.current + p.a) }
     case kFfSetPos:
-      _pos.set(p.a)
+      _target.set(p.a)
+      if !holdMotion.current { _pos.set(p.a) }
     case kFfHome:
       _pos.set(0)
     case kFfTmcSet:
@@ -104,12 +112,15 @@ private final class FakeFirmware {
   private func status(sequence: UInt8) -> [UInt8] {
     var flags = kFlagUartOk
     if _enabled.current { flags |= kFlagEnabled }
+    // 固件只在“还差着步数”时报 MOVING，看门狗也只在 MOVING 时才可能刹停。
+    let moving = holdMotion.current || _target.current != _pos.current
+    if moving { flags |= kFlagMoving }
     return FfPacket(
       cmd: kFfStatus,
       sequence: sequence,
       flags: flags | (UInt8(kResultCompleted) << kFlagResultShift),
       a: _pos.current,
-      b: _pos.current
+      b: _target.current
     ).encode()
   }
 
@@ -208,6 +219,99 @@ final class SessionTests: XCTestCase {
       h.firmware.last(kFfSetLimits)?.b, 128000,
       "未对齐时用和固件一致的 ±20 圈，好让标定阶段自由微调")
     XCTAssertGreaterThan(h.firmware.count(kFfQuery), 0, "要有状态轮询")
+  }
+
+  /// UI 现在直接显示快照里的圈数/速度上限，不再自己换算。
+  /// 这些字段一旦算错，界面就会显示错的圈数和错的细分告警，所以钉住它们。
+  func testSnapshotCarriesDerivedDisplayUnits() throws {
+    let h = try Harness()
+    defer { h.stop() }
+
+    h.session.connect()
+    XCTAssertTrue(waitUntil { h.latest.current?.connected == true })
+
+    // 默认 1/16：6400 脉冲/圈，固件 40000 脉冲/秒上限 → 6.25 圈/秒。
+    XCTAssertEqual(h.latest.current?.stepsPerRev, 6400)
+    XCTAssertEqual(h.latest.current?.maxRevsPerSec ?? 0, 6.25, accuracy: 1e-9)
+    XCTAssertEqual(h.latest.current?.posRevs ?? -1, 0, accuracy: 1e-9)
+
+    // 换细分后两个派生值都要跟着变：脉冲/圈 ×16，上限 ÷16。
+    h.session.setMicrosteps(256)
+    XCTAssertTrue(waitUntil { h.latest.current?.microsteps == 256 })
+    XCTAssertEqual(h.latest.current?.stepsPerRev, 102400)
+    XCTAssertEqual(h.latest.current?.maxRevsPerSec ?? 0, 0.390625, accuracy: 1e-9)
+
+    // 当前位置换算成圈也要跟着新细分走。
+    h.session.jog(1024)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos == 1024 })
+    XCTAssertEqual(h.latest.current?.posRevs ?? 0, 0.01, accuracy: 1e-9)
+  }
+
+  /// 看门狗保活：固件只把 `SET_POS`/`JOG` 当控制包（`motorNoteControlPacket`），
+  /// `QUERY` 不算，静默 > 1 s 且还在 MOVING 就刹停。
+  ///
+  /// 所以“目标没变”不等于“不用发”：一次 > 1 s 的行程会在中途被刹掉，
+  /// 表现就是“点了走一半就停”。这里用假固件的 `holdMotion` 把运动停在半路，
+  /// 验证上位机会继续按 ≤ 400 ms 重发**同一个**目标。
+  func testLongMoveKeepsFeedingTheWatchdog() throws {
+    let h = try Harness()
+    defer { h.stop() }
+
+    h.session.connect()
+    XCTAssertTrue(waitUntil { h.firmware.enabled })
+
+    // 运动停在半路，等于一次走不完的长行程。
+    h.firmware.holdMotion.set(true)
+    h.session.setSlider(0.9)
+
+    XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 }, "滑条要发出第一个目标")
+    let first = h.firmware.count(kFfSetPos)
+    let target = h.firmware.last(kFfSetPos)?.a
+
+    XCTAssertTrue(
+      waitUntil(2) { h.firmware.count(kFfSetPos) > first },
+      "长行程中途必须继续重发，否则固件 1 s 后就把电机刹停")
+    XCTAssertEqual(
+      h.firmware.last(kFfSetPos)?.a, target,
+      "重发的必须是同一个目标：SET_POS 靠幂等保活，不是每次改目标")
+
+    // 需要真的隔一段时间才重发，不能变成每 tick 都发（20ms 一次会白刷链路）。
+    let afterBurst = h.firmware.count(kFfSetPos)
+    pump(0.1)
+    XCTAssertEqual(
+      h.firmware.count(kFfSetPos), afterBurst,
+      "重发间隔应当是几百毫秒级，不是每个 20ms tick 都发")
+
+    // 运动结束（位置追上目标）后必须停止重发：不能一直往固件刷包。
+    h.firmware.pos = target ?? 0
+    h.firmware.holdMotion.set(false)
+    XCTAssertTrue(waitUntil { h.latest.current?.moving == false }, "假固件应当报运动结束")
+    let resting = h.firmware.count(kFfSetPos)
+    pump(1.0)
+    XCTAssertEqual(
+      h.firmware.count(kFfSetPos), resting,
+      "停稳之后不该再重发目标")
+  }
+
+  /// 停机闩锁必须能压住保活：点了“停”之后不能又被重发拉起来。
+  func testKeepaliveDoesNotOverrideStopLatch() throws {
+    let h = try Harness()
+    defer { h.stop() }
+
+    h.session.connect()
+    XCTAssertTrue(waitUntil { h.firmware.enabled })
+
+    h.firmware.holdMotion.set(true)
+    h.session.setSlider(0.9)
+    XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 })
+
+    h.session.stopPressed()
+    pump(0.1)
+    let stopped = h.firmware.count(kFfSetPos)
+    pump(1.0)
+    XCTAssertEqual(
+      h.firmware.count(kFfSetPos), stopped,
+      "停机之后保活不能把目标重新发出去")
   }
 
   func testMicrostepChangeRescalesSpeedAndLimits() throws {

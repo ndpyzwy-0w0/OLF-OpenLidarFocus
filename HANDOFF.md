@@ -17,8 +17,9 @@ iPhone LiDAR/人脸跟踪
     -> 步进电机和镜头对焦环
 ```
 
-当前可以先用 Windows Flutter 调试界面控制 ESP32；正式 iOS LiDAR 功能需要 macOS + Xcode +
-iPhone Pro 真机。
+功能层（协议/链路/镜头/对齐/会话）全在 Swift 的 `ios/FollowFocusCore` 里，
+Flutter 只是它的界面；Windows 桌面入口已移除。完整 iOS LiDAR 功能需要
+macOS + Xcode + iPhone Pro 真机。
 
 ## 2. 当前状态摘要
 
@@ -32,10 +33,11 @@ iPhone Pro 真机。
 | Wi-Fi SoftAP + UDP | 已通，SSID 每板唯一 `FF-XXXXXX` |
 | 固件侧设备发现 `FF_DISCOVER` | 已实现，真机验证通过 |
 | 上位机设备发现 + 设备列表页 | 已实现（`FfDiscovery` + `discoverBoards` + 设备页），控制目标改为来自发现结果，见 §6 设备发现 |
-| 镜头管理 + 行程标定 + 单侧对齐 | 已实现（`LensStore` + 镜头页 + 三步流程），见 §8 镜头流程 |
-| 主机侧 Wi-Fi 扫描和列表 | iOS 做不到（系统限制），桌面端属下一阶段，见 §10 |
-| Flutter Windows 调试界面 | 可运行 |
-| Flutter 协议和单测 | 31 项通过 |
+| 镜头管理 + 行程标定 + 单侧对齐 | 已实现（功能层 `LensStore` + 镜头页 + 三步流程），见 §8 镜头流程 |
+| 主机侧 Wi-Fi 扫描和列表 | iOS 做不到（系统限制），见 §10 |
+| **功能层全在 Swift** | 已迁完，`ios/FollowFocusCore`；UI 只经 `ff.core` 通道，见 §13 |
+| Swift 逻辑 + 会话测试 | 74 项通过（`swift test`，约 6 秒，不需要模拟器） |
+| Flutter UI 测试 | 25 项通过（`flutter test`，用伪造核心驱动，不碰平台通道） |
 | 通信失联停止 | 已实现，控制包超时 1000 ms；请求 `flags` 位 0 = 单次锁存可豁免，见 §7 |
 | 手动 HOME / `positionTrusted` | 已实现 |
 | 固件协议契约文档 | [PROTOCOL.md](PROTOCOL.md)，wire 层唯一权威来源 |
@@ -97,20 +99,20 @@ Super Mini 不同。本项目已实测 `r12 t12`、115200、地址 0、TMC2209 v
 
 入口和主要文件：
 
-- [firmware/src/main.cpp](<J:/New%20soft%20project/iphone-follow-focus/firmware/src/main.cpp>)：
+- [firmware/src/main.cpp](<firmware/src/main.cpp>)：
   SoftAP、DNS、HTTP、UDP 初始化和主循环。
-- [firmware/src/motor.cpp](<J:/New%20soft%20project/iphone-follow-focus/firmware/src/motor.cpp>)：
+- [firmware/src/motor.cpp](<firmware/src/motor.cpp>)：
   硬件定时器脉冲、运动规划、TMC2209 UART、软限位、待机和看门狗。
-- [firmware/include/motor.h](<J:/New%20soft%20project/iphone-follow-focus/firmware/include/motor.h>)：
+- [firmware/include/motor.h](<firmware/include/motor.h>)：
   运动公共接口。
-- [firmware/src/protocol.cpp](<J:/New%20soft%20project/iphone-follow-focus/firmware/src/protocol.cpp>)：
+- [firmware/src/protocol.cpp](<firmware/src/protocol.cpp>)：
   UDP 命令解析和状态回复。
-- [firmware/include/protocol.h](<J:/New%20soft%20project/iphone-follow-focus/firmware/include/protocol.h>)：
+- [firmware/include/protocol.h](<firmware/include/protocol.h>)：
   协议常量和数据结构。
 - [firmware/src/device.cpp](firmware/src/device.cpp) 和
   [firmware/include/device.h](firmware/include/device.h)：设备身份
   （AP 接口 MAC → `FF-XXXXXX`）和固件版本号，SSID 与发现回包共用同一来源。
-- [firmware/platformio.ini](<J:/New%20soft%20project/iphone-follow-focus/firmware/platformio.ini>)：
+- [firmware/platformio.ini](<firmware/platformio.ini>)：
   PlatformIO `s3mini` 环境。
 
 固件启动：
@@ -192,8 +194,9 @@ captive portal 现在按 iOS/Android 规范应答，目的是**不**弹出"需�
 /some/random/url            -> 302 Location: http://192.168.4.1/
 ```
 
-Flutter 当前 [MotorLink](<J:/New%20soft%20project/iphone-follow-focus/lib/ff_protocol.dart:241>)
-使用 UDP，不建立 TCP 连接。现阶段默认目标仍是 `192.168.4.1:4210`。
+上位机用 UDP，不建立 TCP 连接。Swift 功能层的 `MotorLink` 在
+`ios/FollowFocusCore/Sources/FollowFocusCore/MotorLink.swift`；控制目标来自发现结果，
+不再写死 `192.168.4.1:4210`（见 §6 设备发现）。
 
 ### 当前协议
 
@@ -319,9 +322,9 @@ python firmware\tools\discover.py --bind 192.168.4.2   # 指定源地址
 绑定本机 IPv4 各发一次（等价于 SSDP 的做法），也支持直接发子网广播
 `--target 192.168.4.255`。板子本身不需要为此做任何改动。
 
-**上位机（Flutter）实现**：[lib/ff_protocol.dart](lib/ff_protocol.dart) 的
-`FfDiscovery`（回包解析）+ `discoverBoards()`（探测），UI 在
-[lib/device_page.dart](lib/device_page.dart)。行为与 `discover.py` 一致：同一个
+**上位机实现**：Swift 功能层的 `FfDiscovery`（回包解析，`FfProtocol.swift`）+
+`discoverBoards()`（`Discovery.swift`），UI 在
+[lib/device_page.dart](lib/device_page.dart)（只是列表和指引）。行为与 `discover.py` 一致：同一个
 socket 重复发几次再等超时收包，按 `device_id` 去重。
 
 **iOS 上有三条硬限制，决定了这里的做法**：
@@ -334,8 +337,8 @@ socket 重复发几次再等超时收包，按 `device_id` 去重。
    `application-id`/`team-id`/`get-task-allow`/`keychain-access-groups`）。
    所以热点要在 设置 → 无线局域网 手动切，App 里给指引。
 3. **不能用广播**（含子网广播 `192.168.4.255`）。缺 multicast entitlement，实测
-   报 `errno 13`（见 §8.1）。所以 `discoverBoards()` 默认**只单播** SoftAP 地址，
-   广播只在桌面端有意义。
+   报 `errno 13`（见 §8.1）。所以 `discoverBoards()` 默认**只单播** SoftAP 地址
+   （`targets` 保留广播入口，但 iOS 上用不了）。
 
 好消息是这三条不挡功能：板子是 SoftAP、地址固定，**单播就够**；而回包的**源地址
 就是设备 IP**，`udp_port` 也在回包里，所以 `FfDiscovery` 一次就拿到了建链需要的
@@ -376,10 +379,21 @@ commandResult = STOPPED
   （重复同一个 `SET_POS` 是幂等的，且会解除待机），否则一次 >1 s 的行程会被截断。
 - **一次性长行程**（"移动到某位置"、标定）：用锁存位，一次发完，不会被 1 s 阈值截断。
 
-已知问题在**上位机侧**：当前 Windows/Dart 版 App 只在目标变化时才发 `SET_POS`
-（[lib/main.dart](lib/main.dart) 附近），没有保活定时器，所以任何超过 1 s 的行程都会被
-看门狗截断 —— 这正是"控制有时候不灵"的根因。修法是加保活或改用锁存位，固件行为本身
-符合契约。真机对照证据见 §9。
+**上位机侧的保活（曾是"控制有时候不灵"的根因）**：`QUERY` 不算控制包，
+只有 `SET_POS`/`JOG` 会重置 `lastControlPacketMs`。所以"目标没变"不等于"不用发"，
+一次 > 1 s 的行程会在中途被刹停。
+
+- ✅ **已修（`SET_POS`）**：`FollowFocusSession.tick` 在 `state.moving` 且距上次控制包
+  > 400 ms 时重发当前目标。`SET_POS` 是幂等的，重发既能保活又顺带解除待机。
+  测试 `testLongMoveKeepsFeedingTheWatchdog` 用假固件的"运动停在半路"验证；
+  把这段保活删掉该测试就会失败。
+- ⏳ **未修（`JOG`）**：JOG 是**相对量**，重发等于多走一段，不能靠保活。
+  长 JOG（例如"走圈"输入 2 圈 = 12800 步，> 1 s）仍会被 1 s 阈值截断。
+  可选修法见下，**这是安全性相关的取舍，改之前要确认**：
+  1. 给一次性手动 JOG 带 `FF_REQ_LATCH`（固件文档里对"一次性长行程"的正解），
+     代价是失联时它会把这一段走完才停；
+  2. 把长 JOG 改写成绝对 `SET_POS`（当前位置 + delta），代价是丢掉固件
+     "从当前位置精确走 N 脉冲" 的语义 —— `state.pos` 有 200 ms 的陈旧度。
 
 ### HOME
 
@@ -403,30 +417,21 @@ positionTrusted = true
 所以长时间待机 / 人工拧过镜头之后，开环 `pos` 仍被标记可信，必要时用 `HOME` 重新校零。
 `TMC_STANDBY`（TMC_SET `key=7`，`1`=开启，`0`=关闭）会写进 NVS 持久化。
 
-## 8. Flutter 调试程序
+## 8. Flutter UI
 
-入口：[lib/main.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/main.dart>)。
+入口：[lib/main.dart](lib/main.dart)。**UI 里没有控制逻辑** —— 全部状态来自
+`ff.core` 的快照，全部动作是 `ff.core` 的方法调用，见 §13。
 
-启动：
+启动（只需要模拟器或真机，没有桌面端）：
 
-```powershell
-cd "J:\New soft project\iphone-follow-focus"
-. "J:\New soft project\commands\env.ps1"
+```bash
 flutter pub get
-flutter run -d windows
+flutter run -d <device>      # 模拟器没有 LiDAR，距离会一直显示 --，其余功能可测
 ```
 
-双击 [open-flutter.bat](<J:/New%20soft%20project/iphone-follow-focus/open-flutter.bat>) 会：
-
-1. 进入当前项目目录；
-2. 启动 PowerShell；
-3. 加载 `commands/env.ps1`；
-4. 执行 `flutter run -d windows`；
-5. 保持终端窗口不退出。
-
-界面点击“连接电机”后才会创建 UDP socket，并发送速度、待机参数、ENABLE、QUERY、
-TMC_QUERY。Windows 下 LiDAR 不可用，因为 [lidar.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/lidar.dart>)
-只在 iOS 启用原生通道。iOS 真机部署（签名、profile/release、`flutter attach`）见 §8.1。
+界面点击“连接电机”后，功能层才创建 UDP socket，并发送速度、待机参数、ENABLE、QUERY、
+TMC_QUERY；LiDAR 由原生采集直连功能层。iOS 真机部署（签名、profile/release、
+`flutter attach`）见 §8.1。
 
 Flutter 已有：
 
@@ -438,13 +443,13 @@ Flutter 已有：
 - TMC 诊断；
 - HOME 和 `positionTrusted`；
 - 镜头管理：启动进镜头选择页（[lib/lens_page.dart](lib/lens_page.dart)），每个镜头单独保存
-  行程标定、变远方向和距离标定表，持久化到 `%APPDATA%\iphone_follow_focus\lenses.json`；
+  行程标定、变远方向和距离标定表，持久化到沙盒的
+  `Library/Application Support/iphone_follow_focus/lenses.json`（iOS 上 `%APPDATA%` 不存在）；
 - 跟焦前的三步：新镜头手动标定行程 → 单侧对齐（把当前位置认成焦距最近点）→ 选变远方向，
   然后才进跟焦；行程/方向约束软限位，避免拧反或超出标定行程。
 
-镜头模型与存储、距离映射和电机换算位于 [lib/lens.dart](lib/lens.dart)、
-[lib/lens_lut.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/lens_lut.dart>)
-和 [lib/motor_cal.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/motor_cal.dart>)。
+镜头模型与存储、距离映射、电机换算、以及上面全部控制逻辑，都在 Swift 功能层
+（`ios/FollowFocusCore`）里，见 §13。Dart 侧的对应文件已删除。
 
 ### 镜头流程（上位机）
 
@@ -464,8 +469,8 @@ Flutter 已有：
 
 ### 8.1 iOS 真机部署（macOS）
 
-iPhone 包只能在 macOS 上打，Windows 环境做不了。本节记录实测可用的流程和坑。
-macOS 上本仓库路径为 `/Users/macos/OLF-OpenLidarFocus`。
+本仓库只在 macOS 上开发（功能层是 Swift Package，UI 只跑 iOS）。本节记录实测可用的
+流程和坑。路径为 `/Users/macos/OLF-OpenLidarFocus`。
 
 本文写作时的环境与实测结果：
 
@@ -556,10 +561,13 @@ flutter attach -d <UDID>   # 看到 Waiting for a connection 后，
 
 ```text
 Unhandled Exception: SocketException: Send failed (OS Error: No route to host, errno = 65), address = 0.0.0.0, port = 0
-#2  MotorLink._send (package:iphone_follow_focus/ff_protocol.dart:287:12)
+#2  MotorLink.send (FollowFocusCore/MotorLink.swift)
 #3  MotorLink.enable
-#4  _FollowPageState._connect (package:iphone_follow_focus/main.dart:336:13)
+#4  FollowFocusSession.connect
 ```
+
+（Swift 侧这类错误走 `MotorLink.onSocketError`，界面上看"套接字错误"那一行，
+不会像 Dart 版那样抛成未捕获异常。）
 
 `address = 0.0.0.0, port = 0` 是**本地 socket 端点**（`bind(anyIPv4, 0)`），不是目标地址，别被
 它误导：目标仍是 `192.168.4.1:4210`，这条错误只是在说"手机不在电机那个网段上"。
@@ -614,13 +622,15 @@ throw），会带着"触发发送那一行"的调用栈变成 Unhandled Exceptio
 
 ## 9. 测试和验收
 
-Flutter 测试：
+两套测试，各测各的层：
 
-```powershell
-flutter test
+```bash
+cd ios/FollowFocusCore && swift test    # 74 项：协议/链路/镜头/对齐/会话逻辑
+flutter test                            # 25 项：UI 组件（伪造核心驱动，不碰平台通道）
 ```
 
-当前已通过 40 项（含 `lib/lens.dart` 的行程/对齐纯逻辑和镜头页、三步流程的 widget 测试）。
+控制逻辑的测试都在 `swift test` 里（macOS 原生跑，约 6 秒，不需要模拟器）。
+`flutter test` 只断言"UI 发出了什么命令"，不断言限位/死区/相位 —— 那些不该在 UI 里。
 
 如果测试在加载阶段就全部失败，报
 `Unable to connect to flutter_tester process: WebSocketException: Invalid WebSocket upgrade request`,
@@ -744,8 +754,9 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 用户希望扫描附近 Wi-Fi 并显示可用跟焦器，连接时不依赖固定 IP。固件侧已完成
 （唯一 SSID + `FF_DISCOVER`，见 §6）。**已完成**：
 
-1. ~~在 [lib/ff_protocol.dart](lib/ff_protocol.dart) 加入发现命令常量（`0x0B`/`0x84`）
-   和 32 字节回包解析。~~ 已加：`kFfDiscover`/`kFfDiscoverReply` + `FfDiscovery`。
+1. ~~加入发现命令常量（`0x0B`/`0x84`）
+   和 32 字节回包解析。~~ 已加：`kFfDiscover`/`kFfDiscoverReply` + `FfDiscovery`
+   （Swift 功能层 `FfProtocol.swift`）。
 2. ~~连上候选 AP 后**先用** `FF_DISCOVER` 验证，确认对方是本项目固件并拿到
    `device_id`/`mac`/`fw`/`udp_port`，再建立 `MotorLink`；不要再假设
    `192.168.4.1:4210`。~~ 已完成：`discoverBoards()` 负责探测，
@@ -754,7 +765,7 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 3. ~~实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。~~
    已完成：[lib/device_page.dart](lib/device_page.dart)。
 4. ~~广播不可靠，App 侧要能回退到子网广播或单播候选 IP。~~ 已完成：
-   `discoverBoards()` 默认单播，`targets` 可传广播地址（桌面端）。
+   `discoverBoards()` 默认单播，`targets` 可传广播地址。
 
 **仍未做**：
 
@@ -763,10 +774,11 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
    手动在系统里切。若以后要一步到位，需要**付费**开发者账号才能用
    `NEHotspotConfiguration`（免费个人团队没有 Hotspot Configuration entitlement），
    届时应做成"记住用过的 SSID + 点击直连"，并保留手动切换作为回退。
-6. **Windows 桌面端**：用原生 WLAN API 扫描并连接（不要把 `netsh` 当正式方案）。
-   目前只做了 UDP 发现；扫描相关代码是平台专有的，尚未着手。
-7. 多台板子同时在场时的选择体验：现在 `_ensureDevice()` 只在"恰好发现一台"时自动
-   选中，多台会打开设备页。真机只验证过单台。
+6. ~~**Windows 桌面端**：用原生 WLAN API 扫描并连接。~~ **已放弃**：改为
+   "Swift 功能层 + Flutter UI"，Windows 入口已删除（见 §13）。原因是功能层要能
+   单独测试和被别的界面复用，桌面端那套 UDP/协议实现会成为第二份真相。
+7. 多台板子同时在场时的选择体验：现在只在"恰好发现一台"时自动选中，多台会打开
+   设备页。真机只验证过单台。
 
 ### 固件
 
@@ -780,15 +792,12 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 
 ### Flutter/iOS
 
-- **修长行程被看门狗截断**（"控制有时候不灵"、"点一次走 5 圈走到一半就停"的根因）：
-  [lib/ff_protocol.dart](lib/ff_protocol.dart) 的 `setPos()` / `jog()` 只发单包、`flags` 恒 0，
-  [lib/main.dart](lib/main.dart) 的 `_jog()`（走步/走圈按钮）发完就不再发，`_onTick()` 也只在
-  目标变化时发 `SET_POS`，没有保活。任何超过 1 s 的行程都会在 1.0 s 处被刹停，截断位置
-  =速度 × 1 s（实测 5 圈：8000 脉冲/秒 → 6455 步；App 默认 1.2 圈/秒 → 3379 步；加
-  `flags = 0x01` → 16000 步跑满）。两种改法：一次性长行程改发 `flags = 0x01` 锁存
-  （`setPos`/`jog` 加一个 `latch` 形参，`_jog()` 传 `latch: true`），或在运动未完成期间每
-  200–500 ms 重发当前目标。精确改法与实测数字见 [PROTOCOL.md](PROTOCOL.md) §7.2，
-  改完用 `test/udp_motion_acceptance.py` 的 `single-shot JOG: streaming vs latched` 组核对。
+- ~~**长行程被看门狗截断**（"控制有时候不灵"、"点一次走 5 圈走到一半就停"的根因）。~~
+  **`SET_POS` 已修**：`FollowFocusSession.tick` 在运动期间每 > 400 ms 重发当前目标
+  （幂等），测试 `testLongMoveKeepsFeedingTheWatchdog` 钉住。
+  **`JOG` 未修**：JOG 是相对量，重发等于多走一段，不能靠保活；"走圈"输入 1 圈以上
+  （> 1 s 行程）仍会被截断。两个候选修法（锁存 / 改写成绝对 `SET_POS`）都是
+  **安全性相关的取舍**，见 [PROTOCOL.md](PROTOCOL.md) §7.2，改前要确认。
 - ~~实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。~~
   已完成，见 §10「主机侧设备发现和设备列表」与 [lib/device_page.dart](lib/device_page.dart)。
 - ~~把固定 `192.168.4.1` 替换为设备发现结果。~~ 已完成：`MotorLink.host`
@@ -814,7 +823,7 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 - 修改 STEP 输出时，必须保持“实际 STEP 脉冲完成后才推进 `currentPos`”。
 - 修改协议时保留旧 12 字节客户端兼容，新增字段优先使用新命令/新包。
 - **协议以 [PROTOCOL.md](PROTOCOL.md) 为准**：改协议/看门狗语义时先改它，再改代码。
-- 触碰电机、电流或引脚前先阅读本文和 [CONTROL_ARCHITECTURE.md](<J:/New%20soft%20project/iphone-follow-focus/CONTROL_ARCHITECTURE.md>)。
+- 触碰电机、电流或引脚前先阅读本文和 [CONTROL_ARCHITECTURE.md](<CONTROL_ARCHITECTURE.md>)。
 
 ## 12. 文件归属与协同边界
 
@@ -826,7 +835,7 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 | **功能层（Swift）** | `ios/FollowFocusCore/**` | 协议/链路/镜头/对齐/会话编排。**不允许 import Flutter/UIKit** |
 | **UI 层（Flutter）** | `lib/**` | Flutter UI。只通过 `ff.core` channel 读写功能层，见 §13 |
 | iOS 壳 | `ios/Runner/**`、`pubspec.yaml` | 插件注册、LiDAR 采集、平台视图 |
-| 共享 | [HANDOFF.md](HANDOFF.md)、[README.md](README.md)、[CONTROL_ARCHITECTURE.md](<J:/New%20soft%20project/iphone-follow-focus/CONTROL_ARCHITECTURE.md>) | 改前先确认没有别人正在同一段落工作 |
+| 共享 | [HANDOFF.md](HANDOFF.md)、[README.md](README.md)、[CONTROL_ARCHITECTURE.md](<CONTROL_ARCHITECTURE.md>) | 改前先确认没有别人正在同一段落工作 |
 
 协同规则：
 
@@ -839,7 +848,7 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 - 同一时刻只允许一个控制器发命令（AP 可接 4 台客户端，但控制权不共享）。
 - 固件改动后 App 无需重新协商协议版本；但如果新增了字段，App 必须能在字段为 0 时退化工作。
 
-## 13. Swift 功能层（迁移中）
+## 13. Swift 功能层
 
 ### 目标
 
@@ -860,7 +869,12 @@ ios/FollowFocusCore/            ← 功能层（本地 Swift Package，只有 Fo
     Discovery.swift             设备发现（单播 + 去重 + 超时）
     FollowFocusSession.swift    20ms 控制 tick、使能自愈、停机闩锁、
                                 自动跟焦死区、相位机、软限位下发
+    SnapshotJson.swift          快照 → channel map（键名契约，有测试钉住）
+ios/Runner/FollowFocusCorePlugin.swift   ff.core 方法表 + 事件推送
 lib/                            ← UI 层
+  ff_core.dart                  ff.core 客户端（只有字段搬运）
+  main.dart                     跟焦页（纯渲染）
+  lens_page.dart device_page.dart  镜头选择 / 设备列表
 ```
 
 边界由编译器强制：`FollowFocusCore` 不能 import Flutter —— 写不进去，不是靠约定。
@@ -883,15 +897,53 @@ cd ios/FollowFocusCore && swift test        # 全部逻辑测试，约 4 秒，�
 | 协议编解码、电机换算、距离表、镜头模型与存档 | ✅ 已迁，测试已搬 |
 | UDP 链路、设备发现 | ✅ 已迁，有假板子端到端测试 |
 | 会话编排（tick/使能自愈/停机闩锁/自动跟焦/相位机/软限位） | ✅ 已迁，有迷你固件模拟器测试 |
-| `ff.core` channel（方法表 + 20Hz 状态快照） | ⏳ 未做 |
-| Flutter UI 切到 channel、删除 Dart 功能层 | ⏳ 未做 |
-| LiDAR 采样直连会话（不再绕 Dart） | ⏳ 未做 |
-| 清理 Windows 桌面入口 | ⏳ 未做 |
+| `ff.core` channel（方法表 + 20Hz 状态快照） | ✅ 已做，见下 |
+| Flutter UI 切到 channel、删除 Dart 功能层 | ✅ 已做 |
+| LiDAR 采样直连会话（不再绕 Dart） | ✅ 已做 |
+| 清理 Windows 桌面入口 | ✅ 已删 `windows/`（只有模板代码） |
 
-**未切完之前，Dart 侧（`lib/ff_protocol.dart`、`lib/lens.dart`、`lib/lens_lut.dart`、
-`lib/motor_cal.dart`）还在被 UI 使用，和 Swift 是两份实现。**
-这段时间两边行为可能不一致，这正是 `CONTROL_ARCHITECTURE.md` 警告过的情况，
-所以不要再往 Dart 侧加功能。
+Dart 侧的功能层（`ff_protocol.dart`、`lens.dart`、`lens_lut.dart`、`motor_cal.dart`）
+和它们的测试已删除。**现在只有一份实现，在 Swift 里。**
+
+### `ff.core` 契约
+
+```text
+方法通道 ff.core         命令，fire-and-forget，返回 nil 或一次性结果
+事件通道 ff.core/events  约 20Hz 的聚合状态快照
+```
+
+| 方法 | 作用 |
+| --- | --- |
+| `start` / `stop` / `snapshot` | 会话生命周期；`snapshot` 取一次当前状态 |
+| `discover` / `selectDevice` / `connect` / `disconnect` | 设备 |
+| `enable` `stopPressed` `homePressed` `jog` `setSlider` `setAuto` `setSpeed` | 手动控制 |
+| `setMicrosteps` `setTmc` `queryTmc` `setStandbyFeature` | TMC 调试面板（全保留） |
+| `selectLens` `createLens` `deleteLens` | 镜头 |
+| `recordStrokeA` `finishStroke` `recalibrateStroke` | ① 行程标定 |
+| `confirmNear` `setDir` `startFollow` `unalign` | ② 单侧对齐 |
+| `addLutPoint` `removeLutPoint` | ③ 距离标定 |
+| `setTrackFaces` / `ingestDistance` | LiDAR（后者只给模拟器和测试用） |
+
+分工：
+
+- **命令表、参数解析、事件推送**：`ios/Runner/FollowFocusCorePlugin.swift`（纯搬运）。
+- **快照 → map 的序列化**：`ios/FollowFocusCore/Sources/FollowFocusCore/SnapshotJson.swift`。
+  放在功能层里是为了能用 `swift test` 钉住键名（`SnapshotJsonTests`）—— 跨语言的字典键
+  拼错了不会崩，只会让界面静默显示空值。
+- **Dart 侧解析**：`lib/ff_core.dart`。**只有字段搬运，没有逻辑。**
+
+快照里连“圈数”“细分上限”这类派生值一起给（`pos_revs`、`stroke_revs`、`max_revs_per_sec`），
+UI 不再自己乘 400/除细分。UI 里仅剩的算术是圈→脉冲的一次乘法（走圈按钮）和一个
+纯显示的峰值速度提示，都不参与任何决策。
+
+### LiDAR 直连
+
+`LidarEngine.shared.onDistance` 直接回调给会话（`FollowFocusSession.ingest`），
+采样不再经 event channel 绕到 Dart 再回来。`ff.lidar` 通道仍然保留，但只负责
+预览图和人脸框的显示数据。
+
+这条边界是刻意的：只有 `ios/Runner`（平台壳）能同时看到采集层和功能层，
+功能层依旧不认识 UIKit/Camera。
 
 ### 迁移中修掉的 bug
 

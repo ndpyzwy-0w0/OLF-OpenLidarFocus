@@ -36,6 +36,11 @@ public struct FollowFocusState {
   // 单位换算
   public var microsteps = 16
   public var stepsPerRev = 6400
+  /// 当前细分下的速度上限（圈/秒）。UI 用它提示“1/256 只有 0.39 圈/秒”。
+  public var maxRevsPerSec = 0.0
+  /// 当前位置换算成圈，给界面显示用，省得 UI 再自己算一遍。
+  public var posRevs = 0.0
+  public var strokeRevs = 0.0
 
   // 会话
   public var auto = false
@@ -108,6 +113,9 @@ public final class FollowFocusSession {
   private var lastEnableAttempt = Date.distantPast
   private var lastAutoSend = Date.distantPast
   private var lastSent: Int32?
+  /// 最近一次发出**控制包**（SET_POS/JOG）的时刻，看门狗保活用。
+  /// 不能用 `lastQuery`：QUERY 不算控制包，固件不会因此重置超时。
+  private var lastControlSent = Date.distantPast
   private var sliderDirty = false
   private var stopLatched = false
   private var lastQuery = Date.distantPast
@@ -554,7 +562,9 @@ public final class FollowFocusSession {
   private func tick() {
     let now = Date()
     if link.isOpen {
-      // 200ms 轮询状态：既是位置反馈，也是看门狗要的保活。
+      // 200ms 轮询状态：位置反馈用。**注意它喂不了固件看门狗** ——
+      // 固件只把 SET_POS/JOG 当控制包（`motorNoteControlPacket`），
+      // QUERY 不计入 `lastControlPacketMs`。保活见下面 `lastControlSent`。
       if now.timeIntervalSince(lastQuery) > 0.2 {
         lastQuery = now
         link.query()
@@ -608,7 +618,20 @@ public final class FollowFocusSession {
         }
         if let target = want {
           lastSent = target
+          lastControlSent = now
           link.setPos(target)
+        }
+        // 看门狗保活：固件只把 SET_POS/JOG 当控制包，静默 >1s 就刹停
+        // （`kControlTimeoutMs`，且只在 `ARMED && MOVING` 时生效）。
+        // 所以“目标没变”不等于“不用发”：一次 >1s 的行程会在中途被刹掉，
+        // 表现就是“点了走一半就停” —— 这是 §7 记过的“控制有时候不灵”的根因。
+        // 重发同一个 SET_POS 是幂等的，顺带解除待机，所以按 ≤400ms 重发当前目标。
+        else if state.moving, let last = lastSent,
+          now.timeIntervalSince(lastControlSent) > 0.4
+        {
+          lastSent = last
+          lastControlSent = now
+          link.setPos(last)
         }
       }
     }
@@ -678,6 +701,7 @@ public final class FollowFocusSession {
     takeManual("走步")
     stopLatched = false
     lastSent = nil
+    lastControlSent = Date()
     link.jog(delta)
     sliderDirty = false
   }
@@ -795,6 +819,11 @@ public final class FollowFocusSession {
     DispatchQueue.main.async { [weak self] in self?.onState?(snap) }
   }
 
+  /// 当前快照。UI 首次绘制时直接取一次，不用等第一个事件。
+  public func snapshot() -> FollowFocusState {
+    queue.sync { buildSnapshot() }
+  }
+
   private func buildSnapshot() -> FollowFocusState {
     var s = state
     s.connected = link.isOpen
@@ -811,6 +840,9 @@ public final class FollowFocusSession {
     s.strokeSteps = lens?.strokeAt(microsteps) ?? 0
     s.lutPoints = (lens?.lut ?? LensLut([])).scaledTo(microsteps).points
     s.stepsPerRev = stepsPerRev
+    s.maxRevsPerSec = cal.maxRevsPerSec(microsteps)
+    s.posRevs = cal.stepsToRevs(Int(s.pos), microsteps)
+    s.strokeRevs = cal.stepsToRevs(s.strokeSteps, microsteps)
     let r = limitsFor(microsteps)
     s.limitLo = r.lo
     s.limitHi = r.hi

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'ff_protocol.dart';
+import 'ff_core.dart';
 
 /// 设备列表页：列出**能应答发现包的板子**，点一行即选为控制目标。
 ///
@@ -10,23 +10,30 @@ import 'ff_protocol.dart';
 /// 所以流程是：先在 设置 → 无线局域网 连上板子热点 `FF-XXXXXX`（密码
 /// `change-me`），再回到这一页扫描。
 ///
-/// 扫描用**单播**：iOS 上广播会被系统按缺 multicast entitlement 拒绝
-/// （`errno 13`，见 HANDOFF §8.1）。板子是 SoftAP，地址固定，单播够用。
+/// 扫描由核心完成（Swift 侧单播发现：iOS 上广播会被系统按缺 multicast
+/// entitlement 拒绝，`errno 13`，见 HANDOFF §8.1）。板子是 SoftAP，地址固定，单播够用。
 class DevicePage extends StatefulWidget {
+  final FfCore core;
+
   /// 当前控制目标，用于高亮。
-  final FfDiscovery? selected;
+  final FfDevice? selected;
 
   /// 控制链路是否已打开，用于顶部状态提示。
   final bool linkOpen;
 
-  const DevicePage({super.key, this.selected, this.linkOpen = false});
+  const DevicePage({
+    super.key,
+    required this.core,
+    this.selected,
+    this.linkOpen = false,
+  });
 
   @override
   State<DevicePage> createState() => _DevicePageState();
 }
 
 class _DevicePageState extends State<DevicePage> {
-  List<FfDiscovery> _devices = const [];
+  List<FfDevice> _devices = const [];
   bool _scanning = false;
 
   @override
@@ -37,7 +44,7 @@ class _DevicePageState extends State<DevicePage> {
 
   Future<void> _scan() async {
     setState(() => _scanning = true);
-    final found = await discoverBoards();
+    final found = await widget.core.discover();
     if (!mounted) return;
     setState(() {
       _devices = found;
@@ -124,7 +131,7 @@ class _DevicePageState extends State<DevicePage> {
     );
   }
 
-  Widget _row(FfDiscovery d) {
+  Widget _row(FfDevice d) {
     final active = widget.selected?.deviceId == d.deviceId;
     return ListTile(
       contentPadding: EdgeInsets.zero,
@@ -133,9 +140,7 @@ class _DevicePageState extends State<DevicePage> {
         color: active ? Colors.greenAccent : null,
       ),
       title: Text(d.deviceId.isEmpty ? '(回包无 device_id)' : d.deviceId),
-      subtitle: Text(
-        'fw ${d.firmware} · ${d.mac}\nUDP ${d.host.address}:${d.udpPort}',
-      ),
+      subtitle: Text('fw ${d.firmware} · ${d.mac}\nUDP ${d.host}:${d.udpPort}'),
       isThreeLine: true,
       trailing: active ? const Text('使用中') : const Text('选用'),
       onTap: () => Navigator.pop(context, d),

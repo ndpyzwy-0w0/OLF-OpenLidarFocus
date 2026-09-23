@@ -21,6 +21,12 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   // These values are owned by camQueue. Flutter callbacks are owned by main.
   private let sinkLock = NSLock()
   private var eventSink: FlutterEventSink?
+  /// 测到的距离（米）直连控制会话用。
+  ///
+  /// 这条回调是**功能层直连**的关键：LiDAR 采样不再经 event channel 绕到 Dart
+  /// 再回来，否则“功能层全在 Swift”就没落地，UI 卡一下还会拖慢跟焦采样。
+  /// 在 camQueue 上调用，实现方自己负责切队列。
+  var onDistance: ((Double?) -> Void)?
   private var target = CGPoint(x: 0.5, y: 0.5)
   private var trackFaces = false
   private var face: CGRect?
@@ -119,6 +125,8 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
     if let meters {
       lastDistance = meters
     }
+    // 直连控制会话（功能层内部），再推给 UI 做显示。
+    onDistance?(meters)
     emit(distance: lastDistance)
   }
 

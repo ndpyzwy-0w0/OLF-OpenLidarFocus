@@ -2,8 +2,8 @@
 
 ## 目标
 
-本项目的目标是把 ESP32-S3 固件做成一个可靠的实时运动控制器，把当前
-Flutter 调试机和后续 Swift + Flutter iOS App 都建立在稳定、可复用的接口上。
+本项目的目标是把 ESP32-S3 固件做成一个可靠的实时运动控制器，把 iOS App
+（Swift 功能层 + Flutter UI）建立在稳定、可复用的接口上。
 
 核心原则：
 
@@ -93,7 +93,7 @@ ESP32 是实时运动控制器，负责：
 
 对应实现：
 
-- Flutter：`lib/motor_cal.dart`
+- Swift 功能层：`ios/FollowFocusCore/Sources/FollowFocusCore/MotorCal.swift`
 - 固件：`firmware/src/motor.cpp`
 
 ### 当前命令
@@ -138,9 +138,9 @@ b     int32
 旧客户端：pad = 0，固件仍兼容
 ```
 
-Flutter 的 `MotorLink` 会自动为每个发送的控制包分配序号。未来 Swift
-底层可以用它判断收到的状态是否对应某一次 `SET_POS`、`JOG` 或 `STOP`，
-从而区分 UDP 丢包、设备无响应和命令已被固件处理。序号回显只证明命令
+Swift 功能层的 `MotorLink` 会自动为每个发送的控制包分配序号，并用它判断收到的
+状态是否对应某一次 `SET_POS`、`JOG` 或 `STOP`，从而区分 UDP 丢包、设备无响应和
+命令已被固件处理。序号回显只证明命令
 已到达并产生了状态回复，不代表电机已经完成运动；完成状态仍需比较
 `pos` 与 `target` 以及 `moving`。
 
@@ -280,8 +280,8 @@ RESET_PROFILE
 固件：从当前运动状态重新规划到最新目标
 ```
 
-不要让手机发送大量离散轨迹点来模拟样条。那会把 Wi-Fi 延迟和丢包
-重新引入实时运动控制，且 Flutter 与 Swift 的行为会不一致。
+不要让手机发送大量离散轨迹点来模拟样条。那会把 Wi-Fi 延迟和丢包重新引入
+实时运动控制 —— 手机侧只该决定"到哪个位置"，规划在固件里做。
 
 ### 短距离运动
 

@@ -1,36 +1,52 @@
 import 'package:flutter/material.dart';
 
-import 'lens.dart';
-import 'motor_cal.dart';
+import 'ff_core.dart';
+import 'main.dart';
 
-/// 启动后的首页：选镜头。镜头列表由 [LensStore] 持久化，选一个进入跟焦页。
+/// 启动后的首页：选镜头。
 ///
-/// 已标定行程的镜头进入后会先走单侧对齐；新镜头先进标定行程。
+/// 列表来自 `ff.core` 的快照（镜头存档在 Swift 侧）。新建/删除也走核心，
+/// 这里不持有任何镜头数据，避免 UI 和核心各存一份。
 class LensPage extends StatefulWidget {
-  final LensStore store;
+  final FfCore core;
 
-  /// 打开某个镜头（进入跟焦页）。由 `main.dart` 注入，避免这里反向依赖它。
-  final Future<void> Function(BuildContext context, Lens lens) open;
-
-  const LensPage({super.key, required this.store, required this.open});
+  const LensPage({super.key, required this.core});
 
   @override
   State<LensPage> createState() => _LensPageState();
 }
 
 class _LensPageState extends State<LensPage> {
-  static const _cal = MotorCal();
+  List<FfLens> _lenses = const [];
 
-  Future<void> _open(Lens lens) async {
-    await widget.open(context, lens);
-    if (mounted) setState(() {});
+  @override
+  void initState() {
+    super.initState();
+    // 首页用一次性快照即可：镜头变了之后由下面的操作自己刷新。
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final s = await widget.core.snapshot();
+    if (mounted) setState(() => _lenses = s.lenses);
+  }
+
+  Future<void> _open(FfLens lens) async {
+    await widget.core.selectLens(lens.id);
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => FollowPage(core: widget.core, lensId: lens.id),
+      ),
+    );
+    if (mounted) await _refresh();
   }
 
   Future<void> _create() async {
     // 对话框局部 controller：弹出后随对话框一起被回收，不必显式 dispose。
     final name = TextEditingController();
     final params = TextEditingController();
-    final created = await showDialog<Lens>(
+    final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('新建镜头'),
@@ -50,32 +66,33 @@ class _LensPageState extends State<LensPage> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () => Navigator.pop(ctx, false),
             child: const Text('取消'),
           ),
           TextButton(
             onPressed: () {
-              final n = name.text.trim();
-              if (n.isEmpty) return; // 名称是必填，空名不入库
-              Navigator.pop(
-                ctx,
-                Lens(id: Lens.newId(), name: n, params: params.text.trim()),
-              );
+              if (name.text.trim().isEmpty) return; // 名称是必填，空名不入库
+              Navigator.pop(ctx, true);
             },
             child: const Text('创建'),
           ),
         ],
       ),
     );
-    if (created == null) return;
-    widget.store.upsert(created);
-    await widget.store.save();
+    if (ok != true) return;
+    await widget.core.createLens(
+      name: name.text.trim(),
+      params: params.text.trim(),
+    );
     if (!mounted) return;
+    await _refresh();
     // 新镜头必然要标定行程，直接进去，省一次点击。
-    await _open(created);
+    final s = await widget.core.snapshot();
+    final created = s.lenses.isEmpty ? null : s.lenses.last;
+    if (created != null && mounted) await _open(created);
   }
 
-  Future<void> _delete(Lens lens) async {
+  Future<void> _delete(FfLens lens) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -94,14 +111,12 @@ class _LensPageState extends State<LensPage> {
       ),
     );
     if (ok != true) return;
-    widget.store.remove(lens.id);
-    await widget.store.save();
-    if (mounted) setState(() {});
+    await widget.core.deleteLens(lens.id);
+    await _refresh();
   }
 
   @override
   Widget build(BuildContext context) {
-    final lenses = widget.store.lenses;
     return Scaffold(
       appBar: AppBar(title: const Text('选择镜头')),
       body: ListView(
@@ -112,12 +127,12 @@ class _LensPageState extends State<LensPage> {
             '新镜头第一次进入要先手动标定行程；标定过的每次进入都要先做单侧对齐。',
           ),
           const Divider(height: 24),
-          if (lenses.isEmpty)
+          if (_lenses.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 24),
               child: Center(child: Text('还没有镜头，点下面新建一个。')),
             ),
-          for (final l in lenses) _row(l),
+          for (final l in _lenses) _row(l),
           const SizedBox(height: 12),
           FilledButton.icon(
             onPressed: _create,
@@ -129,14 +144,14 @@ class _LensPageState extends State<LensPage> {
     );
   }
 
-  Widget _row(Lens l) {
+  Widget _row(FfLens l) {
     final parts = <String>[
       if (l.params.isNotEmpty) l.params,
       if (l.calibrated)
-        '行程 ${_cal.stepsToRevs(l.strokeAt(l.strokeMicrosteps), l.strokeMicrosteps).toStringAsFixed(2)} 圈'
+        '行程 ${l.strokeRevs.toStringAsFixed(2)} 圈'
       else
         '未标定行程',
-      if (l.lut.ready) '距离标定 ${l.lut.points.length} 点',
+      if (l.lutCount >= 2) '距离标定 ${l.lutCount} 点',
       '焦距变远：${l.dir > 0 ? "+" : "-"} 方向',
     ];
     return Card(
