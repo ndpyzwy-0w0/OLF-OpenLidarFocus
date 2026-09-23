@@ -4,6 +4,11 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 
 class LidarSample {
+  static const currentSchemaVersion = 1;
+
+  final int schemaVersion;
+  final int? timestampMs;
+  final bool valid;
   final double? distanceM;
   final double u;
   final double v;
@@ -13,6 +18,9 @@ class LidarSample {
   final double? faceH;
 
   const LidarSample({
+    this.schemaVersion = 0,
+    this.timestampMs,
+    this.valid = false,
     required this.distanceM,
     required this.u,
     required this.v,
@@ -23,10 +31,20 @@ class LidarSample {
   });
 
   factory LidarSample.fromMap(Map<dynamic, dynamic> m) {
+    final distance = (m['distance_m'] as num?)?.toDouble();
     return LidarSample(
-      distanceM: (m['distance_m'] as num?)?.toDouble(),
-      u: (m['u'] as num?)?.toDouble() ?? 0.5,
-      v: (m['v'] as num?)?.toDouble() ?? 0.5,
+      schemaVersion: (m['schema_version'] as num?)?.toInt() ?? 0,
+      timestampMs: (m['timestamp_ms'] as num?)?.toInt(),
+      valid: (m['valid'] as bool?) ?? distance != null,
+      distanceM: distance,
+      u:
+          (m['target_u'] as num?)?.toDouble() ??
+          (m['u'] as num?)?.toDouble() ??
+          0.5,
+      v:
+          (m['target_v'] as num?)?.toDouble() ??
+          (m['v'] as num?)?.toDouble() ??
+          0.5,
       faceU: (m['face_u'] as num?)?.toDouble(),
       faceV: (m['face_v'] as num?)?.toDouble(),
       faceW: (m['face_w'] as num?)?.toDouble(),

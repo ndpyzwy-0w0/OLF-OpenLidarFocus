@@ -18,13 +18,21 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   private var lastDistance: Double?
   private var lastEmit = Date.distantPast
 
-  var eventSink: FlutterEventSink?
-  var target = CGPoint(x: 0.5, y: 0.5)
-  var trackFaces = false
-  var face: CGRect?
+  // These values are owned by camQueue. Flutter callbacks are owned by main.
+  private let sinkLock = NSLock()
+  private var eventSink: FlutterEventSink?
+  private var target = CGPoint(x: 0.5, y: 0.5)
+  private var trackFaces = false
+  private var face: CGRect?
 
   func available() -> Bool {
     AVCaptureDevice.default(.builtInLiDARDepthCamera, for: .video, position: .back) != nil
+  }
+
+  func setEventSink(_ sink: FlutterEventSink?) {
+    sinkLock.lock()
+    eventSink = sink
+    sinkLock.unlock()
   }
 
   func start() {
@@ -41,9 +49,18 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   }
 
   func setTarget(u: Double, v: Double) {
-    target = CGPoint(x: min(max(u, 0), 1), y: min(max(v, 0), 1))
-    lastEmit = .distantPast
-    emit(distance: lastDistance)
+    camQueue.async {
+      self.target = CGPoint(x: min(max(u, 0), 1), y: min(max(v, 0), 1))
+      self.lastEmit = .distantPast
+      self.emit(distance: self.lastDistance)
+    }
+  }
+
+  func setTrackFaces(_ on: Bool) {
+    camQueue.async {
+      self.trackFaces = on
+      if !on { self.face = nil }
+    }
   }
 
   private func startOnCamQueue() {
@@ -165,13 +182,26 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
       "v": target.y,
     ]
     if let distance { map["distance_m"] = distance }
+    map["schema_version"] = 1
+    map["timestamp_ms"] = Int64(now.timeIntervalSince1970 * 1000)
+    map["valid"] = distance != nil
+    map["target_u"] = target.x
+    map["target_v"] = target.y
+    // Keep u/v and face_* for existing UI callers while the versioned fields
+    // give new Flutter code an explicit, stable contract.
+    map["u"] = target.x
+    map["v"] = target.y
+    map["distance_m"] = distance ?? NSNull()
     if let face {
       map["face_u"] = face.origin.x
       map["face_v"] = face.origin.y
       map["face_w"] = face.size.width
       map["face_h"] = face.size.height
     }
-    DispatchQueue.main.async { self.eventSink?(map) }
+    sinkLock.lock()
+    let sink = eventSink
+    sinkLock.unlock()
+    DispatchQueue.main.async { sink?(map) }
   }
 }
 
@@ -237,7 +267,7 @@ final class LidarPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     case "start":
       let args = call.arguments as? [String: Any]
       if let on = args?["trackFaces"] as? Bool {
-        LidarEngine.shared.trackFaces = on
+        LidarEngine.shared.setTrackFaces(on)
       }
       LidarEngine.shared.start()
       result(nil)
@@ -252,8 +282,7 @@ final class LidarPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
       result(nil)
     case "setTrackFaces":
       let args = call.arguments as? [String: Any]
-      LidarEngine.shared.trackFaces = (args?["on"] as? Bool) ?? false
-      if !LidarEngine.shared.trackFaces { LidarEngine.shared.face = nil }
+      LidarEngine.shared.setTrackFaces((args?["on"] as? Bool) ?? false)
       result(nil)
     default:
       result(FlutterMethodNotImplemented)
@@ -261,12 +290,12 @@ final class LidarPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   }
 
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-    LidarEngine.shared.eventSink = events
+    DispatchQueue.main.async { LidarEngine.shared.setEventSink(events) }
     return nil
   }
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
-    LidarEngine.shared.eventSink = nil
+    DispatchQueue.main.async { LidarEngine.shared.setEventSink(nil) }
     return nil
   }
 }
