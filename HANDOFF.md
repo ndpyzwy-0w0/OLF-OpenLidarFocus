@@ -32,6 +32,7 @@ iPhone Pro 真机。
 | Wi-Fi SoftAP + UDP | 已通，SSID 每板唯一 `FF-XXXXXX` |
 | 固件侧设备发现 `FF_DISCOVER` | 已实现，真机验证通过 |
 | 上位机设备发现 + 设备列表页 | 已实现（`FfDiscovery` + `discoverBoards` + 设备页），控制目标改为来自发现结果，见 §6 设备发现 |
+| 镜头管理 + 行程标定 + 单侧对齐 | 已实现（`LensStore` + 镜头页 + 三步流程），见 §8 镜头流程 |
 | 主机侧 Wi-Fi 扫描和列表 | iOS 做不到（系统限制），桌面端属下一阶段，见 §10 |
 | Flutter Windows 调试界面 | 可运行 |
 | Flutter 协议和单测 | 31 项通过 |
@@ -436,10 +437,30 @@ Flutter 已有：
 - 软限位预检；
 - TMC 诊断；
 - HOME 和 `positionTrusted`；
-- 标定表持久化到 `%APPDATA%\iphone_follow_focus\lens_lut.json`。
+- 镜头管理：启动进镜头选择页（[lib/lens_page.dart](lib/lens_page.dart)），每个镜头单独保存
+  行程标定、变远方向和距离标定表，持久化到 `%APPDATA%\iphone_follow_focus\lenses.json`；
+- 跟焦前的三步：新镜头手动标定行程 → 单侧对齐（把当前位置认成焦距最近点）→ 选变远方向，
+  然后才进跟焦；行程/方向约束软限位，避免拧反或超出标定行程。
 
-`LensLut` 和电机换算测试位于 [lib/lens_lut.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/lens_lut.dart>)
+镜头模型与存储、距离映射和电机换算位于 [lib/lens.dart](lib/lens.dart)、
+[lib/lens_lut.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/lens_lut.dart>)
 和 [lib/motor_cal.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/motor_cal.dart>)。
+
+### 镜头流程（上位机）
+
+```text
+启动 → 镜头选择页 → 选/新建镜头
+  ├ 未标定行程：① 标定行程（手动转到两端，记 A/B，两点距离=行程）
+  ├ 已标定行程：② 单侧对齐（自由微调到最近对焦 → 确认最近点 → 选变远方向）
+  └ ③ 跟焦（现有页面；软限位 = 最近点 + 变远方向 × 行程）
+```
+
+- “焦距最近点”是**会话量**：步进电机开环、掉电丢绝对位置，所以每次进入都要重新对齐，
+  不持久化；行程长度和变远方向是物理属性，持久化。
+- 距离标定表存的是标定当次会话的绝对步数，对齐后由 `lutRebaseDelta()` 整体平移到本次
+  会话坐标系；因此 `SET_LIMITS` 只由“行程 + 对齐”决定，不再由距离标定表决定。
+- 行程标定是防误触的：标过之后要长按“重新标定行程”并确认才会清空。HOME（软件置零）
+  会作废对齐，需要重新对齐。
 
 ### 8.1 iOS 真机部署（macOS）
 
@@ -599,7 +620,7 @@ Flutter 测试：
 flutter test
 ```
 
-当前已通过 25 项。
+当前已通过 40 项（含 `lib/lens.dart` 的行程/对齐纯逻辑和镜头页、三步流程的 widget 测试）。
 
 如果测试在加载阶段就全部失败，报
 `Unable to connect to flutter_tester process: WebSocketException: Invalid WebSocket upgrade request`,
@@ -802,7 +823,9 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 | 归属 | 路径 | 说明 |
 | --- | --- | --- |
 | 固件侧 | `firmware/**`、`test/**`、[PROTOCOL.md](PROTOCOL.md) | 协议、运动控制、验收脚本 |
-| 上位机侧 | `lib/**`、`ios/**`、`pubspec.yaml` | Flutter / iOS App |
+| **功能层（Swift）** | `ios/FollowFocusCore/**` | 协议/链路/镜头/对齐/会话编排。**不允许 import Flutter/UIKit** |
+| **UI 层（Flutter）** | `lib/**` | Flutter UI。只通过 `ff.core` channel 读写功能层，见 §13 |
+| iOS 壳 | `ios/Runner/**`、`pubspec.yaml` | 插件注册、LiDAR 采集、平台视图 |
 | 共享 | [HANDOFF.md](HANDOFF.md)、[README.md](README.md)、[CONTROL_ARCHITECTURE.md](<J:/New%20soft%20project/iphone-follow-focus/CONTROL_ARCHITECTURE.md>) | 改前先确认没有别人正在同一段落工作 |
 
 协同规则：
@@ -815,3 +838,64 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
   个包"（见 §6 回包数量表）。
 - 同一时刻只允许一个控制器发命令（AP 可接 4 台客户端，但控制权不共享）。
 - 固件改动后 App 无需重新协商协议版本；但如果新增了字段，App 必须能在字段为 0 时退化工作。
+
+## 13. Swift 功能层（迁移中）
+
+### 目标
+
+功能层全部在 Swift 底层实现，和 UI 拆开；UI 由专人编辑，只通过一条 channel 读写功能层。
+UI 不用 Flutter 的话也能换成 SwiftUI，功能层不动。
+
+### 目录职责
+
+```text
+ios/FollowFocusCore/            ← 功能层（本地 Swift Package，只有 Foundation 依赖）
+  Sources/FollowFocusCore/
+    FfProtocol.swift            12/16/22/32 字节包编解码、序号规则
+    MotorCal.swift              步/圈/脉冲换算、软限位、峰值速度
+    LensLut.swift               1/距离 插值、细分换算、距离滤波
+    Lens.swift                  镜头模型、对齐区间、方向推断、重锚、存档
+    UdpSocket.swift             BSD UDP（广播、非阻塞、poll）
+    MotorLink.swift             序号、探测回显、状态回调
+    Discovery.swift             设备发现（单播 + 去重 + 超时）
+    FollowFocusSession.swift    20ms 控制 tick、使能自愈、停机闩锁、
+                                自动跟焦死区、相位机、软限位下发
+lib/                            ← UI 层
+```
+
+边界由编译器强制：`FollowFocusCore` 不能 import Flutter —— 写不进去，不是靠约定。
+UI 侧任何控制逻辑都应当移进 `FollowFocusSession`，不要在 Dart 里复制一份。
+
+### 跑测试
+
+```bash
+cd ios/FollowFocusCore && swift test        # 全部逻辑测试，约 4 秒，不需要模拟器
+```
+
+在 macOS 原生跑，比 `xcodebuild test` 快几十倍；链路和会话测试在 loopback 上起一个
+假板子（迷你固件模拟器）走**真实** UDP，不需要接硬件。容器/桥层的测试再走
+`xcodebuild test`（`ios/RunnerTests/`）。
+
+### 迁移状态
+
+| 部分 | 状态 |
+| --- | --- |
+| 协议编解码、电机换算、距离表、镜头模型与存档 | ✅ 已迁，测试已搬 |
+| UDP 链路、设备发现 | ✅ 已迁，有假板子端到端测试 |
+| 会话编排（tick/使能自愈/停机闩锁/自动跟焦/相位机/软限位） | ✅ 已迁，有迷你固件模拟器测试 |
+| `ff.core` channel（方法表 + 20Hz 状态快照） | ⏳ 未做 |
+| Flutter UI 切到 channel、删除 Dart 功能层 | ⏳ 未做 |
+| LiDAR 采样直连会话（不再绕 Dart） | ⏳ 未做 |
+| 清理 Windows 桌面入口 | ⏳ 未做 |
+
+**未切完之前，Dart 侧（`lib/ff_protocol.dart`、`lib/lens.dart`、`lib/lens_lut.dart`、
+`lib/motor_cal.dart`）还在被 UI 使用，和 Swift 是两份实现。**
+这段时间两边行为可能不一致，这正是 `CONTROL_ARCHITECTURE.md` 警告过的情况，
+所以不要再往 Dart 侧加功能。
+
+### 迁移中修掉的 bug
+
+Dart 版自动跟焦的死区判断写成了 `abs(want - (lastSent ?? want)) < 死区`，
+`lastSent` 为 nil 时恒等于 0，于是每个 tick 都被判成“没跨过死区”直接 return：
+**自动跟焦一个目标都发不出去，电机只会被手动滑条推动。** Swift 版只在真的
+发过目标时才比死区（`if let last = lastSent, ...`），并加了测试钉住。
