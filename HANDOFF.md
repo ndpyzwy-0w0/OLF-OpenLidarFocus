@@ -1,6 +1,6 @@
 # iphone-follow-focus 项目交付文档
 
-更新时间：2026-09-22
+更新时间：2026-09-23
 
 这份文档是后续 agent 的第一阅读入口。它描述当前仓库的真实实现，不要把旧提交或旧文档中
 FastAccelStepper/RMT 的描述当作当前代码。
@@ -38,15 +38,16 @@ iPhone Pro 真机。
 | 手动 HOME / `positionTrusted` | 已实现 |
 | 固件协议契约文档 | [PROTOCOL.md](PROTOCOL.md)，wire 层唯一权威来源 |
 | 自动化 UDP 验收脚本 | 已完成，真机 9/9 通过（含单发 JOG 流式/锁存对照） |
-| iOS LiDAR | 代码存在，未在本 Windows 环境验证 |
+| iOS 真机部署（macOS） | 已打通，实测 iPhone 15 Pro Max / iOS 17.5，见 §8.1 |
+| iOS LiDAR 功能 | 代码存在；部署链路已打通，功能本身仍待在真机验证 |
 
-最近提交：
+最近提交（不含本文档本次改动所在的提交，避免自引用导致的哈希失效）：
 
 ```text
-2301604 test: cover single-shot JOG streaming vs latched modes
-8add5d6 docs: clarify watchdog ARMED semantics and refresh the commit log
-45cc8c8 feat: add latched single-shot moves and allow several AP clients
-b453ca4 docs: record per-board SSID and discovery protocol
+47c98f5 chore: prepare project for public repository
+60b171b fix: enable lidar ios deployment target
+f28e153 refactor: split lidar native interface
+5627fe5 docs: warn that jog.py pos N is a move, not a query
 ```
 
 ## 3. 硬件和接线
@@ -398,7 +399,7 @@ flutter run -d windows
 
 界面点击“连接电机”后才会创建 UDP socket，并发送速度、待机参数、ENABLE、QUERY、
 TMC_QUERY。Windows 下 LiDAR 不可用，因为 [lidar.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/lidar.dart>)
-只在 iOS 启用原生通道。
+只在 iOS 启用原生通道。iOS 真机部署（签名、profile/release、`flutter attach`）见 §8.1。
 
 Flutter 已有：
 
@@ -413,6 +414,113 @@ Flutter 已有：
 
 `LensLut` 和电机换算测试位于 [lib/lens_lut.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/lens_lut.dart>)
 和 [lib/motor_cal.dart](<J:/New%20soft%20project/iphone-follow-focus/lib/motor_cal.dart>)。
+
+### 8.1 iOS 真机部署（macOS）
+
+iPhone 包只能在 macOS 上打，Windows 环境做不了。本节记录实测可用的流程和坑。
+macOS 上本仓库路径为 `/Users/macos/OLF-OpenLidarFocus`。
+
+本文写作时的环境与实测结果：
+
+| 项 | 值 |
+| --- | --- |
+| Flutter | 3.47.4 stable（`/Users/macos/flutter`） |
+| Xcode | 16.4 (16F6) |
+| 真机 | iPhone 15 Pro Max，iOS 17.5，UDID `00008130-001C2DE900C1401C` |
+| 签名团队 | `WB8RFWDPG4`（Apple Development: ndpyzwy@163.com） |
+| Bundle ID | `com.ndpyz.iphoneFollowFocus` |
+| 部署目标 | iOS 15.4 |
+
+前提：Xcode 已登录 Apple ID（免费账号即可），且 Mac 已信任该设备。
+
+**`ios/Runner.xcodeproj` 原本没有 `DEVELOPMENT_TEAM`，真机部署必然签不过。** 已为 Runner
+target 的 Debug/Release/Profile 三个配置补上，等价于在 Xcode「Signing & Capabilities」里
+勾选 Team 的产物：
+
+```text
+CODE_SIGN_STYLE = Automatic;
+DEVELOPMENT_TEAM = WB8RFWDPG4;
+```
+
+换人换账号时把 `DEVELOPMENT_TEAM` 改成自己的即可。CocoaPods **不需要**：本工程没有 pod
+依赖，`LidarPlugin.swift` 直接放在 `ios/Runner/` 由 `AppDelegate` 注册，构建会跳过 CocoaPods
+（本机也确实没装）。
+
+#### debug / profile / release 的选择
+
+debug 版是 JIT，必须由 Flutter 工具链喂代码，**脱离工具链从桌面点开始终失败**，引擎会直接
+拒绝创建 FlutterEngine：
+
+```text
+Cannot create a FlutterEngine instance in debug mode without Flutter tooling or Xcode.
+
+To launch in debug mode in iOS 14+, run flutter run from Flutter tools, run from an IDE with a Flutter
+IDE plugin or run the iOS project from Xcode.
+Alternatively profile and release mode apps can be launched from the home screen.
+```
+
+| 需求 | 模式 | 做法 |
+| --- | --- | --- |
+| 真机调试（热重载、断点） | debug | `flutter run -d <UDID>` |
+| **从桌面点开** + 仍能看日志/热重载 | profile | `flutter build ios --profile` 后安装 |
+| 性能/最终交付 | release | `flutter build ios --release` 后安装 |
+
+需要在手机上直接点开就用 **profile**：AOT 编译能从桌面启动，同时保留 VM Service。实测产物
+release 16.6 MB、profile 25.0 MB。
+
+构建并安装到已连接设备：
+
+```bash
+xcrun devicectl list devices        # 查 UDID
+flutter build ios --profile         # 产物 build/ios/iphoneos/Runner.app
+xcrun devicectl device install app --device <UDID> build/ios/iphoneos/Runner.app
+```
+
+#### `flutter attach` 必须先起监听再启动 App
+
+`flutter attach` 靠监听 App **启动那一刻**发出的 VM Service 广播来连接。App 已经跑起来再
+attach 会一直停在 `Waiting for a connection from Flutter on <device>`。正确顺序是先 attach、
+再重启手机上的 App：
+
+```bash
+flutter attach -d <UDID>   # 看到 Waiting for a connection 后，
+                           # 在手机上杀掉 App 再点开一次
+```
+
+实测接上后 DevTools 与热重载均可用。
+
+#### 三个坑
+
+1. **别再跑不带 `--profile`/`--release` 的 `flutter run`**：它会用 debug 版覆盖已安装的
+   profile/release 版，桌面图标随即报上面那段 `Cannot create a FlutterEngine`。恢复就是重新
+   build + install。
+2. **刚装完立刻启动可能被拒**，报 `... has an invalid code signature, inadequate entitlements
+   or its profile has not been explicitly trusted by the user`。这是 iOS 装完后重新校验 profile
+   的短暂窗口，等 20–30 s 重试即可，**不是签名坏了** —— 用
+   `codesign --verify --deep --strict Runner.app` 通过、且 entitlements 里的
+   `application-identifier` 与 `embedded.mobileprovision` 一致即可确认。**设备锁屏**也会导致
+   完全相同的报错，先解锁再试。
+3. **免费账号的 provisioning profile 只有 7 天有效期**（本文实测签发后到期日 2026-09-30），
+   过期后桌面图标点不开，重新 build + install 即可。付费账号可到 1 年。
+
+#### 已知运行期问题：未连电机时刷屏
+
+手机没连电机 AP（`192.168.4.1`）时会持续打印：
+
+```text
+Unhandled Exception: SocketException: Send failed (OS Error: No route to host, errno = 65), address = 0.0.0.0, port = 0
+#2  MotorLink._send (package:iphone_follow_focus/ff_protocol.dart:287:12)
+#3  MotorLink.enable
+#4  _FollowPageState._connect (package:iphone_follow_focus/main.dart:336:13)
+```
+
+`address = 0.0.0.0, port = 0` 是**本地 socket 端点**（`bind(anyIPv4, 0)`），不是目标地址，别被
+它误导：目标仍是 `192.168.4.1:4210`，这条错误只是在说"手机不在电机那个网段上"。
+
+机制：`MotorLink.open()` 里的 `sock.listen((event) {...})` **没有注册 `onError`**，UDP 发送
+失败是以**异步 stream 错误**抛出的，所以 `_connect()` 外层的 `try/catch` 拦不住（它只能拦同步
+throw），会带着"触发发送那一行"的调用栈变成 Unhandled Exception。修法是在 `listen` 加
+`onError` 兜底（一处即可覆盖所有调用方），并把 `onPressed: _connect` 丢掉的 Future 收好。
 
 ## 9. 测试和验收
 
@@ -584,7 +692,13 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 - 实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。
 - 把固定 `192.168.4.1` 替换为设备发现结果。
 - 完善 HOME 提示，明确它是软件校零而非机械回零。
-- 在 Mac + iPhone Pro 上验证 LiDAR、目标跟踪、镜头标定和丢目标策略。
+- **修未连电机时刷屏的未捕获 `SocketException`**（见 §8.1）：`MotorLink.open()` 的
+  `sock.listen` 缺 `onError`，UDP 发送失败会变成未处理的异步 stream 错误，
+  `_connect()` 的 `try/catch` 拦不住。在 `listen` 加 `onError` 一处兜底即可，
+  顺带把 `onPressed: _connect` 丢掉的 Future 收好。
+- **iOS 真机部署链路已打通**（见 §8.1：`DEVELOPMENT_TEAM`、profile/release 可桌面启动、
+  `flutter attach` 用法、7 天 profile 有效期）。剩下的是把 LiDAR 目标跟踪、镜头标定和
+  丢目标策略在真机上验证并标定。
 - 再开发正式 Swift/iOS 底层和 UI。
 
 ## 11. 修改规则
