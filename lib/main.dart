@@ -5,20 +5,22 @@ import 'package:flutter/material.dart';
 
 import 'device_page.dart';
 import 'ff_protocol.dart';
+import 'lens.dart';
 import 'lens_lut.dart';
+import 'lens_page.dart';
 import 'lidar.dart';
 import 'motor_cal.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final lut = await LensLut.load();
-  runApp(FollowApp(lut: lut));
+  final store = await LensStore.load();
+  runApp(FollowApp(store: store));
 }
 
 class FollowApp extends StatelessWidget {
-  final LensLut lut;
+  final LensStore store;
 
-  const FollowApp({super.key, required this.lut});
+  const FollowApp({super.key, required this.store});
 
   @override
   Widget build(BuildContext context) {
@@ -31,15 +33,26 @@ class FollowApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: FollowPage(initialLut: lut),
+      home: LensPage(
+        store: store,
+        open: (ctx, lens) => Navigator.of(ctx).push(
+          MaterialPageRoute(
+            builder: (_) => FollowPage(lens: lens, store: store),
+          ),
+        ),
+      ),
     );
   }
 }
 
-class FollowPage extends StatefulWidget {
-  final LensLut initialLut;
+/// 跟焦前必须过的三步：新镜头标定行程 → 单侧对齐 → 跟焦。
+enum SetupPhase { stroke, align, follow }
 
-  const FollowPage({super.key, required this.initialLut});
+class FollowPage extends StatefulWidget {
+  final Lens lens;
+  final LensStore store;
+
+  const FollowPage({super.key, required this.lens, required this.store});
 
   @override
   State<FollowPage> createState() => _FollowPageState();
@@ -50,7 +63,18 @@ class _FollowPageState extends State<FollowPage> {
   final _lidar = LidarChannel();
   final _filter = DistFilter();
 
-  late LensLut _lut;
+  late Lens _lens;
+  LensLut get _lut => _lens.lut;
+
+  /// 本次会话的对齐结果：焦距最近点的电机步数，以及“焦距变远”的方向。
+  /// 对齐是会话量（开环步数掉电就丢），不持久化，每次进入都要重做。
+  bool _aligned = false;
+  int? _nearSteps;
+  int _dir = 1;
+
+  /// 行程标定中记下的第一个端点。
+  int? _strokeA;
+
   bool _lidarOk = false;
   bool _auto = false;
   bool _faces = false;
@@ -110,7 +134,8 @@ class _FollowPageState extends State<FollowPage> {
   @override
   void initState() {
     super.initState();
-    _lut = widget.initialLut;
+    _lens = widget.lens;
+    _dir = _lens.dir;
     _link.onStatus = (s) {
       if (!mounted) return;
       setState(() {
@@ -222,13 +247,11 @@ class _FollowPageState extends State<FollowPage> {
       _lastTmc = now;
       _link.queryTmc();
     }
-    // 细分变化会改变“步”的尺度：重算速度、并把标定限位按新细分重新下发。
+    // 细分变化会改变“步”的尺度：重算速度，并把软限位按新细分重新下发。
     if (_spr != _appliedSpr) {
       _appliedSpr = _spr;
       _applySpeed();
-      if (_lut.ready) {
-        _link.setLimits(_lutNow.minSteps!, _lutNow.maxSteps!);
-      }
+      _applyLimits();
     }
     // 板子重启后固件 enabled=0，App 这边补一次使能，让状态自愈。
     if (_wantEnabled &&
@@ -242,7 +265,7 @@ class _FollowPageState extends State<FollowPage> {
     int? want;
     if (_auto) {
       final d = _distance;
-      if (d != null) want = _lutNow.stepsFor(d);
+      if (d != null) want = _autoSteps(d);
     } else if (_sliderDirty) {
       want = _sliderSteps();
       _sliderDirty = false;
@@ -254,8 +277,9 @@ class _FollowPageState extends State<FollowPage> {
     // 表现就是“一直缓慢转动、永远停不下来”。
     if (_auto) {
       if ((want - (_lastSent ?? want)).abs() < kAutoDeadbandSteps) return;
-      if (now.difference(_lastAutoSend) < const Duration(milliseconds: 60))
+      if (now.difference(_lastAutoSend) < const Duration(milliseconds: 60)) {
         return;
+      }
       _lastAutoSend = now;
     } else if (want == _lastSent) {
       return;
@@ -273,6 +297,27 @@ class _FollowPageState extends State<FollowPage> {
       _filter.reset();
       _msg = '已退出自动跟焦（$why）';
     }
+  }
+
+  /// 作废本次对齐，并把固件软限位恢复成默认值。
+  ///
+  /// 必须真正下发默认限位：否则固件还留着上一轮对齐的窄区间，
+  /// 对齐阶段“自由微调”会在旧边界被夹住，表现是微调不动。
+  void _unalign(String msg) {
+    setState(() {
+      _aligned = false;
+      _nearSteps = null;
+      _auto = false;
+      _lastSent = null;
+      _msg = msg;
+    });
+    _applyLimits();
+  }
+
+  /// 软件置零会把当前位置变成 0，对齐建立的最近点参考随之失效，必须重对齐。
+  void _homePressed() {
+    _link.home();
+    _unalign('已软件置零，请重新对齐最近点');
   }
 
   void _stopPressed() {
@@ -341,10 +386,138 @@ class _FollowPageState extends State<FollowPage> {
   }
 
   /// 标定值按当前细分换算后的视图。
-  LensLut get _lutNow => _lut.scaledTo(_ms);
+  LensLut get _lutNow => _lens.lut.scaledTo(_ms);
 
-  int _lo() => _lutNow.minSteps ?? -_cal.defaultLimitSpan(_ms);
-  int _hi() => _lutNow.maxSteps ?? _cal.defaultLimitSpan(_ms);
+  SetupPhase get _phase {
+    if (!_lens.calibrated) return SetupPhase.stroke;
+    if (!_aligned || _nearSteps == null) return SetupPhase.align;
+    return SetupPhase.follow;
+  }
+
+  /// 软限位：对齐后只有“最近点 → 远端”这一侧，绝不超过标定行程；
+  /// 未对齐（标定/对齐阶段）用和固件默认一致的 ±20 圈，好让跟焦器自由微调。
+  ({int lo, int hi}) _limitsFor(int ms) {
+    final near = _nearSteps;
+    if (_aligned && near != null) {
+      return alignedRange(near, _dir, _lens.strokeAt(ms));
+    }
+    final span = _cal.defaultLimitSpan(ms);
+    return (lo: -span, hi: span);
+  }
+
+  int _lo() => _limitsFor(_ms).lo;
+  int _hi() => _limitsFor(_ms).hi;
+
+  void _applyLimits() {
+    if (!_link.isOpen) return;
+    final (lo: lo, hi: hi) = _limitsFor(_ms);
+    _link.setLimits(lo, hi);
+  }
+
+  /// 自动跟焦目标：距离标定表查表，再夹进对齐软限位里，保证不超过行程。
+  int? _autoSteps(double meters) {
+    final v = _lutNow.stepsFor(meters);
+    if (v == null) return null;
+    return v.clamp(_lo(), _hi()).toInt();
+  }
+
+  void _updateLens(Lens next) {
+    _lens = widget.store.upsert(next);
+    widget.store.save();
+    setState(() {});
+  }
+
+  /// 确认焦距最近点。方向默认用距离标定表推断（表里距离越远步数越大就是 +方向），
+  /// 没有表就用上次选过的方向。
+  void _confirmNear() {
+    setState(() {
+      _nearSteps = _pos;
+      _dir = inferDir(_lens.lut) ?? _lens.dir;
+      _msg = '最近点 = $_pos 步，选好变远方向后开始';
+    });
+  }
+
+  /// 选定方向后真正进入跟焦：把距离标定表锚到本次会话的坐标系，再下发软限位。
+  void _startFollow() {
+    final near = _nearSteps;
+    if (near == null) return;
+    final lutNow = _lens.lut.scaledTo(_ms);
+    final delta = lutRebaseDelta(near, lutNow);
+    _updateLens(_lens.copyWith(
+      dir: _dir,
+      lut: delta == 0 ? _lens.lut : lutNow.shifted(delta),
+    ));
+    _aligned = true;
+    _applyLimits();
+    setState(() {
+      _slider = 0;
+      _sliderDirty = false;
+      _lastSent = null;
+      _auto = false;
+      _msg = '对齐完成，可开始跟焦';
+    });
+  }
+
+  void _setDir(int d) {
+    _updateLens(_lens.copyWith(dir: d));
+    setState(() {
+      _dir = d;
+      _lastSent = null;
+    });
+    _applyLimits();
+  }
+
+  /// 行程标定：先记一端，再记另一端，两点距离就是行程长度。
+  void _recordStrokeA() {
+    setState(() {
+      _strokeA = _pos;
+      _msg = '已记录端点 A = $_pos 步，请转到行程另一端再记录';
+    });
+  }
+
+  void _finishStroke() {
+    final a = _strokeA;
+    if (a == null) return;
+    final stroke = (_pos - a).abs();
+    if (stroke < 1) {
+      setState(() => _msg = 'A 和 B 几乎在同一位置，请转到行程另一端再记录');
+      return;
+    }
+    _updateLens(_lens.copyWith(strokeSteps: stroke, strokeMicrosteps: _ms));
+    setState(() {
+      _strokeA = null;
+      _msg = '行程已标定：$stroke 步'
+          '（${_cal.stepsToRevs(stroke, _ms).toStringAsFixed(2)} 圈），接下来对齐最近点';
+    });
+  }
+
+  /// 行程标定的防误触：清空重标要长按再确认，避免碰到就把行程弄丢。
+  Future<void> _confirmRecalibrate() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空行程标定？'),
+        content: Text(
+          '${_lens.name} 的行程 ${_lens.strokeAt(_ms)} 步会被清空，'
+          '之后要重新量一次行程才能跟焦。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('清空重标'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    _updateLens(_lens.withoutStroke());
+    setState(() => _strokeA = null);
+    _unalign('行程已清空，请重新标定');
+  }
 
   int _sliderSteps() {
     final lo = _lo();
@@ -397,6 +570,7 @@ class _FollowPageState extends State<FollowPage> {
     try {
       await _link.open();
       _applySpeed();
+      _applyLimits();
       _link.setTmc(kTmcStandby, _standbyFeature ? 1 : 0);
       _wantEnabled = true;
       _lastEnableAttempt = DateTime.now();
@@ -428,14 +602,9 @@ class _FollowPageState extends State<FollowPage> {
     }
   }
 
-  Future<void> _setLut(LensLut next) async {
-    _lut = next;
-    await next.save();
-    if (next.ready) {
-      final now = next.scaledTo(_ms);
-      _link.setLimits(now.minSteps!, now.maxSteps!);
-    }
-    setState(() {});
+  void _setLut(LensLut next) {
+    // 距离标定表不再决定软限位；限位只由“行程 + 对齐”决定。
+    _updateLens(_lens.copyWith(lut: next));
   }
 
   @override
@@ -500,6 +669,24 @@ class _FollowPageState extends State<FollowPage> {
                     '电机 $_pos → $_target    $_msg',
                     style: const TextStyle(fontSize: 13),
                   ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '镜头 ${_lens.name}',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      Text(
+                        switch (_phase) {
+                          SetupPhase.stroke => '① 标定行程',
+                          SetupPhase.align => '② 单侧对齐',
+                          SetupPhase.follow => '③ 跟焦',
+                        },
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
@@ -519,9 +706,14 @@ class _FollowPageState extends State<FollowPage> {
                         },
                       ),
                       FilterChip(
-                        label: Text(_lut.ready ? '自动跟焦' : '自动(需2点标定)'),
-                        selected: _auto && _lut.ready,
-                        onSelected: _lut.ready
+                        // 自动跟焦要先对齐、还要有两点距离标定，否则没有可信的目标。
+                        label: Text(
+                          _phase != SetupPhase.follow
+                              ? '自动(先对齐)'
+                              : (_lut.ready ? '自动跟焦' : '自动(需2点标定)'),
+                        ),
+                        selected: _auto && _phase == SetupPhase.follow,
+                        onSelected: _lut.ready && _phase == SetupPhase.follow
                             ? (v) => setState(() {
                                 _auto = v;
                                 _lastSent = null;
@@ -547,192 +739,122 @@ class _FollowPageState extends State<FollowPage> {
                         child: const Text('停'),
                       ),
                       OutlinedButton(
-                        onPressed: _open && !_moving
-                            ? () => _link.home()
-                            : null,
+                        onPressed: _open && !_moving ? _homePressed : null,
                         child: Text(_positionTrusted ? '已校零' : '设当前位置为原点'),
                       ),
                     ],
                   ),
-                  Text(_auto ? '手动滑条（自动开时无效）' : '手动焦点'),
-                  Slider(
-                    value: _slider,
-                    onChanged: _auto
-                        ? null
-                        : (v) => setState(() {
-                            _slider = v;
-                            _sliderDirty = true;
-                            _stopLatched = false;
-                            _lastSent = null;
-                          }),
-                  ),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: [
-                      for (final d in [-800, -80, -8, 8, 80, 800])
-                        OutlinedButton(
-                          onPressed: () => _jog(d),
-                          child: Text(d > 0 ? '+$d' : '$d'),
-                        ),
-                    ],
-                  ),
-                  const Divider(height: 16),
-                  // 脉冲 / 圈。这里的“步”是 STEP 脉冲（微步），不是整步。
-                  Row(
-                    children: [
-                      const Text('脉冲'),
-                      const SizedBox(width: 6),
-                      SizedBox(
-                        width: 90,
-                        child: TextField(
-                          controller: _stepsText,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(
-                            isDense: true,
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton(
-                        onPressed: () => _goSteps(1),
-                        child: const Text('走步'),
-                      ),
-                      OutlinedButton(
-                        onPressed: () => _goSteps(-1),
-                        child: const Text('反向'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      const Text('圈'),
-                      const SizedBox(width: 6),
-                      SizedBox(
-                        width: 90,
-                        child: TextField(
-                          controller: _revsText,
-                          keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
-                          decoration: const InputDecoration(
-                            isDense: true,
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton(
-                        onPressed: () => _goRevs(1),
-                        child: const Text('走圈'),
-                      ),
-                      OutlinedButton(
-                        onPressed: () => _goRevs(-1),
-                        child: const Text('反向'),
-                      ),
-                    ],
-                  ),
-                  Text(
-                    '输入单位：脉冲/微步；脉冲/圈 $_spr（0.9° 电机 = ${_cal.fullStepsPerRev} 整步/圈 × '
-                    '1/$_ms 细分）；当前位置 '
-                    '${_cal.stepsToRevs(_pos, _ms).toStringAsFixed(2)} 圈',
-                    style: const TextStyle(fontSize: 11),
-                  ),
-                  Text(
-                    '每个脉冲约 ${(360 / _spr).toStringAsFixed(4)}°；'
-                    '8 脉冲 = ${(360 * 8 / _spr).toStringAsFixed(3)}°',
-                    style: const TextStyle(fontSize: 11),
-                  ),
-                  // 直接说明“为什么 80 步比 800 步慢”：峰值速度由距离决定。
-                  _peakHint(),
-                  Text(
-                    '速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒'
-                    '（${(_speedRevS * 60).round()} 转/分 · ${(_speedRevS * _spr).round()} 脉冲/秒）',
-                  ),
-                  Slider(
-                    min: 0.05,
-                    max: 3.0,
-                    value: _speedRevS.clamp(0.05, 3.0),
-                    onChanged: (v) => setState(() => _speedRevS = v),
-                    onChangeEnd: (v) {
-                      _speedRevS = v;
-                      _applySpeed();
-                    },
-                  ),
-                  if (_speedRevS > _cal.maxRevsPerSec(_ms))
+                  _setupPanel(),
+                  if (_phase == SetupPhase.follow) ...[
+                    Text(_auto ? '手动滑条（自动开时无效）' : '手动焦点'),
+                    Slider(
+                      value: _slider,
+                      onChanged: _auto
+                          ? null
+                          : (v) => setState(() {
+                                _slider = v;
+                                _sliderDirty = true;
+                                _stopLatched = false;
+                                _lastSent = null;
+                              }),
+                    ),
+                    _jogControls(),
                     Text(
-                      '⚠ 1/$_ms 细分下最高只有 '
-                      '${_cal.maxRevsPerSec(_ms).toStringAsFixed(2)} 圈/秒'
-                      '（固件上限 $kMaxStepHz 脉冲/秒）。'
-                      '要更快就用更低细分：1/16 配「微步插值」内部同样是 1/256，'
-                      '但脉冲只有 1/16。',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: Color(0xFFFFAB40),
-                      ),
+                      '每个脉冲约 ${(360 / _spr).toStringAsFixed(4)}°；'
+                      '8 脉冲 = ${(360 * 8 / _spr).toStringAsFixed(3)}°',
+                      style: const TextStyle(fontSize: 11),
                     ),
-                  Text('加速度 ${_accelRevS2.toStringAsFixed(0)} 圈/秒²'),
-                  Slider(
-                    min: 2,
-                    max: 100,
-                    value: _accelRevS2.clamp(2, 100),
-                    onChanged: (v) => setState(() => _accelRevS2 = v),
-                    onChangeEnd: (v) {
-                      _accelRevS2 = v;
-                      _applySpeed();
-                    },
-                  ),
-                  const Text(
-                    '速度和加速度按“圈/秒”给，换细分不会改变物理速度。'
-                    '1600 脉冲会先加速、达到巡航后再减速，'
-                    '中途降速是正常减速段；短行程会更早进入减速。',
-                    style: TextStyle(fontSize: 11),
-                  ),
-                  const Text(
-                    '手动 JOG 会先清除正在执行的旧目标，再从当前位置精确执行本次脉冲，'
-                    '用于验证 +8 与 +80 的实际差异；自动跟焦仍使用 SET_POS 平滑追踪。',
-                    style: TextStyle(fontSize: 11),
-                  ),
-                  Row(
-                    children: [
-                      const Text(
-                        '镜头标定',
-                        style: TextStyle(fontWeight: FontWeight.bold),
+                    // 直接说明“为什么 80 步比 800 步慢”：峰值速度由距离决定。
+                    _peakHint(),
+                    Text(
+                      '速度 ${_speedRevS.toStringAsFixed(2)} 圈/秒'
+                      '（${(_speedRevS * 60).round()} 转/分 · ${(_speedRevS * _spr).round()} 脉冲/秒）',
+                    ),
+                    Slider(
+                      min: 0.05,
+                      max: 3.0,
+                      value: _speedRevS.clamp(0.05, 3.0),
+                      onChanged: (v) => setState(() => _speedRevS = v),
+                      onChangeEnd: (v) {
+                        _speedRevS = v;
+                        _applySpeed();
+                      },
+                    ),
+                    if (_speedRevS > _cal.maxRevsPerSec(_ms))
+                      Text(
+                        '⚠ 1/$_ms 细分下最高只有 '
+                        '${_cal.maxRevsPerSec(_ms).toStringAsFixed(2)} 圈/秒'
+                        '（固件上限 $kMaxStepHz 脉冲/秒）。'
+                        '要更快就用更低细分：1/16 配「微步插值」内部同样是 1/256，'
+                        '但脉冲只有 1/16。',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFFFFAB40),
+                        ),
                       ),
-                      const Spacer(),
-                      FilledButton.tonal(
-                        onPressed: _distance == null
-                            ? null
-                            : () => _setLut(
-                                _lut.adding(
-                                  LutPoint(meters: _distance!, steps: _pos),
-                                  microsteps: _ms,
+                    Text('加速度 ${_accelRevS2.toStringAsFixed(0)} 圈/秒²'),
+                    Slider(
+                      min: 2,
+                      max: 100,
+                      value: _accelRevS2.clamp(2, 100),
+                      onChanged: (v) => setState(() => _accelRevS2 = v),
+                      onChangeEnd: (v) {
+                        _accelRevS2 = v;
+                        _applySpeed();
+                      },
+                    ),
+                    const Text(
+                      '速度和加速度按“圈/秒”给，换细分不会改变物理速度。'
+                      '1600 脉冲会先加速、达到巡航后再减速，'
+                      '中途降速是正常减速段；短行程会更早进入减速。',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                    const Text(
+                      '手动 JOG 会先清除正在执行的旧目标，再从当前位置精确执行本次脉冲，'
+                      '用于验证 +8 与 +80 的实际差异；自动跟焦仍使用 SET_POS 平滑追踪。',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                    _directionRow(),
+                    Row(
+                      children: [
+                        const Text(
+                          '距离标定',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const Spacer(),
+                        FilledButton.tonal(
+                          onPressed: _distance == null
+                              ? null
+                              : () => _setLut(
+                                  _lut.adding(
+                                    LutPoint(meters: _distance!, steps: _pos),
+                                    microsteps: _ms,
+                                  ),
                                 ),
-                              ),
-                        child: const Text('记录当前'),
-                      ),
-                    ],
-                  ),
-                  const Text(
-                    'Jog 到实焦后点记录。至少两点；按 1/距离 插值。'
-                    '标定与当前细分绑定，换细分会自动换算。',
-                  ),
-                  for (var i = 0; i < _lutNow.points.length; i++)
-                    ListTile(
-                      dense: true,
-                      title: Text(
-                        '${_lutNow.points[i].meters.toStringAsFixed(2)} m  →  '
-                        '${_lutNow.points[i].steps} 步'
-                        '（${_cal.stepsToRevs(_lutNow.points[i].steps, _ms).toStringAsFixed(2)} 圈）',
-                      ),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete),
-                        onPressed: () => _setLut(_lut.removingAt(i)),
-                      ),
+                          child: const Text('记录当前'),
+                        ),
+                      ],
                     ),
-                  if (_lut.points.isEmpty) const Text('还没有标定点。'),
+                    const Text(
+                      'Jog 到实焦后点记录。至少两点；按 1/距离 插值。'
+                      '标定与当前细分绑定，换细分会自动换算。',
+                    ),
+                    for (var i = 0; i < _lutNow.points.length; i++)
+                      ListTile(
+                        dense: true,
+                        title: Text(
+                          '${_lutNow.points[i].meters.toStringAsFixed(2)} m  →  '
+                          '${_lutNow.points[i].steps} 步'
+                          '（${_cal.stepsToRevs(_lutNow.points[i].steps, _ms).toStringAsFixed(2)} 圈）',
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete),
+                          onPressed: () => _setLut(_lut.removingAt(i)),
+                        ),
+                      ),
+                    if (_lut.points.isEmpty) const Text('还没有标定点。'),
+                    _recalibrateTile(),
+                  ],
                   const SizedBox(height: 8),
                   _diagnosticPanel(),
                   _tmcPanel(),
@@ -742,6 +864,252 @@ class _FollowPageState extends State<FollowPage> {
           ),
         ],
       ),
+    );
+  }
+
+  /// 自由微调：走步/走圈/脉冲。标定和对齐阶段靠它把跟焦器转到想要的位置。
+  Widget _jogControls() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: [
+            for (final d in [-800, -80, -8, 8, 80, 800])
+              OutlinedButton(
+                onPressed: () => _jog(d),
+                child: Text(d > 0 ? '+$d' : '$d'),
+              ),
+          ],
+        ),
+        const Divider(height: 16),
+        // 脉冲 / 圈。这里的“步”是 STEP 脉冲（微步），不是整步。
+        Row(
+          children: [
+            const Text('脉冲'),
+            const SizedBox(width: 6),
+            SizedBox(
+              width: 90,
+              child: TextField(
+                controller: _stepsText,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: () => _goSteps(1),
+              child: const Text('走步'),
+            ),
+            OutlinedButton(
+              onPressed: () => _goSteps(-1),
+              child: const Text('反向'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const Text('圈'),
+            const SizedBox(width: 6),
+            SizedBox(
+              width: 90,
+              child: TextField(
+                controller: _revsText,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: () => _goRevs(1),
+              child: const Text('走圈'),
+            ),
+            OutlinedButton(
+              onPressed: () => _goRevs(-1),
+              child: const Text('反向'),
+            ),
+          ],
+        ),
+        Text(
+          '输入单位：脉冲/微步；脉冲/圈 $_spr（0.9° 电机 = ${_cal.fullStepsPerRev} 整步/圈 × '
+          '1/$_ms 细分）；当前位置 '
+          '${_cal.stepsToRevs(_pos, _ms).toStringAsFixed(2)} 圈',
+          style: const TextStyle(fontSize: 11),
+        ),
+      ],
+    );
+  }
+
+  Widget _setupPanel() {
+    switch (_phase) {
+      case SetupPhase.stroke:
+        return _strokePanel();
+      case SetupPhase.align:
+        return _alignPanel();
+      case SetupPhase.follow:
+        return const SizedBox.shrink();
+    }
+  }
+
+  /// ① 新镜头：手动量出行程（两个端点之间的距离）。
+  Widget _strokePanel() {
+    final a = _strokeA;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 16),
+        const Text('① 标定行程', style: TextStyle(fontWeight: FontWeight.bold)),
+        const Text(
+          '新镜头要先量出行程：把跟焦器转到对焦环的一端，记录 A；'
+          '再转到另一端，记录 B。两点之间的距离就是行程，'
+          '之后跟焦的转动范围永远不会超过它。',
+        ),
+        Text('当前位置 $_pos 步（${_cal.stepsToRevs(_pos, _ms).toStringAsFixed(2)} 圈）'),
+        _jogControls(),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton(
+              onPressed: _open ? _recordStrokeA : null,
+              child: Text(a == null ? '记录这一端 A' : 'A = $a 步（重记）'),
+            ),
+            FilledButton(
+              onPressed: _open && a != null ? _finishStroke : null,
+              child: const Text('记录另一端 B，完成标定'),
+            ),
+          ],
+        ),
+        if (!_open)
+          const Text('先在上面“连接电机”，再用这里自由微调到行程两端。')
+        else if (a != null)
+          const Text('把跟焦器转到行程另一端，再点右边按钮。'),
+      ],
+    );
+  }
+
+  /// ② 已标定行程的镜头：每次进入都先做单侧对齐。
+  Widget _alignPanel() {
+    final near = _nearSteps;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 16),
+        Row(
+          children: [
+            const Text(
+              '② 单侧对齐',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const Spacer(),
+            Text(
+              '行程 ${_cal.stepsToRevs(_lens.strokeAt(_ms), _ms).toStringAsFixed(2)} 圈',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        const Text(
+          '跟焦器没有绝对位置，每次进入都要对齐一次：手动微调到画面最近对焦，'
+          '把当前位置认成“焦距最近点”，再选哪边是焦距变远的方向。'
+          '这样只会在这段行程内转，不会拧反、也不会超行程。',
+        ),
+        if (near == null) ...[
+          Text(
+            '当前 $_pos 步（${_cal.stepsToRevs(_pos, _ms).toStringAsFixed(2)} 圈）',
+          ),
+          _jogControls(),
+          FilledButton(
+            onPressed: _open ? _confirmNear : null,
+            child: const Text('确认为焦距最近点'),
+          ),
+          if (!_open) const Text('先连接电机，再自由微调到最近对焦。'),
+        ] else ...[
+          Text('最近点 = $near 步'),
+          const SizedBox(height: 8),
+          const Text('从最近点往哪个旋转方向是“焦距变远”？'),
+          SegmentedButton<int>(
+            segments: const [
+              ButtonSegment(value: 1, label: Text('+ 方向变远')),
+              ButtonSegment(value: -1, label: Text('- 方向变远')),
+            ],
+            selected: {_dir},
+            onSelectionChanged: (s) => setState(() => _dir = s.first),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: [
+              FilledButton(
+                onPressed: _open ? _startFollow : null,
+                child: const Text('开始跟焦'),
+              ),
+              OutlinedButton(
+                onPressed: () => setState(() => _nearSteps = null),
+                child: const Text('重选最近点'),
+              ),
+            ],
+          ),
+        ],
+        _recalibrateTile(),
+      ],
+    );
+  }
+
+  /// 焦距变远方向只决定对齐后的软限位区间：选错会把区间放在错误的一侧，
+  /// 表现是往远端走不动，改回来即可，不会真的拧过行程。
+  Widget _directionRow() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 16),
+        Row(
+          children: [
+            const Text(
+              '焦距变远方向',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const Spacer(),
+            TextButton(
+              onPressed: () => _unalign('重新对齐最近点'),
+              child: const Text('重新对齐'),
+            ),
+          ],
+        ),
+        SegmentedButton<int>(
+          segments: const [
+            ButtonSegment(value: 1, label: Text('+ 方向变远')),
+            ButtonSegment(value: -1, label: Text('- 方向变远')),
+          ],
+          selected: {_dir},
+          onSelectionChanged: (s) => _setDir(s.first),
+        ),
+        Text(
+          '允许 $_lo..$_hi 步（最近点 $_nearSteps · 行程 ${_lens.strokeAt(_ms)} 步）',
+          style: const TextStyle(fontSize: 11),
+        ),
+      ],
+    );
+  }
+
+  /// 行程标定的防误触入口：标过之后要长按再确认才能清空重标。
+  Widget _recalibrateTile() {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      leading: const Icon(Icons.straighten, size: 20),
+      title: const Text('重新标定行程（长按）'),
+      subtitle: const Text('标定过就不怕误触：长按 1 秒，再确认才会清空行程重来。'),
+      onLongPress: _confirmRecalibrate,
     );
   }
 

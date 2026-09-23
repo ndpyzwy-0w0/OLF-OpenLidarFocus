@@ -1,5 +1,3 @@
-import 'dart:convert';
-import 'dart:io';
 import 'dart:math' as math;
 
 class LutPoint {
@@ -43,6 +41,18 @@ class LensLut {
       microsteps: ms,
     );
   }
+
+  /// 整体平移标定点。对齐后要把整张表挪到本次会话的坐标系里，
+  /// 因为存的是“标定当次会话”的绝对步数，而开环步数跨会话不可信。
+  LensLut shifted(int delta) => delta == 0
+      ? this
+      : LensLut(
+          [
+            for (final p in points)
+              LutPoint(meters: p.meters, steps: p.steps + delta),
+          ],
+          microsteps: microsteps,
+        );
 
   int? get minSteps =>
       points.isEmpty ? null : points.map((p) => p.steps).reduce(math.min);
@@ -91,27 +101,6 @@ class LensLut {
         .toList();
     return LensLut(list,
         microsteps: (j['microsteps'] as num?)?.toInt() ?? 16);
-  }
-
-  static File _file() {
-    final base = Platform.environment['APPDATA'] ??
-        Platform.environment['HOME'] ??
-        Directory.systemTemp.path;
-    final dir = Directory('$base${Platform.pathSeparator}iphone_follow_focus');
-    dir.createSync(recursive: true);
-    return File('${dir.path}${Platform.pathSeparator}lens_lut.json');
-  }
-
-  static Future<LensLut> load() async {
-    final f = _file();
-    if (!f.existsSync()) return LensLut(const []);
-    final raw = f.readAsStringSync();
-    if (raw.isEmpty) return LensLut(const []);
-    return LensLut.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-  }
-
-  Future<void> save() async {
-    _file().writeAsStringSync(jsonEncode(toJson()));
   }
 }
 
