@@ -833,9 +833,9 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 | --- | --- | --- |
 | 固件侧 | `firmware/**`、`test/**`、[PROTOCOL.md](PROTOCOL.md) | 协议、运动控制、验收脚本 |
 | **功能层（Swift）** | `ios/FollowFocusCore/**` | 协议/链路/镜头/对齐/会话编排。**不允许 import Flutter/UIKit** |
-| **UI 层（Flutter）** | `lib/**` | Flutter UI。只通过 `ff.core` channel 读写功能层，见 §13 |
+| **UI 层（Flutter）** | `lib/**` | Flutter UI。只通过 `ff.core` channel 读写功能层，见 §13 和 [UI_DEV.md](UI_DEV.md) |
 | iOS 壳 | `ios/Runner/**`、`pubspec.yaml` | 插件注册、LiDAR 采集、平台视图 |
-| 共享 | [HANDOFF.md](HANDOFF.md)、[README.md](README.md)、[CONTROL_ARCHITECTURE.md](<CONTROL_ARCHITECTURE.md>) | 改前先确认没有别人正在同一段落工作 |
+| 共享 | [HANDOFF.md](HANDOFF.md)、[README.md](README.md)、[UI_DEV.md](UI_DEV.md)、[CONTROL_ARCHITECTURE.md](<CONTROL_ARCHITECTURE.md>) | 改前先确认没有别人正在同一段落工作 |
 
 协同规则：
 
@@ -875,6 +875,7 @@ lib/                            ← UI 层
   ff_core.dart                  ff.core 客户端（只有字段搬运）
   main.dart                     跟焦页（纯渲染）
   lens_page.dart device_page.dart  镜头选择 / 设备列表
+  ff_core_demo.dart             只在 web 上用的演示核心（假数据，见 UI_DEV.md）
 ```
 
 边界由编译器强制：`FollowFocusCore` 不能 import Flutter —— 写不进去，不是靠约定。
@@ -889,6 +890,9 @@ cd ios/FollowFocusCore && swift test        # 全部逻辑测试，约 4 秒，�
 在 macOS 原生跑，比 `xcodebuild test` 快几十倍；链路和会话测试在 loopback 上起一个
 假板子（迷你固件模拟器）走**真实** UDP，不需要接硬件。容器/桥层的测试再走
 `xcodebuild test`（`ios/RunnerTests/`）。
+
+**只改 UI 时**不用模拟器也不用真机：`tool/ui_preview.sh` 起 web 预览，`flutter test`
+跑 UI 测试。流程和边界见 [UI_DEV.md](UI_DEV.md)。
 
 ### 迁移状态
 

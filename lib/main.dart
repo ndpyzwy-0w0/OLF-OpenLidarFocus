@@ -1,16 +1,20 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'device_page.dart';
 import 'ff_core.dart';
+import 'ff_core_demo.dart';
 import 'lens_page.dart';
 import 'lidar.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  final core = FfCore();
+  // web 上没有 `ff.core` 的实现（那是 iOS 侧的 Swift 插件），用演示核心把界面撑起来；
+  // 真机和模拟器一律走真的 FfCore。
+  final core = kIsWeb ? FfCoreDemo() : FfCore();
   // 功能层起来后自己会连 LiDAR 和控制回路，UI 不等它。
   unawaited(core.start());
   runApp(FollowApp(core: core));
@@ -490,7 +494,7 @@ class _FollowPageState extends State<FollowPage> {
           ],
         ),
         Text(
-          '输入单位：脉冲/微步；脉冲/圈 $_s.stepsPerRev（0.9° 电机 = 400 整步/圈 × '
+          '输入单位：脉冲/微步；脉冲/圈 ${_s.stepsPerRev}（0.9° 电机 = 400 整步/圈 × '
           '1/${_s.microsteps} 细分）；当前位置 '
           '${_s.posRevs.toStringAsFixed(2)} 圈',
           style: const TextStyle(fontSize: 11),

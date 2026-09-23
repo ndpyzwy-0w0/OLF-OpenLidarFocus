@@ -27,6 +27,14 @@ flutter run -d <device>            # 模拟器没有 LiDAR，距离显示 --，�
 
 真机 iOS 需要 Xcode 签名后部署，见 HANDOFF.md §8.1。
 
+**只改 UI、不接硬件**时不需要 Xcode 和 iPhone，用 web 预览：
+
+```bash
+tool/ui_preview.sh                 # 构建 + 起本地服务 + 打开浏览器
+```
+
+细节、边界和注意事项见 [UI_DEV.md](UI_DEV.md)。
+
 ## 测试
 
 ```bash
@@ -42,6 +50,7 @@ loopback 上起一个假板子走**真实** UDP，不需要接硬件。
 | 文档 | 内容 |
 | --- | --- |
 | [HANDOFF.md](HANDOFF.md) | 交付入口：硬件接线、现状、看门狗/锁存语义、测试与验收、下一步 |
+| [UI_DEV.md](UI_DEV.md) | **UI 开发入口**：UI/功能层边界、web 本地预览（`tool/ui_preview.sh`）、UI 测试写法 |
 | [PROTOCOL.md](PROTOCOL.md) | **固件 ↔ 上位机的 wire 契约（唯一权威来源）**：包布局、命令表、flags 位、回包数量、hex 样例、上位机检查清单 |
 | [CONTROL_ARCHITECTURE.md](CONTROL_ARCHITECTURE.md) | 控制架构与运动规划设计 |
 
