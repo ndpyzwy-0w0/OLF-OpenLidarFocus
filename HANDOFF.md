@@ -31,9 +31,10 @@ iPhone Pro 真机。
 | TMC2209 UART 诊断 | 已通，GPIO12 同脚半双工 |
 | Wi-Fi SoftAP + UDP | 已通，SSID 每板唯一 `FF-XXXXXX` |
 | 固件侧设备发现 `FF_DISCOVER` | 已实现，真机验证通过 |
-| 主机侧 Wi-Fi 扫描和列表 | 尚未实现，属于下一阶段 |
+| 上位机设备发现 + 设备列表页 | 已实现（`FfDiscovery` + `discoverBoards` + 设备页），控制目标改为来自发现结果，见 §6 设备发现 |
+| 主机侧 Wi-Fi 扫描和列表 | iOS 做不到（系统限制），桌面端属下一阶段，见 §10 |
 | Flutter Windows 调试界面 | 可运行 |
-| Flutter 协议和单测 | 25 项通过 |
+| Flutter 协议和单测 | 31 项通过 |
 | 通信失联停止 | 已实现，控制包超时 1000 ms；请求 `flags` 位 0 = 单次锁存可豁免，见 §7 |
 | 手动 HOME / `positionTrusted` | 已实现 |
 | 固件协议契约文档 | [PROTOCOL.md](PROTOCOL.md)，wire 层唯一权威来源 |
@@ -316,6 +317,31 @@ python firmware\tools\discover.py --bind 192.168.4.2   # 指定源地址
 表现就是"单播能通、广播无响应"。所以 `discover.py` 先发一次不绑定的包，再逐个
 绑定本机 IPv4 各发一次（等价于 SSDP 的做法），也支持直接发子网广播
 `--target 192.168.4.255`。板子本身不需要为此做任何改动。
+
+**上位机（Flutter）实现**：[lib/ff_protocol.dart](lib/ff_protocol.dart) 的
+`FfDiscovery`（回包解析）+ `discoverBoards()`（探测），UI 在
+[lib/device_page.dart](lib/device_page.dart)。行为与 `discover.py` 一致：同一个
+socket 重复发几次再等超时收包，按 `device_id` 去重。
+
+**iOS 上有三条硬限制，决定了这里的做法**：
+
+1. **不能扫描 Wi-Fi 列表**。iOS 没有通用扫描 API，只有 `NEHotspotHelper`，需
+   Apple 单独审批且明确禁用于配件场景。所以 App 列的是**能应答发现包的板子**，
+   不是周围的热点。
+2. **不能在 App 内连 Wi-Fi**（免费个人团队）。`NEHotspotConfigurationManager`
+   需要 Hotspot Configuration entitlement，**免费账号拿不到**（当前 profile 只有
+   `application-id`/`team-id`/`get-task-allow`/`keychain-access-groups`）。
+   所以热点要在 设置 → 无线局域网 手动切，App 里给指引。
+3. **不能用广播**（含子网广播 `192.168.4.255`）。缺 multicast entitlement，实测
+   报 `errno 13`（见 §8.1）。所以 `discoverBoards()` 默认**只单播** SoftAP 地址，
+   广播只在桌面端有意义。
+
+好消息是这三条不挡功能：板子是 SoftAP、地址固定，**单播就够**；而回包的**源地址
+就是设备 IP**，`udp_port` 也在回包里，所以 `FfDiscovery` 一次就拿到了建链需要的
+全部信息（`MotorLink.host` / `port` 不再写死 `192.168.4.1:4210`）。
+
+设备热点名和 `device_id` 是同一份数据（都取自 AP 接口 MAC），所以看到
+`FF-75A578` 就知道该连哪个热点。
 
 ## 7. 安全和位置可信度
 
@@ -692,24 +718,34 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
 
 ## 10. 当前未完成和下一步
 
-### 首要下一步：主机侧 Wi-Fi 扫描和设备列表
+### 主机侧设备发现和设备列表
 
 用户希望扫描附近 Wi-Fi 并显示可用跟焦器，连接时不依赖固定 IP。固件侧已完成
-（唯一 SSID + `FF_DISCOVER`，见 §6），剩下的都在主机侧：
+（唯一 SSID + `FF_DISCOVER`，见 §6）。**已完成**：
 
-1. 在 [lib/ff_protocol.dart](lib/ff_protocol.dart) 加入发现命令常量（`0x0B`/`0x84`）
-   和 32 字节回包解析。
-2. 扫描附近 Wi-Fi，筛出 `FF-` 前缀的 AP 作为候选设备，展示成"可用设备"列表。
-3. 连上候选 AP 后**先用** `FF_DISCOVER` 验证，确认对方是本项目固件并拿到
+1. ~~在 [lib/ff_protocol.dart](lib/ff_protocol.dart) 加入发现命令常量（`0x0B`/`0x84`）
+   和 32 字节回包解析。~~ 已加：`kFfDiscover`/`kFfDiscoverReply` + `FfDiscovery`。
+2. ~~连上候选 AP 后**先用** `FF_DISCOVER` 验证，确认对方是本项目固件并拿到
    `device_id`/`mac`/`fw`/`udp_port`，再建立 `MotorLink`；不要再假设
-   `192.168.4.1:4210`。
-4. 用回包里的 `mac` 和扫描到的 BSSID 交叉校验，确认列表项和控制连接指向同一台板子。
-5. Windows 用原生 WLAN API 扫描；不要把 `netsh` 当正式跨平台方案。
-6. 广播在开发机上不可靠（主机多条默认路由会让 `255.255.255.255` 走错网卡，见 §6），
-   所以 App 侧要能回退到子网广播或单播候选 IP。
-7. iOS 受系统限制，普通 App 不能自由读取附近 Wi-Fi 列表。正式 iOS 方案用
-   `NEHotspotConfiguration` 连接已知 SSID，再用 UDP 发现包验证。SSID 现在每板唯一，
-   多设备场景可以让用户先选 SSID 再连接。
+   `192.168.4.1:4210`。~~ 已完成：`discoverBoards()` 负责探测，
+   `MotorLink.useDevice()` 用回包的源地址和 `udp_port` 建链，`host` 改为可空、
+   不再有写死默认值。
+3. ~~实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。~~
+   已完成：[lib/device_page.dart](lib/device_page.dart)。
+4. ~~广播不可靠，App 侧要能回退到子网广播或单播候选 IP。~~ 已完成：
+   `discoverBoards()` 默认单播，`targets` 可传广播地址（桌面端）。
+
+**仍未做**：
+
+5. **扫 Wi-Fi 列表在 iOS 上做不到**（系统没有通用扫描 API，`NEHotspotHelper` 需
+   Apple 审批且禁用于配件场景）。设备页因此列出的是"能应答发现包的板子"，热点仍要
+   手动在系统里切。若以后要一步到位，需要**付费**开发者账号才能用
+   `NEHotspotConfiguration`（免费个人团队没有 Hotspot Configuration entitlement），
+   届时应做成"记住用过的 SSID + 点击直连"，并保留手动切换作为回退。
+6. **Windows 桌面端**：用原生 WLAN API 扫描并连接（不要把 `netsh` 当正式方案）。
+   目前只做了 UDP 发现；扫描相关代码是平台专有的，尚未着手。
+7. 多台板子同时在场时的选择体验：现在 `_ensureDevice()` 只在"恰好发现一台"时自动
+   选中，多台会打开设备页。真机只验证过单台。
 
 ### 固件
 
@@ -732,8 +768,10 @@ python test\repro_jog_truncation.py --host 192.168.4.1 --port 4210 --reps 3
   （`setPos`/`jog` 加一个 `latch` 形参，`_jog()` 传 `latch: true`），或在运动未完成期间每
   200–500 ms 重发当前目标。精确改法与实测数字见 [PROTOCOL.md](PROTOCOL.md) §7.2，
   改完用 `test/udp_motion_acceptance.py` 的 `single-shot JOG: streaming vs latched` 组核对。
-- 实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。
-- 把固定 `192.168.4.1` 替换为设备发现结果。
+- ~~实现 Wi-Fi/设备列表页，把候选设备、发现结果和连接状态都放在这一页。~~
+  已完成，见 §10「主机侧设备发现和设备列表」与 [lib/device_page.dart](lib/device_page.dart)。
+- ~~把固定 `192.168.4.1` 替换为设备发现结果。~~ 已完成：`MotorLink.host`
+  改为可空、由 `useDevice()` 从发现回包填充，端口用回包的 `udp_port`。
 - 完善 HOME 提示，明确它是软件校零而非机械回零。
 - ~~修未连电机时刷屏的未捕获 `SocketException`~~（见 §8.1）：已在 `MotorLink.open()` 的
   `sock.listen` 加 `onError` 兜底，并把 `onPressed: _connect` 丢掉的 Future 收好。

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'device_page.dart';
 import 'ff_protocol.dart';
 import 'lens_lut.dart';
 import 'lidar.dart';
@@ -57,6 +58,8 @@ class _FollowPageState extends State<FollowPage> {
   bool _moving = false;
   bool _uartOk = false;
   bool _open = false;
+  /// 选定的控制目标。由设备页/发现结果填充，不再是写死的 192.168.4.1。
+  FfDiscovery? _device;
   bool _previewExpanded = true;
   int _pos = 0;
   int _target = 0;
@@ -350,7 +353,47 @@ class _FollowPageState extends State<FollowPage> {
     return (lo + _slider * (hi - lo)).round();
   }
 
+  /// 选定控制目标：地址取回包源地址，UDP 端口取固件上报值。
+  void _selectDevice(FfDiscovery d) {
+    _device = d;
+    _link.useDevice(d);
+  }
+
+  Future<void> _openDevicePage() async {
+    final picked = await Navigator.push<FfDiscovery>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => DevicePage(selected: _device, linkOpen: _open),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _selectDevice(picked);
+      _msg = '已选 ${picked.deviceId}（${picked.host.address}:${picked.udpPort}）';
+    });
+  }
+
+  /// 连接前确保已选定设备。没选过就先扫描：只发现一台直接选，
+  /// 否则打开设备页让用户决定（0 台时那里有切换 Wi-Fi 的指引）。
+  Future<bool> _ensureDevice() async {
+    if (_device != null) return true;
+    final found = await discoverBoards();
+    if (!mounted) return false;
+    if (found.length == 1) {
+      setState(() => _selectDevice(found.first));
+      return true;
+    }
+    await _openDevicePage();
+    return _device != null;
+  }
+
   Future<void> _connect() async {
+    if (!await _ensureDevice()) {
+      if (mounted) {
+        setState(() => _msg = '还没选设备：先在设备页扫描并选用');
+      }
+      return;
+    }
     try {
       await _link.open();
       _applySpeed();
@@ -375,7 +418,7 @@ class _FollowPageState extends State<FollowPage> {
       }
       setState(() {
         _open = true;
-        _msg = '已连接 192.168.4.1:4210';
+        _msg = '已连接 ${_link.host?.address}:${_link.port}';
       });
     } catch (e) {
       setState(() {
@@ -414,13 +457,18 @@ class _FollowPageState extends State<FollowPage> {
       appBar: AppBar(
         title: const Text('跟焦器'),
         actions: [
+          IconButton(
+            tooltip: '设备',
+            onPressed: _openDevicePage,
+            icon: Icon(_device == null ? Icons.router_outlined : Icons.router),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: Center(
               child: Text(
                 _open
                     ? '${_enabled ? "EN" : "OFF"} ${_moving ? "RUN" : (_standbyOff ? "SLP" : "IDLE")} ${_uartOk ? "UART" : ""}'
-                    : '未连接',
+                    : (_device == null ? '未选设备' : '${_device!.deviceId} · 未连接'),
                 style: const TextStyle(fontSize: 12),
               ),
             ),
