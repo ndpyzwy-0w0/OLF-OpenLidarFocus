@@ -14,5 +14,9 @@ import UIKit
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "LidarPlugin")!
     LidarPlugin.register(with: registrar)
+
+    // 功能层：跟焦逻辑和镜头存档都由它持有，UI 只通过 `ff.core` 通道读写。
+    let core = engineBridge.pluginRegistry.registrar(forPlugin: "FollowFocusCorePlugin")!
+    FollowFocusCorePlugin.register(with: core)
   }
 }

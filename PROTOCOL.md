@@ -7,7 +7,7 @@
 - 协议版本：`protocol = 1`（`kFfProtocolVersion`）
 - 固件版本：`fw 1.1.0`（[device.h](firmware/include/device.h)，独立于 App 版本）
 - 历史 1.0.0 运动验收：`test/udp_motion_acceptance.py` 真机 9/9 通过。
-  1.1.0 主机模拟、编译/刷写及 Wi-Fi 非运动验收通过；实际镜头寻端仍待装镜后调参验收，见 HANDOFF.md §13。
+  1.1.0 主机模拟、编译/刷写及 Wi-Fi 非运动验收通过；实际镜头寻端仍待装镜后调参验收，见 HANDOFF.md §14。
 
 ---
 
@@ -298,40 +298,42 @@ motorCommunicationTick()（主循环每轮）：
 | 上位机「点一下就移动到某位置」（一次性的长行程） | **锁存**（`flags` 位 0 = 1），发一次即可，不必为了防截断而空转发包 |
 | 上位机自己就是唯一的控制者且保证不断线 | 两种都行；锁存更省电、更省带宽 |
 
-### 7.2 上位机必须改的地方（「点一次走圈，走到一半就停」的根因）
+### 7.2 上位机侧的状态（「点一次走圈，走到一半就停」的根因）
 
-`lib/` 目前两条发送路径都是**流式**（`FfPacket.flags` 默认 0）：[ff_protocol.dart](lib/ff_protocol.dart)
-的 `setPos()` / `jog()` 是纯单发，而 [main.dart](lib/main.dart) 的 `_jog()`（"走步"/"走圈"按钮）
-发完就不再发。于是任何超过 1 s 的行程都在 **1.0 s 处**被看门狗刹停 —— 截断位置只由
-"速度 × 1 s"决定，跟行程总长无关：
+上位机是 Swift 功能层（`ios/FollowFocusCore`）。两条发送路径的状态：
 
-| 速度设置（单发 `JOG 16000` = 5 圈） | 1.0 s 处被截断的位置（真机实测） |
+| 路径 | 状态 | 做法 |
+| --- | --- | --- |
+| `SET_POS`（自动跟焦 / 滑条 / 对齐后的目标） | ✅ 已保活 | 运动期间距上次控制包 > 400 ms 就重发**当前**目标（幂等） |
+| `JOG`（"走步"/"走圈"按钮） | ⏳ 仍是流式单发 | JOG 是**相对量**，重发等于多走一段，不能这样保活；长 JOG 仍会被 1 s 阈值截断 |
+
+`SET_POS` 的保活在 `FollowFocusSession.tick`，由
+`testLongMoveKeepsFeedingTheWatchdog` 验证（假固件把运动停在半路，断言上位机会继续重发）；
+把那段保活删掉该测试就会失败。
+
+`JOG` 的两个候选修法（**安全性相关，改之前要确认**）：
+
+1. 一次性手动 JOG 带 `FF_REQ_LATCH`（下面原来的建议）。代价：失联时这一小段会走完才停。
+2. 长 JOG 改写成绝对 `SET_POS`（当前位置 + delta）。代价：丢掉固件"从当前位置精确走
+   N 脉冲"的语义 —— `pos` 有 200 ms 的陈旧度。
+
+Swift 侧给单发命令加锁存位长这样：
+
+```swift
+link.setPos(steps, latch: true)   // 一次性长行程：发一次，不受 1 s 阈值影响
+link.jog(delta, latch: true)
+```
+
+实测的截断位置（`test/repro_jog_truncation.py` 真机输出，单发 `JOG 16000` = 5 圈）：
+
+| 速度设置 | 1.0 s 处被截断的位置（真机实测） |
 | --- | --- |
 | 3200 脉冲/秒（App 默认 1.2 圈/秒，加速度 96000） | `pos ≈ 3800–4000` 步 ≈ **1.2 圈**（24–25%） |
 | 9600 脉冲/秒（App 滑条 ≈3 圈/秒，加速度 96000） | `pos ≈ 9300–9700` 步 ≈ **2.9 圈**（58–61%） |
 | 8000 脉冲/秒（固件默认，加速度 20000） | `pos ≈ 6700–7000` 步 ≈ **2.1 圈**（42–44%） |
 | 3200 脉冲/秒 + 锁存 | `pos = 16000` 步 = **5.00 圈**，`result = completed` |
 
-上表是实测值（`test/repro_jog_truncation.py` 的真机输出），比"纯速度 × 1 s"的理论值略小一点，
-差在加速段 —— 起步到匀速也占了那 1 s 里的一部分。
-
-两个改法任选一个；"点一次就走"的按钮用锁存更合适（省电、省带宽）：
-
-```dart
-// ff_protocol.dart：让单发命令能带锁存位
-void setPos(int steps, {bool latch = false}) =>
-    _send(FfPacket(cmd: kFfSetPos, a: steps, flags: latch ? 0x01 : 0));
-void jog(int delta, {bool latch = false}) =>
-    _send(FfPacket(cmd: kFfJog, a: delta, flags: latch ? 0x01 : 0));
-
-// main.dart：走步/走圈是一次性长行程 → 用锁存
-_link.jog(delta, latch: true);
-```
-
-```dart
-// 或者：保持流式，在运动未完成期间每 200–500 ms 重发当前目标（幂等，见上）
-if (_moving) _link.setPos(_targetSteps);
-```
+上表比"纯速度 × 1 s"的理论值略小，差在加速段 —— 起步到匀速也占了那 1 s 里的一部分。
 
 自动跟焦**不要**用锁存：它必须靠保活，失联时要能自动停（见 §7.1）。改完之后可以用
 `test/udp_motion_acceptance.py` 里的 `single-shot JOG: streaming vs latched` 组核对两种模式
@@ -341,7 +343,6 @@ if (_moving) _link.setPos(_targetSteps);
 16000 步 + 200 ms `QUERY` + 1 s `TMC_QUERY` 轮询），四种速度/模式各走几趟，打印每趟的
 "最后运动中 / 首次静止"时刻和原始轨迹。**流式必然被截断，锁存必然跑满**，输出末行给出结论、
 退出码 0；设备停在 `pos = 0`、静止、`ENABLE(0)`。
-
 ### 7.3 真机验证过的证据
 
 - 流式 `SET_POS 19000` 后静默 1.25 s → 停在 `pos = 6202`，`result = stopped`（应到 19000）
