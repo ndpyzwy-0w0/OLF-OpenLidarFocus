@@ -11,6 +11,7 @@ static uint8_t buf[64];
 // Shared by STATUS and STATUS_V2 so both report the same command result: a move
 // that actually finished must not still look "accepted".
 static MotorCommandResult effectiveResult() {
+  if (motorCalibrationActive()) return motorCommandResult();
   MotorCommandResult result = motorCommandResult();
   if (result == MOTOR_RESULT_ACCEPTED && !motorMoving() &&
       motorPos() == motorTarget()) {
@@ -118,8 +119,37 @@ static void protocolSendTmc(const IPAddress &ip, uint16_t port) {
       d.version, d.cs_actual, d.sg, d.tstep, (unsigned long)d.drv_status, d.drv_flags);
 }
 
+static void sendCalibration(const IPAddress &ip, uint16_t port, uint8_t sequence,
+                            uint8_t error = CAL_OK) {
+  const auto s = motorCalibrationSnapshot();
+  FfCalibrationStatus p{};
+  p.magic = kFfMagic; p.cmd = FF_CAL_STATUS;
+  p.state = s.state; p.sequence = sequence;
+  p.error = error ? error : s.error;
+  p.run_id = s.runId; p.threshold = s.threshold; p.valid = s.valid;
+  p.pos = motorPos(); p.travel = s.travel;
+  p.safe_min = motorMin(); p.safe_max = motorMax();
+  p.sg = s.sg; p.microsteps = s.microsteps; p.elapsed_ms = s.elapsedMs;
+  udp->beginPacket(ip, port);
+  udp->write(reinterpret_cast<uint8_t *>(&p), sizeof(p));
+  udp->endPacket();
+}
+
 static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
   switch (in.cmd) {
+    case FF_CAL_START: {
+      const uint8_t error = motorCalibrationStart(in.pad, in.a, in.b);
+      sendCalibration(ip, port, in.pad, error);
+      return;
+    }
+    case FF_CAL_QUERY:
+      motorCalibrationKeepalive(in.a);
+      sendCalibration(ip, port, in.pad);
+      return;
+    case FF_CAL_CANCEL:
+      motorCalibrationCancel();
+      sendCalibration(ip, port, in.pad);
+      return;
     case FF_SET_POS:
       motorNoteControlPacket((in.flags & FF_REQ_LATCH) != 0);
       motorSetPos(in.a);

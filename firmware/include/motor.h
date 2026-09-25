@@ -83,3 +83,24 @@ enum MotorCommandResult : uint8_t {
 };
 
 MotorCommandResult motorCommandResult();
+
+enum CalibrationState : uint8_t {
+  CAL_IDLE, CAL_SEEK_NEGATIVE, CAL_BACKOFF_NEGATIVE, CAL_SEEK_POSITIVE,
+  CAL_BACKOFF_POSITIVE, CAL_COMPLETED, CAL_CANCELLED, CAL_FAILED,
+};
+enum CalibrationError : uint8_t {
+  CAL_OK, CAL_BAD_PARAMETER, CAL_BUSY, CAL_UART, CAL_DRIVER, CAL_DISTANCE,
+  CAL_TIMEOUT, CAL_LINK_TIMEOUT, CAL_SAMPLE_TIMEOUT, CAL_SHORT_TRAVEL, CAL_USER_CANCEL,
+};
+struct CalibrationSnapshot {
+  uint8_t state, error, runId, threshold;
+  bool valid;
+  int32_t travel;
+  uint16_t sg, microsteps;
+  uint32_t elapsedMs;
+};
+bool motorCalibrationActive();
+uint8_t motorCalibrationStart(uint8_t runId, int32_t threshold, int32_t maxTravel);
+void motorCalibrationKeepalive(int32_t runId);
+void motorCalibrationCancel();
+CalibrationSnapshot motorCalibrationSnapshot();

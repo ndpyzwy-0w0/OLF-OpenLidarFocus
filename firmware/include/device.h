@@ -2,10 +2,9 @@
 
 #include <stdint.h>
 
-// Reported in the discovery reply. Keep in step with the `version` field in
-// pubspec.yaml.
+// Reported in discovery; firmware releases are independent of App versions.
 static const uint8_t kFwMajor = 1;
-static const uint8_t kFwMinor = 0;
+static const uint8_t kFwMinor = 1;
 static const uint8_t kFwPatch = 0;
 
 // Identity of this board, derived from the AP interface MAC. Call after

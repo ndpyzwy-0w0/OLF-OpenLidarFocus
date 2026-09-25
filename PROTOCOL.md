@@ -5,9 +5,9 @@
 不一致时，以本文件为准去修代码；上位机不要按猜测实现。
 
 - 协议版本：`protocol = 1`（`kFfProtocolVersion`）
-- 固件版本：`fw 1.0.0`（[device.h](firmware/include/device.h) 的 `kFwMajor/Minor/Patch`，与
-  [pubspec.yaml](pubspec.yaml) 的 `version: 1.0.0+1` 保持一致）
-- 验收状态：`test/udp_motion_acceptance.py` 真机 9/9 通过（含"单次锁存"和"单发 JOG 流式/锁存对照"用例）
+- 固件版本：`fw 1.1.0`（[device.h](firmware/include/device.h)，独立于 App 版本）
+- 历史 1.0.0 运动验收：`test/udp_motion_acceptance.py` 真机 9/9 通过。
+  1.1.0 主机模拟、编译/刷写及 Wi-Fi 非运动验收通过；实际镜头寻端仍待装镜后调参验收，见 HANDOFF.md §13。
 
 ---
 
@@ -110,6 +110,9 @@ AP 允许多台客户端，但固件不区分命令来源：**最后到达的命
 | `0x09` | `TMC_SET` | 参数键 | 值 | TMC_DUMP | 键见 §6.3；不回 STATUS，设置项持久化 |
 | `0x0A` | `HOME` | — | — | STATUS **+ STATUS_V2** | 只做软件置零，电机不动；`moving` 时 `rejected` |
 | `0x0B` | `DISCOVER` | — | — | DISCOVER_REPLY | **不回状态包**，见 §4 |
+| `0x0C` | `CAL_START` | SGTHRS | 最大寻端步数 | CAL_STATUS | sequence 为 run_id，见 §14 |
+| `0x0D` | `CAL_QUERY` | run_id 或 0 | — | CAL_STATUS | 匹配 run_id 才为标定保活 |
+| `0x0E` | `CAL_CANCEL` | — | — | CAL_STATUS | 幂等取消 |
 | 其它 | 未知命令 | — | — | STATUS | 只回一个 STATUS（不是错误码，靠 result 位判断不了） |
 
 回包总是单播回**请求的来源 IP:端口**。
@@ -122,6 +125,7 @@ AP 允许多台客户端，但固件不区分命令来源：**最后到达的命
 | `QUERY` / `HOME` | 2 × 包：STATUS + STATUS_V2 |
 | `TMC_QUERY` / `TMC_SET` | 1 × TMC_DUMP（没有 STATUS） |
 | `DISCOVER` | 1 × DISCOVER_REPLY（没有 STATUS） |
+| `CAL_START` / `CAL_QUERY` / `CAL_CANCEL` | 1 × CAL_STATUS，32 字节（没有 STATUS） |
 | 未知命令（magic/长度合法） | 1 × STATUS |
 
 上位机不要"收到第一个包就以为回复结束"，也不要用"等第二个包"的方式读单包命令的回复（会白等一个
@@ -505,3 +509,54 @@ if (_moving) _link.setPos(_targetSteps);
 | 命令鉴权 / 会话 | 无。同一 AP 内任何客户端都能控制，靠 §1.1 的约定约束 |
 | 固件签名/加密 | 无。AP 密码 `change-me` 是唯一的门槛 |
 | 多板同场 | 发现回复里有 `mac`/`device_id` 可区分，但控制目标需上位机自己选择 IP |
+
+## 14. StallGuard4 自动镜头行程（固件 1.1.0）
+
+沿用 12 字节请求，新增命令均只回一个 32 字节 CAL_STATUS (0x85)。
+
+- 0x0C CAL_START：a=SGTHRS (1..255；0=60)，b=每个寻端阶段最大脉冲数
+  (0=两电机圈，最大十圈，最小 128*细分)。sequence 必须为 1..255，作为 run_id。
+  最近一次已接受的 run_id 重发只查询，不重新启动（包括已结束）；新一轮使用不同 id。
+- 0x0D CAL_QUERY：a=run_id 时刷新该次标定的 1000 ms 保活；a=0 只读。
+  App 每 200 ms 查询，普通 QUERY 不为标定保活。
+- 0x0E CAL_CANCEL：取消当前标定，重复取消无副作用；STOP / ENABLE(0) 同样取消。
+
+CAL_STATUS 小端布局（偏移/类型）：0 u8 magic=0x46；1 u8 cmd=0x85；
+2 u8 state；3 u8 回显本次请求 sequence；4 u8 error；5 u8 run_id；
+6 u8 实际 SGTHRS；7 u8 valid；8 i32 pos；12 i32 travel；
+16 i32 safe_min；20 i32 safe_max；24 u16 最新 SG_RESULT；26 u16 microsteps；
+28 u32 elapsed_ms。static_assert=32。travel 是两端之间估计的脉冲数，
+只有 state=5 且 valid=1 才能采用 safe_min/max。其他状态限位字段不得保存为镜头数据。
+
+state：0 idle、1 seek_negative、2 backoff_negative、3 seek_positive、
+4 backoff_positive、5 completed、6 cancelled、7 failed。
+error：0 无、1 参数无效、2 未使能/正在运动/忙、3 UART或芯片型号/配置异常、
+4 驱动故障、5 超过最大距离、6 阶段超时、7 保活超时、8 采样服务超时、
+9 行程过短或无有效空载读数、10 用户取消。
+拒绝 START 的 error 只在该回复生效，已有 run 的状态/结果不被覆盖。
+
+要求先 ENABLE(1) 且停止，TMC2209 版本 0x21、细分 8..256 的二次幂。
+扫描暂时使用 StealthChop，速度=100*细分 steps/s，加速度=1000*细分 steps/s²，
+保留现有运行电流，结束恢复原驱动模式及速度，不写 NVS。
+依次负向寻端、正向退让 16 整步、正向寻端、负向退让 16 整步。
+每次寻端有启动屏蔽和连续三次低 SG 数值判定；正向寻端和最终回退必须观察到正常负载值。
+成功后安全范围重基准为 [0, travel-32*细分]，当前位置=safe_max，可信位置置 1。
+标定开始即废弃旧坐标可信度；失败/取消会停止并禁用电机，软限位收紧至当前位置，
+必须重新使能并重试标定，或人工 HOME + SET_LIMITS，才能重新建立行程。
+每段上限 60 秒，主循环采样超过 200 ms 未服务时 ISR 自动停止脉冲。
+标定期间拒绝普通运动、HOME、SET_LIMITS、SET_SPEED、TMC_SET 和 ENABLE(1)，
+它们沿用原有回包类型；TMC_SET 拒绝时仍只回 TMC_DUMP，不改参数。
+TMC_QUERY 使用缓存以免诊断轮询阻塞采样。旧命令回包尺寸和数量不变。
+
+结果不持久化，App 按镜头保存行程、方向、细分、电流、SGTHRS 等条件。
+HOME、SET_LIMITS、改变细分或禁用使 valid=0；设备复位后必须重新定位。
+valid=1 时暂不自动待机释放，保持当前坐标供选择方向/跟焦；ENABLE(0) 始终可释放。
+这是 §9 普通运动待机规则的例外，不修改持久化的 TMC_STANDBY 偏好。
+没有硬限位、无限旋转或电子对焦环不适用。卡涩也可能被识别为端点，结果需人工确认。
+方向在 App 解释：正向使对焦距离增加时 near=0、far=safe_max；反向时交换。
+机械行程和近远方向无法替代物距到步数的非线性 LUT。
+
+依据：[ADI TMC2209 Rev 1.09](https://www.analog.com/media/en/technical-documentation/data-sheets/tmc2209_datasheet_rev1.09.pdf)
+§11：StallGuard4 在 StealthChop 下测量，SG_RESULT < 2*SGTHRS 表示堵转候选，
+数值每整步更新。当前接线不含 DIAG，固件经带 CRC 校验的 UART 轮询，
+使用 TCOOLTHRS=0xFFFFF、TPWMTHRS=0、禁用 CoolStep；阈值必须按镜头、转速和电流实测。

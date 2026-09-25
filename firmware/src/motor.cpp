@@ -65,6 +65,18 @@ static uint32_t tmcDrv = 0;
 static uint16_t tmcSg = 0;
 static uint16_t tmcTstep = 0;
 
+static CalibrationSnapshot calibration{};
+static uint32_t calStartedMs, calPhaseMs, calKeepaliveMs, calSampleMs;
+static int32_t calMaxTravel, calMargin, calSpeedSaved, calAccelSaved;
+static uint8_t calStealthSaved, calLowCount;
+static bool calSawFree;
+static void calibrationTick();
+static void calibrationFinish(uint8_t state, uint8_t error);
+
+bool motorCalibrationActive() {
+  return calibration.state >= CAL_SEEK_NEGATIVE && calibration.state <= CAL_BACKOFF_POSITIVE;
+}
+
 // 脉冲/圈 = 400 × 细分。
 static int32_t stepsPerRevFw() {
   int32_t ms = tmcMsSet ? (int32_t)tmcMsSet : 1;
@@ -152,14 +164,19 @@ static int tmcReadRaw(uint8_t slave, uint8_t reg, uint8_t *raw, int rawMax, uint
   uint32_t t0 = millis();
   int n = 0;
   while ((millis() - t0) < waitMs && n < rawMax) {
-    if (Serial2.available()) raw[n++] = (uint8_t)Serial2.read();
+    if (Serial2.available()) {
+      raw[n++] = (uint8_t)Serial2.read();
+      if (n >= 8 && raw[n-8] == 0x05 && raw[n-7] == 0xFF &&
+          raw[n-6] == reg && tmcCrc(raw+n-8, 7) == raw[n-1]) break;
+    }
   }
   return n;
 }
 
 static bool tmcFindReply(const uint8_t *raw, int n, uint8_t reg, uint32_t *val) {
   for (int i = 0; i + 7 < n; i++) {
-    if (raw[i] == 0x05 && raw[i + 1] == 0xFF && raw[i + 2] == reg) {
+    if (raw[i] == 0x05 && raw[i + 1] == 0xFF && raw[i + 2] == reg &&
+        tmcCrc(raw + i, 7) == raw[i + 7]) {
       if (val) {
         *val = ((uint32_t)raw[i + 3] << 24) | ((uint32_t)raw[i + 4] << 16) |
                ((uint32_t)raw[i + 5] << 8) | raw[i + 6];
@@ -331,6 +348,10 @@ static volatile int32_t stepTarget = 0;
 static volatile uint32_t stepRate = 0;
 static volatile int8_t stepSign = 1;
 static volatile uint32_t phase = 0;
+// ISR counts timer ticks rather than relying on a potentially blocked loop.
+static volatile uint32_t calServiceTicks = 0;
+static volatile bool calGuardArmed = false;
+static volatile bool calGuardExpired = false;
 static int8_t outputSign = -1;
 static int32_t speedLimit = (int32_t)kDefaultHz;
 static int32_t accelLimit = (int32_t)kDefaultAccel;
@@ -339,6 +360,11 @@ static uint32_t lastPlanUs = 0;
 
 static void IRAM_ATTR onStepTimer() {
   portENTER_CRITICAL_ISR(&stepMux);
+  if (calGuardArmed && (calServiceTicks == 0 || --calServiceTicks == 0)) {
+    stepRate = 0;
+    stepTarget = currentPos;
+    calGuardExpired = true;
+  }
   const uint32_t rate = stepRate;
   const int8_t sign = stepSign;
   const int32_t pos = currentPos;
@@ -389,6 +415,10 @@ static void setStepRate(int32_t rate) {
     outputSign = requestedSign;
   }
   portENTER_CRITICAL(&stepMux);
+  if (calGuardArmed && calGuardExpired) {
+    portEXIT_CRITICAL(&stepMux);
+    return;
+  }
   stepSign = requestedSign;
   stepRate = absolute;
   portEXIT_CRITICAL(&stepMux);
@@ -417,7 +447,7 @@ static void planMotion() {
   if (!enabled || standbyOff || p == goal) {
     plannedRate = 0;
     setStepRate(0);
-    if (enabled && p == goal && commandResult == MOTOR_RESULT_ACCEPTED)
+    if (!motorCalibrationActive() && enabled && p == goal && commandResult == MOTOR_RESULT_ACCEPTED)
       commandResult = MOTOR_RESULT_COMPLETED;
     return;
   }
@@ -454,6 +484,7 @@ static void wake() {
 }
 
 void motorNoteControlPacket(bool latched) {
+  if (motorCalibrationActive()) return;
   lastControlPacketMs = millis();
   communicationWatchdogArmed = !latched;
 }
@@ -506,6 +537,7 @@ void motorUartBegin() {
 }
 
 void motorSetPos(int32_t steps) {
+  if (motorCalibrationActive()) { commandResult = MOTOR_RESULT_REJECTED; return; }
   if (!enabled || !stepTimer) { commandResult = MOTOR_RESULT_REJECTED; return; }
   wake();
   const int32_t clamped = clampLim(steps);
@@ -518,6 +550,7 @@ void motorSetPos(int32_t steps) {
 }
 
 void motorJog(int32_t delta) {
+  if (motorCalibrationActive()) { commandResult = MOTOR_RESULT_REJECTED; return; }
   if (!enabled || !stepTimer) { commandResult = MOTOR_RESULT_REJECTED; return; }
   wake();
   const int32_t requested = readPosition() + delta;
@@ -531,7 +564,7 @@ void motorJog(int32_t delta) {
 }
 
 bool motorSetHome() {
-  if (!stepTimer || motorMoving()) {
+  if (motorCalibrationActive() || !stepTimer || motorMoving()) {
     commandResult = MOTOR_RESULT_REJECTED;
     return false;
   }
@@ -544,15 +577,17 @@ bool motorSetHome() {
   target = 0;
   limitHit = false;
   positionTrusted = true;
+  calibration.valid = false;
   commandResult = MOTOR_RESULT_COMPLETED;
   communicationWatchdogArmed = false;
   return true;
 }
 
 void motorStop() {
+  if (motorCalibrationActive()) { motorCalibrationCancel(); return; }
   if (!stepTimer) return;
-  const int32_t p = readPosition();
   portENTER_CRITICAL(&stepMux);
+  const int32_t p = currentPos;
   stepTarget = p;
   stepRate = 0;
   phase = 0;
@@ -565,10 +600,12 @@ void motorStop() {
 }
 
 void motorSetEnabled(bool on) {
+  if (on && motorCalibrationActive()) { commandResult = MOTOR_RESULT_REJECTED; return; }
   enabled = on;
   if (!on) {
     motorStop();
     positionTrusted = false;
+    calibration.valid = false;
     communicationWatchdogArmed = false;
   }
   standbyOff = false;
@@ -577,12 +614,18 @@ void motorSetEnabled(bool on) {
 }
 
 void motorStandbyTick() {
+  calibrationTick();
   planMotion();
   motorCommunicationTick();
+  if (motorCalibrationActive()) { lastMoveMs = millis(); return; }
+  // Preserve the newly referenced lens position while the App chooses direction.
+  // Explicit ENABLE(0) still releases immediately and invalidates calibration.
+  if (calibration.valid) { lastMoveMs = millis(); return; }
   if (!enabled || !tmcStandby || standbyOff) return;
   if (motorMoving()) { lastMoveMs = millis(); return; }
   if (millis() - lastMoveMs < kStandbyDelayMs) return;
   standbyOff = true;
+  if (calibration.valid) { calibration.valid = false; positionTrusted = false; }
   applyEnable();
   Serial.println("standby: driver released");
 }
@@ -590,6 +633,8 @@ void motorStandbyTick() {
 bool motorStandbyOff() { return standbyOff; }
 
 void motorSetLimits(int32_t minSteps, int32_t maxSteps) {
+  if (motorCalibrationActive()) { commandResult = MOTOR_RESULT_REJECTED; return; }
+  calibration.valid = false;
   if (minSteps > maxSteps) { int32_t t = minSteps; minSteps = maxSteps; maxSteps = t; }
   minLim = minSteps; maxLim = maxSteps; limExplicit = true;
   const int32_t clamped = clampLim(target);
@@ -601,6 +646,7 @@ void motorSetLimits(int32_t minSteps, int32_t maxSteps) {
 }
 
 void motorSetSpeed(int32_t hz, int32_t accel) {
+  if (motorCalibrationActive()) { commandResult = MOTOR_RESULT_REJECTED; return; }
   if (hz < 100) hz = 100;
   if (hz > 40000) hz = 40000;
   if (accel < 100) accel = 100;
@@ -629,7 +675,7 @@ void motorTmcSnap(TmcSnap *o) {
   memset(o, 0, sizeof(*o));
   o->uartOk = uartOk;
   if (!uartOk) return;
-  tmcRefresh();
+  if (!motorCalibrationActive()) tmcRefresh();
   o->stealth = tmcStealthSet != 0;
   o->rmsMa = tmcRmsMa;
   o->microsteps = tmcMs ? tmcMs : tmcMsSet;
@@ -653,6 +699,7 @@ void motorTmcSnap(TmcSnap *o) {
 }
 
 void motorTmcSet(int32_t key, int32_t val) {
+  if (motorCalibrationActive()) { commandResult = MOTOR_RESULT_REJECTED; return; }
   // 待机断电不是芯片寄存器，UART 没通也要能用。
   if (key == TMC_STANDBY) {
     tmcStandby = val ? 1 : 0;
@@ -671,6 +718,8 @@ void motorTmcSet(int32_t key, int32_t val) {
       tmcRmsMa = (uint16_t)val;
       break;
     case TMC_MICROSTEPS:
+      if (val < 1 || val > 256 || (val & (val - 1)) != 0 || motorMoving()) return;
+      if (tmcMsSet != val) { calibration.valid = false; positionTrusted = false; }
       tmcMsSet = (uint16_t)val;
       recomputeLimits();  // 行程上限按圈算，换细分要跟着变
       break;
@@ -698,4 +747,206 @@ void motorTmcSet(int32_t key, int32_t val) {
   }
   tmcApply();
   tmcSave();
+}
+
+// Calibration owns coordinates while active. All moves still use the existing
+// planner and timer ISR; there is no second pulse generator or blocking seek.
+static void calibrationRebase(int32_t pos) {
+  portENTER_CRITICAL(&stepMux);
+  currentPos = stepTarget = pos;
+  stepRate = phase = 0;
+  portEXIT_CRITICAL(&stepMux);
+  target = pos;
+  plannedRate = 0;
+  lastPlanUs = micros();
+}
+
+static void calibrationMove(uint8_t state, int32_t goal) {
+  calibration.state = state;
+  calPhaseMs = millis();
+  calLowCount = 0;
+  calSawFree = false;
+  target = goal;
+  commandResult = MOTOR_RESULT_ACCEPTED;
+  portENTER_CRITICAL(&stepMux);
+  stepTarget = goal;
+  portEXIT_CRITICAL(&stepMux);
+  Serial.printf("cal run=%u phase=%u goal=%ld\n", calibration.runId, state, (long)goal);
+}
+
+static void calibrationFinish(uint8_t state, uint8_t error) {
+  // Mark terminal before motorStop(), which otherwise calls cancel recursively.
+  calibration.state = state;
+  calibration.error = error;
+  calibration.elapsedMs = millis() - calStartedMs;
+  portENTER_CRITICAL(&stepMux);
+  calGuardArmed = false;
+  portEXIT_CRITICAL(&stepMux);
+  motorStop();
+  communicationWatchdogArmed = false;
+  calibration.valid = state == CAL_COMPLETED;
+  positionTrusted = calibration.valid;
+  if (!calibration.valid) {
+    minLim = maxLim = motorPos();
+    limExplicit = true;
+    enabled = false;
+    standbyOff = false;
+    applyEnable(); // release a stalled/faulted lens, even if UART is unavailable
+  }
+  tmcStealthSet = calStealthSaved;
+  speedLimit = calSpeedSaved;
+  accelLimit = calAccelSaved;
+  tmcApply();
+  tmcWriteReg(0x14, 0); // TCOOLTHRS: restore normal operation
+  tmcWriteReg(0x40, 0); // SGTHRS
+  commandResult = state == CAL_COMPLETED ? MOTOR_RESULT_COMPLETED : MOTOR_RESULT_STOPPED;
+  Serial.printf("cal run=%u state=%u error=%u travel=%ld range=%ld..%ld\n",
+                calibration.runId, state, error, (long)calibration.travel,
+                (long)minLim, (long)maxLim);
+}
+
+uint8_t motorCalibrationStart(uint8_t runId, int32_t threshold, int32_t maxTravel) {
+  if (!runId) return CAL_BAD_PARAMETER;
+  // UDP retransmission of the last accepted run is never a new motion command.
+  if (calibration.runId == runId) return CAL_OK;
+  if (motorCalibrationActive() || motorMoving() || !enabled || !stepTimer) return CAL_BUSY;
+  if (!uartOk || tmcVer != 0x21) return CAL_UART;
+  if (tmcMsSet < 8 || tmcMsSet > 256 || (tmcMsSet & (tmcMsSet - 1))) return CAL_BAD_PARAMETER;
+  if (threshold == 0) threshold = 60;
+  if (maxTravel == 0) maxTravel = stepsPerRevFw() * 2;
+  if (threshold < 1 || threshold > 255 || maxTravel < 128 * tmcMsSet ||
+      maxTravel > stepsPerRevFw() * 10) return CAL_BAD_PARAMETER;
+  const uint32_t drv = tmcReadReg(0x6F);
+  if (drv == 0xFFFFFFFF) return CAL_UART;
+  if (drv & 0x3F) return CAL_DRIVER; // thermal prewarning/shutdown and both short types
+  const uint32_t beforeWrites = tmcReadReg(0x02);
+  if (beforeWrites == 0xFFFFFFFF) return CAL_UART;
+
+  calSpeedSaved = speedLimit;
+  calAccelSaved = accelLimit;
+  calStealthSaved = tmcStealthSet;
+  calibration = {};
+  calibration.runId = runId;
+  calibration.threshold = (uint8_t)threshold;
+  calibration.microsteps = tmcMsSet;
+  calMaxTravel = maxTravel;
+  calMargin = 16 * tmcMsSet;
+  calStartedMs = calKeepaliveMs = millis();
+  positionTrusted = false;
+  communicationWatchdogArmed = false;
+  limitHit = false;
+  wake();
+  calibrationRebase(0);
+  tmcStealthSet = 1;
+  tmcApply();
+  tmcWriteReg(0x13, 0); // TPWMTHRS: no switch to SpreadCycle
+  tmcWriteReg(0x14, 0xFFFFF);
+  tmcWriteReg(0x40, threshold);
+  tmcWriteReg(0x42, 0); // COOLCONF: constant current, no CoolStep
+  // SGTHRS/TCOOLTHRS/TPWMTHRS/COOLCONF are write-only. IFCNT confirms all
+  // nine writes (five in tmcApply plus four here), including counter wrap.
+  const uint32_t gc = tmcReadReg(0x00);
+  const uint32_t afterWrites = tmcReadReg(0x02);
+  if (gc == 0xFFFFFFFF || (gc & 4) || afterWrites == 0xFFFFFFFF ||
+      (uint8_t)(afterWrites - beforeWrites) != 9) {
+    calibrationFinish(CAL_FAILED, CAL_UART);
+    return CAL_OK;
+  }
+  speedLimit = 100 * tmcMsSet;
+  accelLimit = 1000 * tmcMsSet;
+  calSampleMs = millis();
+  portENTER_CRITICAL(&stepMux);
+  calGuardExpired = false;
+  calServiceTicks = kTimerHz / 5; // 200 ms fail-closed pulse deadline
+  calGuardArmed = true;
+  portEXIT_CRITICAL(&stepMux);
+  calibrationMove(CAL_SEEK_NEGATIVE, -calMaxTravel);
+  return CAL_OK;
+}
+
+void motorCalibrationKeepalive(int32_t runId) {
+  if (motorCalibrationActive() && runId == calibration.runId) calKeepaliveMs = millis();
+}
+
+void motorCalibrationCancel() {
+  if (motorCalibrationActive()) calibrationFinish(CAL_CANCELLED, CAL_USER_CANCEL);
+}
+
+CalibrationSnapshot motorCalibrationSnapshot() {
+  auto s = calibration;
+  if (motorCalibrationActive()) s.elapsedMs = millis() - calStartedMs;
+  return s;
+}
+
+static void calibrationTick() {
+  if (!motorCalibrationActive()) return;
+  const uint32_t now = millis();
+  if (calGuardExpired) { calibrationFinish(CAL_FAILED, CAL_SAMPLE_TIMEOUT); return; }
+  if (now - calKeepaliveMs >= 1000) { calibrationFinish(CAL_FAILED, CAL_LINK_TIMEOUT); return; }
+  if (now - calPhaseMs >= 60000) { calibrationFinish(CAL_FAILED, CAL_TIMEOUT); return; }
+  if (now - calSampleMs < 20) return;
+  calSampleMs = now;
+  const uint32_t drv = tmcReadReg(0x6F);
+  const uint32_t sg = tmcReadReg(0x41);
+  const uint32_t ts = tmcReadReg(0x12);
+  if (drv == 0xFFFFFFFF || sg == 0xFFFFFFFF || ts == 0xFFFFFFFF) {
+    calibrationFinish(CAL_FAILED, CAL_UART); return;
+  }
+  if (drv & 0x3F) { calibrationFinish(CAL_FAILED, CAL_DRIVER); return; }
+  portENTER_CRITICAL(&stepMux);
+  const bool expired = calGuardExpired;
+  if (!expired) calServiceTicks = kTimerHz / 5;
+  portEXIT_CRITICAL(&stepMux);
+  if (expired) { calibrationFinish(CAL_FAILED, CAL_SAMPLE_TIMEOUT); return; }
+  calibration.sg = tmcSg = sg & 0x3FF;
+  tmcDrv = drv;
+  tmcTstep = ts > 0xFFFF ? 0xFFFF : ts;
+  const int32_t pos = motorPos();
+  const bool arrived = pos == target;
+  if (calibration.state == CAL_BACKOFF_NEGATIVE) {
+    if (arrived) {
+      calibrationRebase(pos);
+      calibrationMove(CAL_SEEK_POSITIVE, calMaxTravel);
+    }
+    return;
+  }
+  if (calibration.state == CAL_BACKOFF_POSITIVE) {
+    if (fabsf(plannedRate) >= speedLimit * 0.5f &&
+        (drv & (1u << 30)) && calibration.sg >= 2 * calibration.threshold)
+      calSawFree = true;
+    if (arrived) {
+      if (!calSawFree) { calibrationFinish(CAL_FAILED, CAL_SHORT_TRAVEL); return; }
+      const int32_t safeSpan = calibration.travel - 2 * calMargin;
+      calibrationRebase(safeSpan);
+      minLim = 0; maxLim = safeSpan; limExplicit = true;
+      calibrationFinish(CAL_COMPLETED, CAL_OK);
+    }
+    return;
+  }
+  if (arrived) { calibrationFinish(CAL_FAILED, CAL_DISTANCE); return; }
+  // SG updates per full step. Ignore ramp/startup and samples outside the
+  // StealthChop velocity window; debounce only independent full-step readings.
+  if (now - calPhaseMs < 200 || fabsf(plannedRate) < speedLimit * 0.9f ||
+      !(drv & (1u << 30)) || ts == 0 || ts >= 0xFFFFF) {
+    calLowCount = 0; return;
+  }
+  if (calibration.sg >= 2 * calibration.threshold) {
+    calSawFree = true;
+    calLowCount = 0;
+    return;
+  }
+  if (++calLowCount < 3) return;
+  // A positive scan must actually have cleared the first stop. Otherwise a
+  // jam or an over-sensitive threshold could fabricate a small valid range.
+  if (calibration.state == CAL_SEEK_POSITIVE && (!calSawFree || pos <= 4 * calMargin)) {
+    calibrationFinish(CAL_FAILED, CAL_SHORT_TRAVEL); return;
+  }
+  calibrationRebase(pos); // stop pulses before reversing or rebasing
+  if (calibration.state == CAL_SEEK_NEGATIVE) {
+    calibrationRebase(0);
+    calibrationMove(CAL_BACKOFF_NEGATIVE, calMargin);
+  } else {
+    calibration.travel = pos;
+    calibrationMove(CAL_BACKOFF_POSITIVE, pos - calMargin);
+  }
 }

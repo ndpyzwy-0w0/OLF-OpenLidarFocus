@@ -16,10 +16,14 @@ enum FfCmd : uint8_t {
   FF_TMC_SET = 0x09,
   FF_HOME = 0x0A,  // Establish the current stopped position as the trusted origin.
   FF_DISCOVER = 0x0B,  // Identify the board; answered with FF_DISCOVER_REPLY.
+  FF_CAL_START = 0x0C,
+  FF_CAL_QUERY = 0x0D,
+  FF_CAL_CANCEL = 0x0E,
   FF_STATUS = 0x81,
   FF_TMC_DUMP = 0x82,
   FF_STATUS_V2 = 0x83,
   FF_DISCOVER_REPLY = 0x84,
+  FF_CAL_STATUS = 0x85,
 };
 
 enum FfTmcKey : int32_t {
@@ -102,6 +106,15 @@ struct FfStatusV2 {
 } __attribute__((packed));
 
 static_assert(sizeof(FfStatusV2) == 16, "FfStatusV2 must be 16 bytes");
+
+struct FfCalibrationStatus {
+  uint8_t magic, cmd, state, sequence;
+  uint8_t error, run_id, threshold, valid;
+  int32_t pos, travel, safe_min, safe_max;
+  uint16_t sg, microsteps;
+  uint32_t elapsed_ms;
+} __attribute__((packed));
+static_assert(sizeof(FfCalibrationStatus) == 32, "FfCalibrationStatus must be 32 bytes");
 
 // Discovery reply. A host that has just associated with an AP uses this to tell
 // whether it is talking to this firmware and which board it is. `mac` matches
