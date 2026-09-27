@@ -3,7 +3,9 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'app_dialog.dart';
 import 'device_page.dart';
 import 'ff_core.dart';
 import 'ff_core_demo.dart';
@@ -29,16 +31,75 @@ class FollowApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '跟焦器',
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF4CAF50),
-          brightness: Brightness.dark,
-        ),
-      ),
+      themeMode: ThemeMode.system,
+      theme: _appTheme(Brightness.light),
+      darkTheme: _appTheme(Brightness.dark),
       home: LensPage(core: core),
     );
   }
+}
+
+ThemeData _appTheme(Brightness brightness) {
+  final dark = brightness == Brightness.dark;
+  const accent = Color(0xFF0F8B8D);
+  final background = dark ? const Color(0xFF121417) : const Color(0xFFF7F8FA);
+  final surface = dark ? const Color(0xFF1C1C1E) : Colors.white;
+  final border = dark ? const Color(0xFF363A3E) : const Color(0xFFD8DEE6);
+  final text = dark ? const Color(0xFFF3F4F6) : const Color(0xFF111827);
+  final scheme = ColorScheme.fromSeed(
+    seedColor: accent,
+    brightness: brightness,
+    surface: surface,
+  ).copyWith(primary: accent, onPrimary: Colors.white, outline: border);
+  final base = ThemeData(
+    useMaterial3: true,
+    brightness: brightness,
+    colorScheme: scheme,
+    scaffoldBackgroundColor: background,
+  );
+  return base.copyWith(
+    appBarTheme: AppBarTheme(
+      backgroundColor: background,
+      foregroundColor: text,
+      elevation: 0,
+      titleTextStyle: TextStyle(
+        color: text,
+        fontSize: 20,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
+    cardTheme: CardThemeData(
+      color: surface,
+      elevation: 0,
+      margin: const EdgeInsets.only(bottom: 12),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: border),
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(44, 44),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(44, 44),
+        side: BorderSide(color: border),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(minimumSize: const Size(44, 44)),
+    ),
+    iconButtonTheme: IconButtonThemeData(
+      style: IconButton.styleFrom(minimumSize: const Size(44, 44)),
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+    ),
+  );
 }
 
 /// 跟焦页：**纯 UI**。
@@ -101,7 +162,11 @@ class _FollowPageState extends State<FollowPage> {
     setState(() {
       _u = s.u;
       _v = s.v;
-      _face = (s.faceU != null && s.faceV != null && s.faceW != null && s.faceH != null)
+      _face =
+          (s.faceU != null &&
+              s.faceV != null &&
+              s.faceW != null &&
+              s.faceH != null)
           ? Rect.fromLTWH(s.faceU!, s.faceV!, s.faceW!, s.faceH!)
           : null;
     });
@@ -132,22 +197,16 @@ class _FollowPageState extends State<FollowPage> {
   Future<void> _confirmRecalibrate() async {
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('清空行程标定？'),
+      builder: (ctx) => AppActionDialog(
+        title: '清空行程标定？',
         content: Text(
           '${_s.lensName} 的行程 ${_s.strokeSteps} 步会被清空，'
           '之后要重新量一次行程才能跟焦。',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('清空重标'),
-          ),
-        ],
+        confirmLabel: '清空重标',
+        destructive: true,
+        onCancel: () => Navigator.pop(ctx, false),
+        onConfirm: () => Navigator.pop(ctx, true),
       ),
     );
     if (ok == true) await widget.core.recalibrateStroke();
@@ -162,244 +221,252 @@ class _FollowPageState extends State<FollowPage> {
       appBar: AppBar(
         title: const Text('跟焦器'),
         actions: [
-          IconButton(
-            tooltip: '设备',
+          TextButton.icon(
             onPressed: _openDevicePage,
-            icon: Icon(_s.deviceId == null ? Icons.router_outlined : Icons.router),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: Center(
-              child: Text(
-                _s.connected
-                    ? '${_s.enabled ? "EN" : "OFF"} '
-                          '${_s.moving ? "RUN" : (_s.standby ? "SLP" : "IDLE")} '
-                          '${_s.uartOk ? "UART" : ""}'
-                    : (_s.deviceId == null ? '未选设备' : '${_s.deviceId} · 未连接'),
-                style: const TextStyle(fontSize: 12),
-              ),
+            icon: const Icon(LucideIcons.router, size: 18),
+            label: Text(
+              _s.connected
+                  ? (_s.moving ? '运行中' : (_s.standby ? '待机' : '已连接'))
+                  : '未连接',
             ),
           ),
+          const SizedBox(width: 8),
         ],
       ),
-      body: Column(
-        children: [
-          if (_previewExpanded)
-            Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  _preview(),
-                  Positioned(left: 12, top: 8, child: _previewToggle(distText)),
-                ],
-              ),
-            )
-          else
-            _previewToggle(distText, compact: true),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 340),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '电机 ${_s.pos} → ${_s.target}    ${_s.msg}',
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '镜头 ${_s.lensName}',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      Text(
-                        switch (_s.phase) {
-                          SetupPhase.stroke => '① 标定行程',
-                          SetupPhase.align => '② 单侧对齐',
-                          SetupPhase.follow => '③ 跟焦',
-                        },
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ],
-                  ),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      FilledButton(
-                        onPressed: () => widget.core.connect(),
-                        child: Text(_s.connected ? '重连' : '连接电机'),
-                      ),
-                      FilterChip(
-                        label: const Text('使能'),
-                        selected: _s.enabled,
-                        onSelected: (v) => widget.core.enable(v),
-                      ),
-                      FilterChip(
-                        // 自动跟焦要先对齐、还要有两点距离标定，否则没有可信的目标。
-                        // 能不能开由核心决定（setAuto 会自己拒绝），这里只管显示。
-                        label: Text(
-                          _s.phase != SetupPhase.follow
-                              ? '自动(先对齐)'
-                              : (_s.lutReady ? '自动跟焦' : '自动(需2点标定)'),
-                        ),
-                        selected: _s.auto && _s.phase == SetupPhase.follow,
-                        onSelected:
-                            _s.lutReady && _s.phase == SetupPhase.follow
-                            ? (v) => widget.core.setAuto(v)
-                            : null,
-                      ),
-                      FilterChip(
-                        label: const Text('人脸'),
-                        selected: _s.faces,
-                        onSelected: _lidarOk
-                            ? (v) => widget.core.setTrackFaces(v)
-                            : null,
-                      ),
-                      OutlinedButton(
-                        onPressed: _s.connected
-                            ? () => widget.core.stopPressed()
-                            : null,
-                        child: const Text('停'),
-                      ),
-                      OutlinedButton(
-                        onPressed: _s.connected && !_s.moving
-                            ? () => widget.core.homePressed()
-                            : null,
-                        child: Text(_s.positionTrusted ? '已校零' : '设当前位置为原点'),
-                      ),
-                    ],
-                  ),
-                  _setupPanel(),
-                  if (_s.phase == SetupPhase.follow) ...[
-                    Text(_s.auto ? '手动滑条（自动开时无效）' : '手动焦点'),
-                    Slider(
-                      value: _sliderDrag ?? _s.slider,
-                      onChanged: _s.auto
-                          ? null
-                          : (v) {
-                              setState(() => _sliderDrag = v);
-                              widget.core.setSlider(v);
-                            },
-                      onChangeEnd: _s.auto
-                          ? null
-                          : (v) {
-                              widget.core.setSlider(v);
-                              setState(() => _sliderDrag = null);
-                            },
+      bottomNavigationBar: SafeArea(
+        minimum: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        child: SizedBox(
+          height: 52,
+          child: OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+              side: BorderSide(color: Theme.of(context).colorScheme.error),
+            ),
+            onPressed: _s.connected ? () => widget.core.stopPressed() : null,
+            icon: const Icon(LucideIcons.circleStop),
+            label: const Text('停止电机'),
+          ),
+        ),
+      ),
+      body: LayoutBuilder(
+        builder: (context, constraints) => Column(
+          children: [
+            if (_previewExpanded)
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _preview(),
+                    Positioned(
+                      left: 12,
+                      top: 8,
+                      child: _previewToggle(distText),
                     ),
-                    _jogControls(),
-                    Text(
-                      '每个脉冲约 ${(360 / _s.stepsPerRev).toStringAsFixed(4)}°；'
-                      '8 脉冲 = ${(360 * 8 / _s.stepsPerRev).toStringAsFixed(3)}°',
-                      style: const TextStyle(fontSize: 11),
-                    ),
-                    // 直接说明“为什么 80 步比 800 步慢”：峰值速度由距离决定。
-                    _peakHint(),
-                    Text(
-                      '速度 ${(_speedDrag ?? _s.speedRevS).toStringAsFixed(2)} 圈/秒'
-                      '（${((_speedDrag ?? _s.speedRevS) * 60).round()} 转/分 · '
-                      '${((_speedDrag ?? _s.speedRevS) * _s.stepsPerRev).round()} 脉冲/秒）',
-                    ),
-                    Slider(
-                      min: 0.05,
-                      max: 3.0,
-                      value: (_speedDrag ?? _s.speedRevS).clamp(0.05, 3.0),
-                      onChanged: (v) => setState(() => _speedDrag = v),
-                      onChangeEnd: (v) {
-                        setState(() => _speedDrag = null);
-                        widget.core.setSpeed(
-                          revsPerSec: v,
-                          accelRevsPerSec2: _accelDrag ?? _s.accelRevS2,
-                        );
-                      },
-                    ),
-                    if ((_speedDrag ?? _s.speedRevS) > _s.maxRevsPerSec)
-                      Text(
-                        '⚠ 1/${_s.microsteps} 细分下最高只有 '
-                        '${_s.maxRevsPerSec.toStringAsFixed(2)} 圈/秒'
-                        '（固件上限脉冲/秒）。'
-                        '要更快就用更低细分：1/16 配「微步插值」内部同样是 1/256，'
-                        '但脉冲只有 1/16。',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFFFFAB40),
-                        ),
-                      ),
-                    Text(
-                      '加速度 ${(_accelDrag ?? _s.accelRevS2).toStringAsFixed(0)} 圈/秒²',
-                    ),
-                    Slider(
-                      min: 2,
-                      max: 100,
-                      value: (_accelDrag ?? _s.accelRevS2).clamp(2, 100),
-                      onChanged: (v) => setState(() => _accelDrag = v),
-                      onChangeEnd: (v) {
-                        setState(() => _accelDrag = null);
-                        widget.core.setSpeed(
-                          revsPerSec: _speedDrag ?? _s.speedRevS,
-                          accelRevsPerSec2: v,
-                        );
-                      },
-                    ),
-                    const Text(
-                      '速度和加速度按“圈/秒”给，换细分不会改变物理速度。'
-                      '1600 脉冲会先加速、达到巡航后再减速，'
-                      '中途降速是正常减速段；短行程会更早进入减速。',
-                      style: TextStyle(fontSize: 11),
-                    ),
-                    const Text(
-                      '手动 JOG 会先清除正在执行的旧目标，再从当前位置精确执行本次脉冲，'
-                      '用于验证 +8 与 +80 的实际差异；自动跟焦仍使用 SET_POS 平滑追踪。',
-                      style: TextStyle(fontSize: 11),
-                    ),
-                    _directionRow(),
-                    Row(
-                      children: [
-                        const Text(
-                          '距离标定',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        const Spacer(),
-                        FilledButton.tonal(
-                          onPressed: _s.distanceM == null
-                              ? null
-                              : () => widget.core.addLutPoint(),
-                          child: const Text('记录当前'),
-                        ),
-                      ],
-                    ),
-                    const Text(
-                      'Jog 到实焦后点记录。至少两点；按 1/距离 插值。'
-                      '标定与当前细分绑定，换细分会自动换算。',
-                    ),
-                    for (var i = 0; i < _s.lutPoints.length; i++)
-                      ListTile(
-                        dense: true,
-                        title: Text(
-                          '${_s.lutPoints[i].meters.toStringAsFixed(2)} m  →  '
-                          '${_s.lutPoints[i].steps} 步'
-                          '（${(_s.lutPoints[i].steps / _s.stepsPerRev).toStringAsFixed(2)} 圈）',
-                        ),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete),
-                          onPressed: () => widget.core.removeLutPoint(i),
-                        ),
-                      ),
-                    if (_s.lutPoints.isEmpty) const Text('还没有标定点。'),
-                    _recalibrateTile(),
                   ],
-                  const SizedBox(height: 8),
-                  _diagnosticPanel(),
-                  _tmcPanel(),
-                ],
+                ),
+              )
+            else
+              _previewToggle(distText, compact: true),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: !_previewExpanded
+                    ? math.max(0, constraints.maxHeight - 48)
+                    : _s.phase == SetupPhase.follow
+                    ? math.min(360, constraints.maxHeight * 0.46)
+                    : math.min(480, constraints.maxHeight * 0.62),
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _statusCard(),
+                    _setupPanel(),
+                    if (_s.phase == SetupPhase.follow) ...[
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: [
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(minHeight: 44),
+                            child: FilterChip(
+                              label: Text(_s.lutReady ? '自动跟焦' : '自动(需2点标定)'),
+                              selected: _s.auto,
+                              onSelected: _s.lutReady
+                                  ? (v) => widget.core.setAuto(v)
+                                  : null,
+                            ),
+                          ),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(minHeight: 44),
+                            child: FilterChip(
+                              label: const Text('人脸'),
+                              selected: _s.faces,
+                              onSelected: _lidarOk
+                                  ? (v) => widget.core.setTrackFaces(v)
+                                  : null,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Text(_s.auto ? '手动滑条（自动开时无效）' : '手动焦点'),
+                      Slider(
+                        value: _sliderDrag ?? _s.slider,
+                        onChanged: _s.auto
+                            ? null
+                            : (v) {
+                                setState(() => _sliderDrag = v);
+                                widget.core.setSlider(v);
+                              },
+                        onChangeEnd: _s.auto
+                            ? null
+                            : (v) {
+                                widget.core.setSlider(v);
+                                setState(() => _sliderDrag = null);
+                              },
+                      ),
+                      Card(
+                        child: ExpansionTile(
+                          title: const Text('微调与运动参数'),
+                          childrenPadding: const EdgeInsets.fromLTRB(
+                            12,
+                            0,
+                            12,
+                            12,
+                          ),
+                          children: [
+                            _jogControls(),
+                            Text(
+                              '每个脉冲约 ${(360 / _s.stepsPerRev).toStringAsFixed(4)}°；'
+                              '8 脉冲 = ${(360 * 8 / _s.stepsPerRev).toStringAsFixed(3)}°',
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                            // 直接说明“为什么 80 步比 800 步慢”：峰值速度由距离决定。
+                            _peakHint(),
+                            Text(
+                              '速度 ${(_speedDrag ?? _s.speedRevS).toStringAsFixed(2)} 圈/秒'
+                              '（${((_speedDrag ?? _s.speedRevS) * 60).round()} 转/分 · '
+                              '${((_speedDrag ?? _s.speedRevS) * _s.stepsPerRev).round()} 脉冲/秒）',
+                            ),
+                            Slider(
+                              min: 0.05,
+                              max: 3.0,
+                              value: (_speedDrag ?? _s.speedRevS).clamp(
+                                0.05,
+                                3.0,
+                              ),
+                              onChanged: (v) => setState(() => _speedDrag = v),
+                              onChangeEnd: (v) {
+                                setState(() => _speedDrag = null);
+                                widget.core.setSpeed(
+                                  revsPerSec: v,
+                                  accelRevsPerSec2: _accelDrag ?? _s.accelRevS2,
+                                );
+                              },
+                            ),
+                            if ((_speedDrag ?? _s.speedRevS) > _s.maxRevsPerSec)
+                              Text(
+                                '⚠ 1/${_s.microsteps} 细分下最高只有 '
+                                '${_s.maxRevsPerSec.toStringAsFixed(2)} 圈/秒'
+                                '（固件上限脉冲/秒）。'
+                                '要更快就用更低细分：1/16 配「微步插值」内部同样是 1/256，'
+                                '但脉冲只有 1/16。',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Color(0xFFFFAB40),
+                                ),
+                              ),
+                            Text(
+                              '加速度 ${(_accelDrag ?? _s.accelRevS2).toStringAsFixed(0)} 圈/秒²',
+                            ),
+                            Slider(
+                              min: 2,
+                              max: 100,
+                              value: (_accelDrag ?? _s.accelRevS2).clamp(
+                                2,
+                                100,
+                              ),
+                              onChanged: (v) => setState(() => _accelDrag = v),
+                              onChangeEnd: (v) {
+                                setState(() => _accelDrag = null);
+                                widget.core.setSpeed(
+                                  revsPerSec: _speedDrag ?? _s.speedRevS,
+                                  accelRevsPerSec2: v,
+                                );
+                              },
+                            ),
+                            const Text(
+                              '速度和加速度按“圈/秒”给，换细分不会改变物理速度。'
+                              '1600 脉冲会先加速、达到巡航后再减速，'
+                              '中途降速是正常减速段；短行程会更早进入减速。',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                            const Text(
+                              '手动 JOG 会先清除正在执行的旧目标，再从当前位置精确执行本次脉冲，'
+                              '用于验证 +8 与 +80 的实际差异；自动跟焦仍使用 SET_POS 平滑追踪。',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Card(
+                        child: ExpansionTile(
+                          title: const Text('距离标定与方向'),
+                          childrenPadding: const EdgeInsets.fromLTRB(
+                            12,
+                            0,
+                            12,
+                            12,
+                          ),
+                          children: [
+                            _directionRow(),
+                            Row(
+                              children: [
+                                const Text(
+                                  '距离标定',
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                                const Spacer(),
+                                FilledButton.tonal(
+                                  onPressed: _s.distanceM == null
+                                      ? null
+                                      : () => widget.core.addLutPoint(),
+                                  child: const Text('记录当前'),
+                                ),
+                              ],
+                            ),
+                            const Text(
+                              'Jog 到实焦后点记录。至少两点；按 1/距离 插值。'
+                              '标定与当前细分绑定，换细分会自动换算。',
+                            ),
+                            for (var i = 0; i < _s.lutPoints.length; i++)
+                              ListTile(
+                                dense: true,
+                                title: Text(
+                                  '${_s.lutPoints[i].meters.toStringAsFixed(2)} m  →  '
+                                  '${_s.lutPoints[i].steps} 步'
+                                  '（${(_s.lutPoints[i].steps / _s.stepsPerRev).toStringAsFixed(2)} 圈）',
+                                ),
+                                trailing: IconButton(
+                                  icon: const Icon(LucideIcons.trash2),
+                                  onPressed: () =>
+                                      widget.core.removeLutPoint(i),
+                                ),
+                              ),
+                            if (_s.lutPoints.isEmpty) const Text('还没有标定点。'),
+                            _recalibrateTile(),
+                          ],
+                        ),
+                      ),
+                    ],
+                    Card(child: _diagnosticPanel()),
+                    Card(child: _tmcPanel()),
+                  ],
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -410,7 +477,9 @@ class _FollowPageState extends State<FollowPage> {
       MaterialPageRoute(
         builder: (_) => DevicePage(
           core: widget.core,
-          selected: _s.devices.where((d) => d.deviceId == _s.deviceId).firstOrNull,
+          selected: _s.devices
+              .where((d) => d.deviceId == _s.deviceId)
+              .firstOrNull,
           linkOpen: _s.connected,
         ),
       ),
@@ -420,22 +489,113 @@ class _FollowPageState extends State<FollowPage> {
     await widget.core.connect();
   }
 
+  Widget _statusCard() {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _s.lensName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                Text(
+                  switch (_s.phase) {
+                    SetupPhase.stroke => '① 标定行程',
+                    SetupPhase.align => '② 单侧对齐',
+                    SetupPhase.follow => '③ 跟焦',
+                  },
+                  style: TextStyle(
+                    color: scheme.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '电机 ${_s.pos} → ${_s.target}${_s.msg.isEmpty ? "" : " · ${_s.msg}"}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                if (!_s.connected)
+                  FilledButton(
+                    onPressed: () => widget.core.connect(),
+                    child: const Text('连接电机'),
+                  )
+                else
+                  TextButton(
+                    onPressed: () => widget.core.connect(),
+                    child: const Text('重连'),
+                  ),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 44),
+                  child: FilterChip(
+                    label: const Text('使能'),
+                    selected: _s.enabled,
+                    onSelected: (v) => widget.core.enable(v),
+                  ),
+                ),
+                if (_s.phase == SetupPhase.follow)
+                  OutlinedButton(
+                    onPressed: _s.connected && !_s.moving
+                        ? () => widget.core.homePressed()
+                        : null,
+                    child: Text(_s.positionTrusted ? '已校零' : '设当前位置为原点'),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// 自由微调：走步/走圈/脉冲。标定和对齐阶段靠它把跟焦器转到想要的位置。
+  Widget _jogPresets() {
+    return SegmentedButton<int>(
+      segments: [
+        for (final d in [-800, -80, -8, 8, 80, 800])
+          ButtonSegment(value: d, label: Text(d > 0 ? '+$d' : '$d')),
+      ],
+      selected: const {},
+      emptySelectionAllowed: true,
+      showSelectedIcon: false,
+      onSelectionChanged: (selected) {
+        if (selected.isNotEmpty) widget.core.jog(selected.first);
+      },
+      style: ButtonStyle(
+        minimumSize: const WidgetStatePropertyAll(Size(0, 40)),
+        padding: const WidgetStatePropertyAll(
+          EdgeInsets.symmetric(horizontal: 8),
+        ),
+      ),
+    );
+  }
+
   Widget _jogControls() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          children: [
-            for (final d in [-800, -80, -8, 8, 80, 800])
-              OutlinedButton(
-                onPressed: () => widget.core.jog(d),
-                child: Text(d > 0 ? '+$d' : '$d'),
-              ),
-          ],
-        ),
+        _jogPresets(),
         const Divider(height: 16),
         // 脉冲 / 圈。这里的“步”是 STEP 脉冲（微步），不是整步。
         Row(
@@ -520,15 +680,10 @@ class _FollowPageState extends State<FollowPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Divider(height: 16),
         const Text('① 标定行程', style: TextStyle(fontWeight: FontWeight.bold)),
-        const Text(
-          '新镜头要先量出行程：把跟焦器转到对焦环的一端，记录 A；'
-          '再转到另一端，记录 B。两点之间的距离就是行程，'
-          '之后跟焦的转动范围永远不会超过它。',
-        ),
+        const Text('微调到对焦环一端记录 A，再到另一端记录 B。'),
         Text('当前位置 ${_s.pos} 步（${_s.posRevs.toStringAsFixed(2)} 圈）'),
-        _jogControls(),
+        _jogPresets(),
         Wrap(
           spacing: 8,
           runSpacing: 8,
@@ -548,9 +703,16 @@ class _FollowPageState extends State<FollowPage> {
           ],
         ),
         if (!_s.connected)
-          const Text('先在上面“连接电机”，再用这里自由微调到行程两端。')
+          const Text('先连接电机，再微调到行程两端。')
         else if (a != null)
-          const Text('把跟焦器转到行程另一端，再点右边按钮。'),
+          const Text('微调到另一端后完成标定。'),
+        Card(
+          child: ExpansionTile(
+            title: const Text('精细微调'),
+            childrenPadding: const EdgeInsets.all(12),
+            children: [_jogControls()],
+          ),
+        ),
       ],
     );
   }
@@ -561,13 +723,9 @@ class _FollowPageState extends State<FollowPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Divider(height: 16),
         Row(
           children: [
-            const Text(
-              '② 单侧对齐',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
+            const Text('② 单侧对齐', style: TextStyle(fontWeight: FontWeight.bold)),
             const Spacer(),
             Text(
               '行程 ${_s.strokeRevs.toStringAsFixed(2)} 圈',
@@ -575,14 +733,10 @@ class _FollowPageState extends State<FollowPage> {
             ),
           ],
         ),
-        const Text(
-          '跟焦器没有绝对位置，每次进入都要对齐一次：手动微调到画面最近对焦，'
-          '把当前位置认成“焦距最近点”，再选哪边是焦距变远的方向。'
-          '这样只会在这段行程内转，不会拧反、也不会超行程。',
-        ),
+        const Text('微调到画面最近对焦，确认最近点，再选择焦距变远的方向。'),
         if (near == null) ...[
           Text('当前 ${_s.pos} 步（${_s.posRevs.toStringAsFixed(2)} 圈）'),
-          _jogControls(),
+          _jogPresets(),
           FilledButton(
             onPressed: _s.connected ? () => widget.core.confirmNear() : null,
             child: const Text('确认为焦距最近点'),
@@ -605,7 +759,9 @@ class _FollowPageState extends State<FollowPage> {
             spacing: 8,
             children: [
               FilledButton(
-                onPressed: _s.connected ? () => widget.core.startFollow() : null,
+                onPressed: _s.connected
+                    ? () => widget.core.startFollow()
+                    : null,
                 child: const Text('开始跟焦'),
               ),
               OutlinedButton(
@@ -615,6 +771,13 @@ class _FollowPageState extends State<FollowPage> {
             ],
           ),
         ],
+        Card(
+          child: ExpansionTile(
+            title: const Text('精细微调'),
+            childrenPadding: const EdgeInsets.all(12),
+            children: [_jogControls()],
+          ),
+        ),
         _recalibrateTile(),
       ],
     );
@@ -629,10 +792,7 @@ class _FollowPageState extends State<FollowPage> {
         const Divider(height: 16),
         Row(
           children: [
-            const Text(
-              '焦距变远方向',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
+            const Text('焦距变远方向', style: TextStyle(fontWeight: FontWeight.bold)),
             const Spacer(),
             TextButton(
               onPressed: () => widget.core.unalign(),
@@ -662,7 +822,7 @@ class _FollowPageState extends State<FollowPage> {
     return ListTile(
       contentPadding: EdgeInsets.zero,
       dense: true,
-      leading: const Icon(Icons.straighten, size: 20),
+      leading: const Icon(LucideIcons.ruler, size: 20),
       title: const Text('重新标定行程（长按）'),
       subtitle: const Text('标定过就不怕误触：长按 1 秒，再确认才会清空行程重来。'),
       onLongPress: _confirmRecalibrate,
@@ -673,7 +833,8 @@ class _FollowPageState extends State<FollowPage> {
     final statusAge = _s.statusAgeMs;
     final statusLive = _s.connected && statusAge != null && statusAge < 1000;
     final sequenceOk =
-        _s.lastSentSequence != 0 && _s.lastSentSequence == _s.lastEchoedSequence;
+        _s.lastSentSequence != 0 &&
+        _s.lastSentSequence == _s.lastEchoedSequence;
     final echoAge = _s.echoAgeMs;
     final echoLive = echoAge != null && echoAge < 3000;
     final rows = <({String name, bool ok, String detail})>[
@@ -727,7 +888,9 @@ class _FollowPageState extends State<FollowPage> {
       (
         name: '目标追踪',
         ok: _s.connected && _s.target == _s.pos && !_s.moving,
-        detail: _s.moving ? '正在追踪 ${_s.target}' : '位置 ${_s.pos} / 目标 ${_s.target}',
+        detail: _s.moving
+            ? '正在追踪 ${_s.target}'
+            : '位置 ${_s.pos} / 目标 ${_s.target}',
       ),
       (
         name: '最近命令结果',
@@ -736,12 +899,11 @@ class _FollowPageState extends State<FollowPage> {
       ),
     ];
     return ExpansionTile(
-      tilePadding: EdgeInsets.zero,
+      tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+      childrenPadding: const EdgeInsets.symmetric(horizontal: 12),
       title: const Text('功能可用性诊断'),
       subtitle: Text(
-        statusLive
-            ? '链路正常'
-            : (_s.connected ? '状态超时，请检查 Wi-Fi' : '等待设备连接'),
+        statusLive ? '链路正常' : (_s.connected ? '状态超时，请检查 Wi-Fi' : '等待设备连接'),
       ),
       children: [
         for (final row in rows)
@@ -749,7 +911,7 @@ class _FollowPageState extends State<FollowPage> {
             dense: true,
             contentPadding: EdgeInsets.zero,
             leading: Icon(
-              row.ok ? Icons.check_circle : Icons.error_outline,
+              row.ok ? LucideIcons.circleCheck : LucideIcons.circleAlert,
               color: row.ok ? Colors.greenAccent : Colors.orangeAccent,
               size: 20,
             ),
@@ -768,7 +930,8 @@ class _FollowPageState extends State<FollowPage> {
     final t = _s.tmc;
     final live = _s.connected && t?.uartOk == true;
     return ExpansionTile(
-      tilePadding: EdgeInsets.zero,
+      tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+      childrenPadding: const EdgeInsets.symmetric(horizontal: 12),
       title: Text(
         t == null
             ? 'TMC2209 驱动参数'
@@ -953,7 +1116,7 @@ class _FollowPageState extends State<FollowPage> {
             ),
           ),
           const Spacer(),
-          if (live) const Icon(Icons.edit, size: 14),
+          if (live) const Icon(LucideIcons.pencil, size: 14),
         ],
       ),
       subtitle: Text(hint, style: const TextStyle(fontSize: 11)),
@@ -970,23 +1133,17 @@ class _FollowPageState extends State<FollowPage> {
     final c = TextEditingController(text: cur?.toString() ?? '');
     return showDialog<int>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('设置 $title'),
+      builder: (ctx) => AppActionDialog(
+        title: '设置 $title',
         content: TextField(
           controller: c,
           keyboardType: TextInputType.number,
           autofocus: true,
+          decoration: appDialogInputDecoration(ctx, hintText: '请输入整数'),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, int.tryParse(c.text.trim())),
-            child: const Text('写入'),
-          ),
-        ],
+        confirmLabel: '写入',
+        onCancel: () => Navigator.pop(ctx),
+        onConfirm: () => Navigator.pop(ctx, int.tryParse(c.text.trim())),
       ),
     );
   }
@@ -1041,24 +1198,33 @@ class _FollowPageState extends State<FollowPage> {
 
   Widget _previewToggle(String distance, {bool compact = false}) {
     return Material(
-      color: compact ? Theme.of(context).colorScheme.surface : Colors.black54,
+      color: compact ? const Color(0xFF1C1C1E) : const Color(0xDD171C21),
+      borderRadius: BorderRadius.circular(8),
       child: InkWell(
         onTap: () => setState(() => _previewExpanded = !_previewExpanded),
+        borderRadius: BorderRadius.circular(8),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
                 _previewExpanded
-                    ? Icons.keyboard_arrow_up
-                    : Icons.keyboard_arrow_down,
+                    ? LucideIcons.chevronUp
+                    : LucideIcons.chevronDown,
                 size: 18,
+                color: Colors.white,
               ),
               const SizedBox(width: 4),
-              Text('摄像头 ${_previewExpanded ? "展开" : "已折叠"}'),
+              Text(
+                '摄像头 ${_previewExpanded ? "展开" : "已折叠"}',
+                style: const TextStyle(color: Colors.white),
+              ),
               const SizedBox(width: 10),
-              Text('距离 $distance', style: const TextStyle(fontSize: 12)),
+              Text(
+                '距离 $distance',
+                style: const TextStyle(fontSize: 12, color: Colors.white),
+              ),
             ],
           ),
         ),

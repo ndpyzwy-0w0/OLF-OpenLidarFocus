@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'ff_core.dart';
 
@@ -61,12 +62,12 @@ class _DevicePageState extends State<DevicePage> {
           IconButton(
             tooltip: '重新扫描',
             onPressed: _scanning ? null : _scan,
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(LucideIcons.refreshCw),
           ),
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(16),
         children: [
           _status(),
           if (_scanning)
@@ -74,11 +75,20 @@ class _DevicePageState extends State<DevicePage> {
               padding: EdgeInsets.symmetric(vertical: 12),
               child: LinearProgressIndicator(),
             ),
-          const Divider(height: 24),
+          const SizedBox(height: 12),
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text(
+              '发现的设备',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+          ),
           if (_devices.isEmpty && !_scanning)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24),
-              child: Center(child: Text('没有板子应答，先连上它的热点再扫描。')),
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(20),
+                child: Center(child: Text('没有板子应答。连接热点后点右上角重新扫描。')),
+              ),
             ),
           for (final d in _devices) _row(d),
         ],
@@ -91,40 +101,46 @@ class _DevicePageState extends State<DevicePage> {
     final active = widget.selected;
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
                 Icon(
-                  widget.linkOpen ? Icons.link : Icons.link_off,
-                  size: 18,
-                  color: widget.linkOpen ? Colors.greenAccent : null,
+                  widget.linkOpen ? LucideIcons.link : LucideIcons.link2Off,
+                  size: 20,
+                  color: widget.linkOpen
+                      ? Theme.of(context).colorScheme.primary
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
-                const SizedBox(width: 6),
-                Text(
-                  widget.linkOpen
-                      ? '控制链路已打开${active == null ? "" : "：${active.deviceId}"}'
-                      : '控制链路未打开',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    widget.linkOpen
+                        ? '控制链路已打开${active == null ? "" : "：${active.deviceId}"}'
+                        : '控制链路未打开',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            const Text(
-              'iOS 不允许 App 扫描或自行连接 Wi-Fi，热点要你手动切：\n'
-              '设置 → 无线局域网 → 选 FF-XXXXXX（密码 change-me），'
-              '再回来点右上角重新扫描。',
-            ),
-            if (active != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                '板子的热点名和这里的 device_id 是同一份数据（都取自 AP 接口 MAC），'
-                '所以 ${active.deviceId} 对应的热点就叫 ${active.deviceId}。',
-                style: const TextStyle(fontSize: 12),
+            const SizedBox(height: 12),
+            const Text('连接设备', style: TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 6),
+            const Text('1. 在 iOS 设置 → 无线局域网中连接 FF-XXXXXX 热点。'),
+            const Text('2. 输入密码 change-me，返回应用。'),
+            const Text('3. 点右上角重新扫描，然后选择设备。'),
+            if (active != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '当前设备热点：${active.deviceId}',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
               ),
-            ],
           ],
         ),
       ),
@@ -133,17 +149,41 @@ class _DevicePageState extends State<DevicePage> {
 
   Widget _row(FfDevice d) {
     final active = widget.selected?.deviceId == d.deviceId;
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(
-        active ? Icons.check_circle : Icons.router_outlined,
-        color: active ? Colors.greenAccent : null,
+    return Card(
+      child: Column(
+        children: [
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 4,
+            ),
+            leading: Icon(
+              active ? LucideIcons.circleCheck : LucideIcons.router,
+              color: active ? Theme.of(context).colorScheme.primary : null,
+            ),
+            title: Text(
+              d.deviceId.isEmpty ? '(回包无 device_id)' : d.deviceId,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            subtitle: Text(active ? '当前使用中' : '点击选用'),
+            trailing: const Icon(LucideIcons.chevronRight),
+            onTap: () => Navigator.pop(context, d),
+          ),
+          ExpansionTile(
+            title: const Text('技术信息', style: TextStyle(fontSize: 13)),
+            tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+            childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '固件 ${d.firmware} · MAC ${d.mac}\nUDP ${d.host}:${d.udpPort}',
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
-      title: Text(d.deviceId.isEmpty ? '(回包无 device_id)' : d.deviceId),
-      subtitle: Text('fw ${d.firmware} · ${d.mac}\nUDP ${d.host}:${d.udpPort}'),
-      isThreeLine: true,
-      trailing: active ? const Text('使用中') : const Text('选用'),
-      onTap: () => Navigator.pop(context, d),
     );
   }
 }

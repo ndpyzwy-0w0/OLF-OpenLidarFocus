@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iphone_follow_focus/app_dialog.dart';
+import 'package:iphone_follow_focus/device_page.dart';
 import 'package:iphone_follow_focus/ff_core.dart';
 import 'package:iphone_follow_focus/lens_page.dart';
 import 'package:iphone_follow_focus/main.dart';
@@ -159,6 +161,19 @@ Future<void> tapVisible(WidgetTester tester, Finder f) async {
 }
 
 void main() {
+  testWidgets('app follows system brightness with distinct themes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(FollowApp(core: FakeCore()));
+    await tester.pumpAndSettle();
+    final app = tester.widget<MaterialApp>(find.byType(MaterialApp));
+    expect(app.themeMode, ThemeMode.system);
+    expect(
+      app.theme!.scaffoldBackgroundColor,
+      isNot(app.darkTheme!.scaffoldBackgroundColor),
+    );
+  });
+
   testWidgets('app starts on the lens picker', (tester) async {
     final core = FakeCore();
     await tester.pumpWidget(FollowApp(core: core));
@@ -193,44 +208,46 @@ void main() {
     expect(find.textContaining('焦距变远：- 方向'), findsOneWidget);
   });
 
-  testWidgets('picking a lens selects it in the core then opens the follow page', (
-    tester,
-  ) async {
-    final core = FakeCore(
-      FfState(
-        lenses: [lens()],
-        // 选中后核心会把这个镜头设成当前并进入 follow
-        lensId: 'L1',
-        phase: SetupPhase.follow,
-      ),
-    );
-    await pumpLensPage(tester, core);
+  testWidgets(
+    'picking a lens selects it in the core then opens the follow page',
+    (tester) async {
+      final core = FakeCore(
+        FfState(
+          lenses: [lens()],
+          // 选中后核心会把这个镜头设成当前并进入 follow
+          lensId: 'L1',
+          phase: SetupPhase.follow,
+        ),
+      );
+      await pumpLensPage(tester, core);
 
-    await tester.tap(find.text('50mm F1.4'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('50mm F1.4'));
+      await tester.pumpAndSettle();
 
-    expect(core.called('selectLens'), isTrue, reason: '选镜头要下发到核心');
-    expect(core.args['selectLens']?['id'], 'L1');
-    expect(find.text('跟焦器'), findsOneWidget);
-  });
+      expect(core.called('selectLens'), isTrue, reason: '选镜头要下发到核心');
+      expect(core.args['selectLens']?['id'], 'L1');
+      expect(find.text('跟焦器'), findsOneWidget);
+    },
+  );
 
-  testWidgets('new lens is created in the core, then opens into stroke calibration', (
-    tester,
-  ) async {
-    final core = FakeCore(const FfState());
-    await pumpLensPage(tester, core);
+  testWidgets(
+    'new lens is created in the core, then opens into stroke calibration',
+    (tester) async {
+      final core = FakeCore(const FfState());
+      await pumpLensPage(tester, core);
 
-    await tester.tap(find.text('新建镜头'));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField).first, '35mm');
-    await tester.enterText(find.byType(TextField).last, 'F2');
-    await tester.tap(find.text('创建'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('新建镜头'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, '35mm');
+      await tester.enterText(find.byType(TextField).last, 'F2');
+      await tester.tap(find.text('创建'));
+      await tester.pumpAndSettle();
 
-    expect(core.called('createLens'), isTrue);
-    expect(core.args['createLens']?['name'], '35mm');
-    expect(core.args['createLens']?['params'], 'F2');
-  });
+      expect(core.called('createLens'), isTrue);
+      expect(core.args['createLens']?['name'], '35mm');
+      expect(core.args['createLens']?['params'], 'F2');
+    },
+  );
 
   testWidgets('empty name does not create a lens', (tester) async {
     final core = FakeCore(const FfState());
@@ -238,30 +255,42 @@ void main() {
 
     await tester.tap(find.text('新建镜头'));
     await tester.pumpAndSettle();
+    expect(find.byType(AppActionDialog), findsOneWidget);
+    expect(find.text('此操作无法撤销'), findsNothing);
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
 
     expect(core.called('createLens'), isFalse, reason: '名称是必填');
-    expect(
-      find.text('名称（如 50mm F1.4）'),
-      findsOneWidget,
-      reason: '空名时对话框不关闭',
-    );
+    expect(find.text('名称（如 50mm F1.4）'), findsOneWidget, reason: '空名时对话框不关闭');
   });
 
-  testWidgets('deleting a lens asks first, then tells the core', (tester) async {
+  testWidgets('deleting a lens asks first, then tells the core', (
+    tester,
+  ) async {
     final core = FakeCore(FfState(lenses: [lens()]));
     await pumpLensPage(tester, core);
 
     await tester.tap(find.byIcon(Icons.delete_outline));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('删除'));
+    expect(find.text('此操作无法撤销'), findsOneWidget);
+    final dialog = tester.widget<Dialog>(find.byType(Dialog));
+    expect(
+      (dialog.shape! as RoundedRectangleBorder).borderRadius,
+      BorderRadius.circular(16),
+    );
+    expect(
+      tester.getSize(find.widgetWithText(FilledButton, '取消')).width,
+      tester.getSize(find.widgetWithText(FilledButton, '删除镜头')).width,
+    );
+    await tester.tap(find.widgetWithText(FilledButton, '删除镜头'));
     await tester.pumpAndSettle();
 
     expect(core.args['deleteLens']?['id'], 'L1');
   });
 
-  testWidgets('an uncalibrated lens opens into stroke calibration', (tester) async {
+  testWidgets('an uncalibrated lens opens into stroke calibration', (
+    tester,
+  ) async {
     final core = FakeCore(
       stateFor(
         current: lens(calibrated: false, strokeRevs: 0),
@@ -274,10 +303,7 @@ void main() {
     // 顶部相位标签和面板标题都会写“① 标定行程”，所以是两个。
     expect(find.text('① 标定行程'), findsNWidgets(2));
     expect(find.text('记录这一端 A'), findsOneWidget);
-    expect(
-      find.text('记录另一端 B，完成标定'),
-      findsOneWidget,
-    );
+    expect(find.text('记录另一端 B，完成标定'), findsOneWidget);
     // 标定阶段的按钮不能提前可用。
     expect(
       tester.widget<FilledButton>(find.byType(FilledButton).last).onPressed,
@@ -290,18 +316,12 @@ void main() {
   testWidgets('a calibrated lens opens straight into single-side alignment', (
     tester,
   ) async {
-    final core = FakeCore(
-      stateFor(phase: SetupPhase.align, nearSteps: null),
-    );
+    final core = FakeCore(stateFor(phase: SetupPhase.align, nearSteps: null));
     await pumpFollowPage(tester, core);
 
     expect(find.text('② 单侧对齐'), findsNWidgets(2));
     expect(find.text('确认为焦距最近点'), findsOneWidget);
-    expect(
-      find.text('开始跟焦'),
-      findsNothing,
-      reason: '还没确认最近点，不该出现“开始跟焦”',
-    );
+    expect(find.text('开始跟焦'), findsNothing, reason: '还没确认最近点，不该出现“开始跟焦”');
     expect(find.text('焦距变远方向'), findsNothing);
   });
 
@@ -334,6 +354,7 @@ void main() {
     await pumpFollowPage(tester, core);
 
     expect(find.text('手动焦点'), findsOneWidget);
+    await tapVisible(tester, find.text('距离标定与方向'));
     expect(find.text('距离标定'), findsOneWidget);
     expect(find.text('焦距变远方向'), findsOneWidget);
     expect(find.text('① 标定行程'), findsNothing);
@@ -346,17 +367,41 @@ void main() {
     final core = FakeCore(stateFor());
     await pumpFollowPage(tester, core);
 
-    await tapVisible(tester, find.text('停'));
+    await tester.tap(find.text('停止电机'));
     expect(core.called('stopPressed'), isTrue);
 
     await tapVisible(tester, find.text('设当前位置为原点'));
     expect(core.called('homePressed'), isTrue);
   });
 
+  testWidgets('selecting a discovered device reconnects through the core', (
+    tester,
+  ) async {
+    final core = FakeCore(stateFor())
+      ..devicesToReturn = const [
+        FfDevice(
+          deviceId: 'FF-DEMO01',
+          mac: 'AA:BB:CC:00:00:01',
+          udpPort: 4210,
+          firmware: 'demo',
+          host: '192.168.4.1',
+        ),
+      ];
+    await pumpFollowPage(tester, core);
+    await tester.tap(find.text('已连接'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('FF-DEMO01'));
+    await tester.pumpAndSettle();
+
+    expect(core.args['selectDevice']?['device_id'], 'FF-DEMO01');
+    expect(core.called('connect'), isTrue);
+  });
+
   testWidgets('jog buttons send relative steps', (tester) async {
     final core = FakeCore(stateFor());
     await pumpFollowPage(tester, core);
 
+    await tapVisible(tester, find.text('微调与运动参数'));
     await tapVisible(tester, find.text('+80'));
     expect(core.args['jog']?['delta'], 80);
 
@@ -370,7 +415,8 @@ void main() {
     final core = FakeCore(stateFor());
     await pumpFollowPage(tester, core);
 
-    await tester.enterText(find.widgetWithText(TextField, '1').last, '0.5');
+    await tapVisible(tester, find.text('微调与运动参数'));
+    await tester.enterText(find.byType(TextField).last, '0.5');
     await tapVisible(tester, find.text('走圈'));
 
     // 0.5 圈 × 6400 脉冲/圈 = 3200。圈→步的换算是 UI 唯一的算术。
@@ -380,14 +426,12 @@ void main() {
   testWidgets('auto focus chip is only enabled once aligned with two points', (
     tester,
   ) async {
-    // 还没对齐：禁用
-    final notAligned = FakeCore(stateFor(phase: SetupPhase.align, nearSteps: null));
-    await pumpFollowPage(tester, notAligned);
-    expect(find.text('自动(先对齐)'), findsOneWidget);
-    expect(
-      tester.widget<FilterChip>(find.widgetWithText(FilterChip, '自动(先对齐)')).onSelected,
-      isNull,
+    // 还没对齐：不显示自动控制
+    final notAligned = FakeCore(
+      stateFor(phase: SetupPhase.align, nearSteps: null),
     );
+    await pumpFollowPage(tester, notAligned);
+    expect(find.text('自动跟焦'), findsNothing);
 
     // 对齐了但距离标定只有一点：仍禁用
     final onePoint = FakeCore(stateFor(lutReady: false));
@@ -401,7 +445,9 @@ void main() {
     expect(ready.args['setAuto']?['on'], true);
   });
 
-  testWidgets('manual slider is disabled while auto focus is on', (tester) async {
+  testWidgets('manual slider is disabled while auto focus is on', (
+    tester,
+  ) async {
     final core = FakeCore(stateFor(auto: true));
     await pumpFollowPage(tester, core);
 
@@ -413,16 +459,22 @@ void main() {
     final core = FakeCore(stateFor(distanceM: '2.34'));
     await pumpFollowPage(tester, core);
 
+    await tapVisible(tester, find.text('距离标定与方向'));
     await tapVisible(tester, find.text('记录当前'));
     expect(core.called('addLutPoint'), isTrue);
   });
 
-  testWidgets('recording is disabled without a distance reading', (tester) async {
+  testWidgets('recording is disabled without a distance reading', (
+    tester,
+  ) async {
     final core = FakeCore(stateFor());
     await pumpFollowPage(tester, core);
 
+    await tapVisible(tester, find.text('距离标定与方向'));
     expect(
-      tester.widget<FilledButton>(find.widgetWithText(FilledButton, '记录当前')).onPressed,
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, '记录当前'))
+          .onPressed,
       isNull,
       reason: '没测到距离时不该能记录标定点',
     );
@@ -434,7 +486,7 @@ void main() {
     final core = FakeCore(stateFor());
     await pumpFollowPage(tester, core);
 
-    // 需要先滚到“重新标定行程”。
+    await tapVisible(tester, find.text('距离标定与方向'));
     await scrollTo(tester, find.text('重新标定行程（长按）'));
     await tester.longPress(find.text('重新标定行程（长按）'));
     await tester.pumpAndSettle();
@@ -445,10 +497,13 @@ void main() {
     expect(core.called('recalibrateStroke'), isTrue);
   });
 
-  testWidgets('cancelling the recalibrate confirm changes nothing', (tester) async {
+  testWidgets('cancelling the recalibrate confirm changes nothing', (
+    tester,
+  ) async {
     final core = FakeCore(stateFor());
     await pumpFollowPage(tester, core);
 
+    await tapVisible(tester, find.text('距离标定与方向'));
     await scrollTo(tester, find.text('重新标定行程（长按）'));
     await tester.longPress(find.text('重新标定行程（长按）'));
     await tester.pumpAndSettle();
@@ -497,7 +552,9 @@ void main() {
     expect(find.text('12:00:00  rms=800mA'), findsOneWidget);
   });
 
-  testWidgets('microstep change and standby switch go to the core', (tester) async {
+  testWidgets('microstep change and standby switch go to the core', (
+    tester,
+  ) async {
     final core = FakeCore(
       stateFor(
         tmc: const FfTmc(
@@ -536,13 +593,74 @@ void main() {
     expect(core.args['setStandbyFeature']?['on'], false);
   });
 
-  testWidgets('face toggle is disabled when LiDAR is unavailable', (tester) async {
+  testWidgets('face toggle is disabled when LiDAR is unavailable', (
+    tester,
+  ) async {
     final core = FakeCore(stateFor());
     await pumpFollowPage(tester, core);
     // macOS 主机上 Platform.isIOS 为 false，所以 LiDAR 不可用 → 人脸开关禁用。
     expect(
-      tester.widget<FilterChip>(find.widgetWithText(FilterChip, '人脸')).onSelected,
+      tester
+          .widget<FilterChip>(find.widgetWithText(FilterChip, '人脸'))
+          .onSelected,
       isNull,
     );
+  });
+
+  testWidgets('primary actions fit narrow screens in every phase', (
+    tester,
+  ) async {
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    for (final width in [390.0, 320.0]) {
+      await tester.binding.setSurfaceSize(Size(width, 844));
+      for (final phase in SetupPhase.values) {
+        final core = FakeCore(
+          stateFor(
+            phase: phase,
+            nearSteps: phase == SetupPhase.align ? null : 1000,
+            connected: phase != SetupPhase.stroke,
+          ),
+        );
+        await pumpFollowPage(tester, core);
+        expect(find.text('停止电机'), findsOneWidget);
+        expect(tester.takeException(), isNull, reason: '$width px, $phase');
+        if (width == 320 && phase != SetupPhase.follow) {
+          final action = phase == SetupPhase.stroke ? '记录这一端 A' : '确认为焦距最近点';
+          expect(
+            tester.getRect(find.text(action)).bottom,
+            lessThan(tester.getRect(find.text('停止电机')).top),
+            reason: '$action should be visible above the fixed stop button',
+          );
+        }
+      }
+    }
+  });
+
+  testWidgets('lens and device lists fit narrow screens', (tester) async {
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    for (final width in [390.0, 320.0]) {
+      await tester.binding.setSurfaceSize(Size(width, 844));
+      final core = FakeCore(FfState(lenses: [lens(lutCount: 2)]))
+        ..devicesToReturn = const [
+          FfDevice(
+            deviceId: 'FF-DEMO01',
+            mac: 'AA:BB:CC:00:00:01',
+            udpPort: 4210,
+            firmware: 'demo',
+            host: '192.168.4.1',
+          ),
+        ];
+      await pumpLensPage(tester, core);
+      expect(tester.takeException(), isNull, reason: 'lens list at $width px');
+      await tester.pumpWidget(
+        MaterialApp(home: DevicePage(core: core, linkOpen: true)),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'device list at $width px',
+      );
+    }
   });
 }

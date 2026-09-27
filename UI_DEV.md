@@ -35,6 +35,8 @@ lib/                   UI 层（Flutter）：只渲染 + 发命令
 tool/ui_preview.sh
 ```
 
+Windows 上运行 `.\tool\ui_preview.ps1`。脚本会在首次运行时准备项目本地 Flutter SDK，后续每次调用都会重建 Web 包并输出预览链接；SDK、依赖缓存和构建产物都放在被忽略的 `build/` 下。
+
 它会构建 release web 包、在 `127.0.0.1:8123` 起静态服务器、打开浏览器。
 改完 Dart 代码重新跑一次，然后刷新页面。
 

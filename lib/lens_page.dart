@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'app_dialog.dart';
 import 'ff_core.dart';
 import 'main.dart';
 
@@ -48,35 +50,32 @@ class _LensPageState extends State<LensPage> {
     final params = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('新建镜头'),
+      builder: (ctx) => AppActionDialog(
+        title: '新建镜头',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
               controller: name,
               autofocus: true,
-              decoration: const InputDecoration(labelText: '名称（如 50mm F1.4）'),
+              decoration: appDialogInputDecoration(
+                ctx,
+                labelText: '名称（如 50mm F1.4）',
+              ),
             ),
+            const SizedBox(height: 12),
             TextField(
               controller: params,
-              decoration: const InputDecoration(labelText: '参数备注（可选）'),
+              decoration: appDialogInputDecoration(ctx, labelText: '参数备注（可选）'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () {
-              if (name.text.trim().isEmpty) return; // 名称是必填，空名不入库
-              Navigator.pop(ctx, true);
-            },
-            child: const Text('创建'),
-          ),
-        ],
+        confirmLabel: '创建',
+        onCancel: () => Navigator.pop(ctx, false),
+        onConfirm: () {
+          if (name.text.trim().isEmpty) return; // 名称是必填，空名不入库
+          Navigator.pop(ctx, true);
+        },
       ),
     );
     if (ok != true) return;
@@ -95,19 +94,27 @@ class _LensPageState extends State<LensPage> {
   Future<void> _delete(FfLens lens) async {
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('删除 ${lens.name}？'),
-        content: const Text('会同时删掉它的行程标定和距离标定表。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
+      builder: (ctx) => AppActionDialog(
+        title: '删除镜头',
+        content: Text.rich(
+          TextSpan(
+            children: [
+              const TextSpan(text: '将删除「'),
+              TextSpan(
+                text: lens.name,
+                style: TextStyle(
+                  color: Theme.of(ctx).colorScheme.onSurface,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const TextSpan(text: '」及其行程标定和距离标定表。'),
+            ],
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除'),
-          ),
-        ],
+        ),
+        confirmLabel: '删除镜头',
+        destructive: true,
+        onCancel: () => Navigator.pop(ctx, false),
+        onConfirm: () => Navigator.pop(ctx, true),
       ),
     );
     if (ok != true) return;
@@ -120,23 +127,27 @@ class _LensPageState extends State<LensPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('选择镜头')),
       body: ListView(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(16),
         children: [
-          const Text(
-            '每个镜头单独保存行程标定、变远方向和距离标定表。'
-            '新镜头第一次进入要先手动标定行程；标定过的每次进入都要先做单侧对齐。',
+          Text(
+            '选择镜头开始跟焦。首次使用需标定行程，之后每次进入需对齐。',
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
-          const Divider(height: 24),
+          const SizedBox(height: 20),
           if (_lenses.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24),
-              child: Center(child: Text('还没有镜头，点下面新建一个。')),
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: Text('还没有镜头，点下面新建一个。')),
+              ),
             ),
           for (final l in _lenses) _row(l),
-          const SizedBox(height: 12),
+          const SizedBox(height: 4),
           FilledButton.icon(
             onPressed: _create,
-            icon: const Icon(Icons.add),
+            icon: const Icon(LucideIcons.plus),
             label: const Text('新建镜头'),
           ),
         ],
@@ -147,24 +158,30 @@ class _LensPageState extends State<LensPage> {
   Widget _row(FfLens l) {
     final parts = <String>[
       if (l.params.isNotEmpty) l.params,
-      if (l.calibrated)
-        '行程 ${l.strokeRevs.toStringAsFixed(2)} 圈'
-      else
-        '未标定行程',
+      if (l.calibrated) '行程 ${l.strokeRevs.toStringAsFixed(2)} 圈' else '未标定行程',
       if (l.lutCount >= 2) '距离标定 ${l.lutCount} 点',
       '焦距变远：${l.dir > 0 ? "+" : "-"} 方向',
     ];
     return Card(
       child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         leading: Icon(
-          l.calibrated ? Icons.check_circle : Icons.error_outline,
-          color: l.calibrated ? Colors.greenAccent : Colors.orangeAccent,
+          l.calibrated ? LucideIcons.circleCheck : LucideIcons.circleAlert,
+          color: l.calibrated
+              ? Theme.of(context).colorScheme.primary
+              : Theme.of(context).colorScheme.tertiary,
         ),
-        title: Text(l.name.isEmpty ? '(未命名)' : l.name),
-        subtitle: Text(parts.join(' · ')),
+        title: Text(
+          l.name.isEmpty ? '(未命名)' : l.name,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        subtitle: Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(parts.join(' · ')),
+        ),
         trailing: IconButton(
           tooltip: '删除',
-          icon: const Icon(Icons.delete_outline),
+          icon: const Icon(LucideIcons.trash2),
           onPressed: () => _delete(l),
         ),
         onTap: () => _open(l),
