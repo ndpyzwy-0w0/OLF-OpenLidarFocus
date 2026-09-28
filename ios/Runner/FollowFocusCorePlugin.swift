@@ -17,6 +17,18 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   private let sinkLock = NSLock()
   private var sink: FlutterEventSink?
 
+  /// App 版本，形如 `1.1.0+2`。来源是 `pubspec.yaml` 的 `version:`，Flutter 构建时
+  /// 写进 `Info.plist`（`$(FLUTTER_BUILD_NAME)` / `$(FLUTTER_BUILD_NUMBER)`）。
+  ///
+  /// 由这里注入快照，而不是放进 `FollowFocusCore`：功能层是纯 Swift Package，
+  /// 读不到 App 的 Bundle；版本也是壳层的事实，不是控制逻辑。
+  private let appVersion: String = {
+    let info = Bundle.main.infoDictionary
+    let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+    let build = info?["CFBundleVersion"] as? String ?? "?"
+    return "\(short)+\(build)"
+  }()
+
   init(store: LensStore) {
     session = FollowFocusSession(store: store)
     super.init()
@@ -61,7 +73,7 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       session.stop()
       result(nil)
     case "snapshot":
-      result(session.snapshot().channelObject(cal: session.cal))
+      result(channelObject(session.snapshot()))
 
     // 设备
     case "discover":
@@ -217,7 +229,7 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     sink = events
     sinkLock.unlock()
     // 先补一条当前快照，UI 不用等下一个 tick 才有内容。
-    events(session.snapshot().channelObject(cal: session.cal))
+    events(channelObject(session.snapshot()))
     return nil
   }
 
@@ -233,8 +245,16 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     let sink = self.sink
     sinkLock.unlock()
     guard let sink else { return }
-    let map = state.channelObject(cal: session.cal)
+    let map = channelObject(state)
     DispatchQueue.main.async { sink(map) }
+  }
+
+  /// 快照 + 壳层自己补的字段（目前只有 App 版本）。所有出口都走这里，
+  /// 免得漏掉某一条推送路径导致 UI 只有一半时候能读到版本。
+  private func channelObject(_ state: FollowFocusState) -> [String: Any] {
+    var map = state.channelObject(cal: session.cal)
+    map["app_version"] = appVersion
+    return map
   }
 
   // MARK: - 参数取值

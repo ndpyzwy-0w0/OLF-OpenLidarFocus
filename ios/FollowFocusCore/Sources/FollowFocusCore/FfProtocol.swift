@@ -44,9 +44,14 @@ public struct CalStatus: Equatable {
   public let microsteps: UInt16
   public let elapsedMs: UInt32
 
+  /// **不要给 `error` 设上界。** 固件的错误码表会加长：`CAL_DIAG = 11` 就被曾经的
+  /// `b[4] <= 10` 整包丢掉，于是“DIAG 未接通”这条明确拒绝变成一次静默超时，
+  /// 界面只能报“标定保活超时，请检查连接”，把用户指向完全错误的方向。
+  /// 未知码由 `FollowFocusSession` 的文案表兜底成“未知错误 N”。
+  /// `state` 仍要卡上界：它在会话里直接当数组下标用。
   public static func decode(_ b: [UInt8]) -> CalStatus? {
     guard b.count == 32, b[0] == kFfMagic, b[1] == kFfCalStatus,
-      b[2] <= 7, b[4] <= 10, b[7] <= 1 else { return nil }
+      b[2] <= 7, b[7] <= 1 else { return nil }
     return CalStatus(state: b[2], sequence: b[3], error: b[4], runId: b[5],
       threshold: b[6], valid: b[7] == 1, pos: readInt32LE(b, 8),
       travel: readInt32LE(b, 12), safeMin: readInt32LE(b, 16),

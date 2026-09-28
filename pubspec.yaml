@@ -16,7 +16,11 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+# 这里是 App 版本的**唯一来源**：iOS 用 build-name 当 CFBundleShortVersionString、
+# build-number 当 CFBundleVersion，而主界面标题下方显示的 `v<name>+<number>` 就是
+# 读的这两个键。所以**每次改动都 bump 这一行**（改一次 +1，功能/修 bug 提升前面的
+# 数字），装到手机上就能一眼看出是不是新版。
+version: 1.2.0+3
 
 environment:
   sdk: ^3.13.3

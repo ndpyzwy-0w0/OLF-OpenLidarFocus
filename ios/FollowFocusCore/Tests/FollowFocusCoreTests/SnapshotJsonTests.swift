@@ -73,8 +73,8 @@ final class SnapshotJsonTests: XCTestCase {
     let m = state().channelObject(cal: cal)
     let expected: [String] = [
       // 链路
-      "connected", "port", "local_addrs", "devices", "rx_packets", "probe_tx",
-      "device_id", "host", "local_port",
+      "connected", "link_alive", "port", "local_addrs", "devices", "rx_packets",
+      "probe_tx", "device_id", "host", "local_port",
       // 电机
       "pos", "target", "enabled", "moving", "uart_ok", "standby", "limit_hit",
       "result", "position_trusted",

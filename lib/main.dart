@@ -154,6 +154,38 @@ class _FollowPageState extends State<FollowPage> {
     if (ok == true) await widget.core.recalibrateStroke();
   }
 
+  /// 顶栏右侧的链路状态。**三种情况必须分开**：
+  ///
+  /// - 没连：socket 都没开（或还没选设备）；
+  /// - 失去回包：socket 开着，但没有状态回包（掉出板子热点、App 刚回前台、板子重启）；
+  /// - 通着：报使能 / 运动 / 待机 / UART。
+  ///
+  /// 旧版把后两种都说成"连着"，于是顶栏显示 `EN SLP UART` 而实际一个包都不通 ——
+  /// 会被带去查错的方向（`connected` 只是 socket bind 成功；`enabled/standby/uartOk`
+  /// 是收到过就不再失效的字段）。
+  Widget _linkStatusText() {
+    if (!_s.connected) {
+      return Text(
+        _s.deviceId == null ? '未选设备' : '${_s.deviceId} · 未连接',
+        style: const TextStyle(fontSize: 12),
+      );
+    }
+    if (!_s.linkAlive) {
+      final age = _s.statusAgeMs;
+      final secs = age == null ? '' : ' ${(age / 1000).round()}s';
+      return Text(
+        '${_s.deviceId ?? "已连接"} · 失去回包$secs',
+        style: const TextStyle(fontSize: 12, color: Colors.orangeAccent),
+      );
+    }
+    return Text(
+      '${_s.enabled ? "EN" : "OFF"} '
+      '${_s.moving ? "RUN" : (_s.standby ? "SLP" : "IDLE")} '
+      '${_s.uartOk ? "UART" : ""}',
+      style: const TextStyle(fontSize: 12),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final distText = _s.distanceM == null
@@ -161,7 +193,19 @@ class _FollowPageState extends State<FollowPage> {
         : '${_s.distanceM!.toStringAsFixed(2)} m';
     return Scaffold(
       appBar: AppBar(
-        title: const Text('跟焦器'),
+        // 标题里带上 App 版本（`pubspec.yaml` 的 `version:`，由 iOS 壳从 Bundle 读出来）。
+        // 装在手机上的到底是哪一版，一眼可见，不用去 设置→通用 里翻。
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('跟焦器'),
+            Text(
+              _s.appVersion.isEmpty ? '版本未知' : 'v${_s.appVersion}',
+              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.normal),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             tooltip: '设备',
@@ -170,16 +214,7 @@ class _FollowPageState extends State<FollowPage> {
           ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
-            child: Center(
-              child: Text(
-                _s.connected
-                    ? '${_s.enabled ? "EN" : "OFF"} '
-                          '${_s.moving ? "RUN" : (_s.standby ? "SLP" : "IDLE")} '
-                          '${_s.uartOk ? "UART" : ""}'
-                    : (_s.deviceId == null ? '未选设备' : '${_s.deviceId} · 未连接'),
-                style: const TextStyle(fontSize: 12),
-              ),
-            ),
+            child: Center(child: _linkStatusText()),
           ),
         ],
       ),

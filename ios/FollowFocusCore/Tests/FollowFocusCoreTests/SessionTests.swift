@@ -39,7 +39,14 @@ private final class FakeFirmware {
   private let _calStage = Locked<UInt8>(0)
   var dropFirstStartReply = false
   var rejectStart = false
+  /// 拒绝 CAL_START 时回的错误码。固件的 `CAL_DIAG = 11` 是最新加的一个。
+  var rejectStartError: UInt8 = 2
+  /// CAL_START 一律不回（模拟固件不认这条命令）。
+  var dropCalStartReplies = false
   var dropCalQueries = false
+  /// 只丢带 run_id 的 CAL_QUERY，保留 `a=0` 的首读，用来验证“握手成功但
+  /// 标定期间完全没回包”这条路径。
+  var dropRunQueries = false
   var invalidateCalResult = false
   var wrongRunReplies = 0
   var dropStatusReplies = false
@@ -98,13 +105,14 @@ private final class FakeFirmware {
     switch p.cmd {
     case kFfCalStart:
       if rejectStart {
-        reply(calStatus(sequence: p.sequence, error: 2), to: host, port: port)
+        reply(calStatus(sequence: p.sequence, error: rejectStartError), to: host, port: port)
         return
       }
       if _calRun.current != p.sequence {
         _calRun.set(p.sequence)
         _calStage.set(1)
       }
+      if dropCalStartReplies { return }
       if dropFirstStartReply {
         dropFirstStartReply = false
         return
@@ -113,6 +121,7 @@ private final class FakeFirmware {
       return
     case kFfCalQuery:
       if dropCalQueries { return }
+      if dropRunQueries && p.a != 0 { return }
       if p.a == Int32(_calRun.current) && p.a != 0 {
         _calStage.set(min(_calStage.current + 1, 5))
         if _calStage.current == 5 { _pos.set(8000); _target.set(8000) }
@@ -146,7 +155,7 @@ private final class FakeFirmware {
     default:
       break
     }
-    if p.cmd == kFfQuery && dropStatusReplies { return }
+    if dropStatusReplies { return }
     reply(status(sequence: p.sequence), to: host, port: port)
   }
 
@@ -208,13 +217,14 @@ private final class Harness {
 
   private let dir: URL
 
-  init() throws {
+  init(memoNamespace: String = "ff-test-\(UUID().uuidString)") throws {
     dir = FileManager.default.temporaryDirectory
       .appendingPathComponent("ff-session-test-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     firmware = try FakeFirmware()
     store = LensStore(directory: dir)
-    session = FollowFocusSession(store: store)
+    // 每个用例一个独立命名空间：否则“记住上次板子”的用例会给别的用例留下存档。
+    session = FollowFocusSession(store: store, memo: DeviceMemo(namespace: memoNamespace))
     session.onState = { [weak self] s in self?.latest.set(s) }
     session.link.useDevice(
       FfDiscovery(
@@ -301,6 +311,111 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(waitUntil { h.latest.current?.calStage == "failed" })
     XCTAssertEqual(h.latest.current?.calError, 2)
     XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
+  }
+
+  /// §14：GPIO11 没接 DIAG 时，固件在运动前就用 `CAL_DIAG = 11` 拒绝启动。
+  /// 解码器曾把 `error > 10` 整包丢掉，这条明确拒绝就变成 App 侧“没收到回包”，
+  /// 3 秒后报成“标定保活超时，请检查连接” —— 把用户指向完全错误的方向。
+  func testDiagRejectionIsReportedNotAsKeepaliveTimeout() throws {
+    let h = try Harness(); defer { h.stop() }
+    h.firmware.rejectStart = true
+    h.firmware.rejectStartError = 11
+    prepareAuto(h)
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "failed" })
+    XCTAssertEqual(h.latest.current?.calError, 11)
+    XCTAssertTrue(
+      h.latest.current?.msg.contains("DIAG") == true,
+      "应报 DIAG 未接通，实际：\(h.latest.current?.msg ?? "")")
+    XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
+  }
+
+  /// 还没发出 CAL_START 就没有回包（STOP/QUERY/ENABLE 都收不到）时，说的必须是
+  /// “握手没回包”，不能复用保活超时那句。
+  func testHandshakeTimeoutIsNotReportedAsKeepalive() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    h.firmware.dropStatusReplies = true
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil(3) { h.latest.current?.calStage == "failed" })
+    XCTAssertEqual(h.latest.current?.calError, 20)
+    XCTAssertTrue(
+      h.latest.current?.msg.contains("握手") == true,
+      "应报握手超时，实际：\(h.latest.current?.msg ?? "")")
+  }
+
+  /// 握手成功、CAL_START 与带 run_id 的 CAL_QUERY 全部石沉大海：报“固件没有回应
+  /// 标定命令”，同样不能报成保活超时（那会让人去查 Wi-Fi）。
+  func testSilentFirmwareForCalStartIsReportedAsNoReply() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    h.firmware.dropCalStartReplies = true
+    h.firmware.dropRunQueries = true
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil(6) { h.latest.current?.calStage == "failed" })
+    XCTAssertEqual(h.latest.current?.calError, 21)
+    XCTAssertTrue(
+      h.latest.current?.msg.contains("没有回应") == true,
+      "应报固件没回应，实际：\(h.latest.current?.msg ?? "")")
+  }
+
+  /// 链路"看着连着、其实早掉了"必须能从快照看出来：socket 开着但没有状态回包时
+  /// `linkAlive` 要变 false。旧版只有 `connected`（= socket bind 成功），
+  /// 于是顶栏一直显示 `EN SLP UART`，把人指到错误方向。
+  func testLinkAliveGoesStaleWhenStatusRepliesStop() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    XCTAssertTrue(waitUntil { h.latest.current?.linkAlive == true })
+    h.firmware.dropStatusReplies = true
+    XCTAssertTrue(
+      waitUntil(4) { h.latest.current?.linkAlive == false },
+      "没了状态回包就该判成失去回包")
+    XCTAssertEqual(h.latest.current?.connected, true, "socket 还开着，两层含义不能混")
+  }
+
+  /// 存档本身要能原样读回（含端口和固件版本 —— 恢复后靠它判断 calSupported）。
+  func testDeviceMemoRoundTripsThroughUserDefaults() {
+    let ns = "ff-test-memo-\(UUID().uuidString)"
+    defer { DeviceMemo(namespace: ns).clear() }
+    let memo = DeviceMemo(namespace: ns)
+    XCTAssertNil(memo.load(), "空命名空间不该有存档")
+    memo.save(
+      FfDiscovery(deviceId: "FF-MEMO", mac: "", kind: 1, protocolVersion: 1,
+        udpPort: 4210, fwMajor: 1, fwMinor: 1, fwPatch: 3, host: "192.168.4.1"))
+    XCTAssertEqual(memo.load()?.deviceId, "FF-MEMO")
+    XCTAssertEqual(memo.load()?.host, "192.168.4.1")
+    XCTAssertEqual(memo.load()?.udpPort, 4210)
+    XCTAssertEqual(memo.load()?.fwPatch, 3)
+    memo.clear()
+    XCTAssertNil(memo.load())
+  }
+
+  /// 冷启动：上次选过的板子要能自动认回来并连上，不用重新扫描。
+  func testSavedDeviceIsRestoredAndReconnected() throws {
+    let ns = "ff-test-restore-\(UUID().uuidString)"
+    defer { DeviceMemo(namespace: ns).clear() }
+
+    let a = try Harness(memoNamespace: ns)
+    defer { a.stop() }
+    a.session.selectDevice(
+      FfDiscovery(deviceId: "FF-MEMO", mac: "", kind: 1, protocolVersion: 1,
+        udpPort: Int(a.firmware.port), fwMajor: 1, fwMinor: 1, fwPatch: 0,
+        host: "127.0.0.1"))
+    a.session.connect()
+    XCTAssertTrue(waitUntil { a.latest.current?.linkAlive == true })
+
+    // 第二个会话：不选设备，只带着同一份存档启动。
+    let b = try Harness(memoNamespace: ns)
+    defer { b.stop() }
+    XCTAssertTrue(
+      waitUntil(3) {
+        b.latest.current?.deviceId == "FF-MEMO" && b.latest.current?.linkAlive == true
+      },
+      "应当自动认回 FF-MEMO 并收到状态回包（连的是 A 的假板子）；"
+        + "device=\(b.latest.current?.deviceId ?? "nil") "
+        + "connected=\(b.latest.current?.connected ?? false) "
+        + "age=\(b.latest.current?.statusAgeMs.map(String.init) ?? "nil") "
+        + "msg=\(b.latest.current?.msg ?? "")")
   }
 
   func testWrongRunIsIgnoredAndCancellationStopsRunningScan() throws {

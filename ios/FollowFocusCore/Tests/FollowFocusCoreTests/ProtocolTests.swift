@@ -37,6 +37,19 @@ final class ProtocolTests: XCTestCase {
     raw[7] = 2
     XCTAssertNil(CalStatus.decode(raw))
   }
+
+  /// 固件的错误码没有“最大已知值”之外的上界，尤其 `CAL_DIAG = 11` 曾经被
+  /// 解码器整包拒收，把明确拒绝变成了 App 侧的保活超时（见 §14）。
+  func testCalStatusKeepsEveryFirmwareErrorCode() {
+    var raw = [UInt8](repeating: 0, count: 32)
+    raw[0] = kFfMagic
+    raw[1] = kFfCalStatus
+    raw[2] = 7
+    for code in [UInt8(0), 7, 10, 11, 200] {
+      raw[4] = code
+      XCTAssertEqual(CalStatus.decode(raw)?.error, code, "error=\(code) 不该被丢掉")
+    }
+  }
   func testPacketRoundtripMatches12ByteLayout() {
     let raw = FfPacket(cmd: kFfSetPos, sequence: 42, a: 1234, b: -5).encode()
     XCTAssertEqual(raw.count, 12)

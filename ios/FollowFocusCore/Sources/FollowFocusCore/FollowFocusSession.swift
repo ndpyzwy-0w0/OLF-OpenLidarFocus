@@ -14,6 +14,14 @@ public enum SetupPhase: String {
 public struct FollowFocusState {
   // 链路
   public var connected = false
+  /// 链路**真的通**：socket 开着，并且最近收到过状态回包。
+  ///
+  /// `connected` 只说明本地 socket bind 成功，电话掉出板子热点、或者 App 刚从
+  /// 后台醒来还没发包时它照样是 true；`enabled/standby/uartOk` 也是"收到过就
+  /// 不再失效"的字段。所以界面要判"现在通不通"必须用这个，不要再自己看
+  /// `connected` —— 否则顶栏会显示 `EN SLP UART` 而实际一个包都没通，
+  /// 让人去查错的方向。
+  public var linkAlive = false
   public var deviceId: String?
   public var host: String?
   public var port: UInt16 = kFfDefaultPort
@@ -87,6 +95,22 @@ public struct FollowFocusState {
   public var calDirectionPending = false
 }
 
+/// 「链路还活着」的判定窗口：App 每 200 ms 发一次 QUERY，固件每次都回 STATUS，
+/// 所以 1.5 s（7 次没回）已经是很宽松的“断了”。
+let kLinkAliveWindow: TimeInterval = 1.5
+
+/// App 侧判定出来的标定失败的 `calError` 起始值。
+///
+/// 固件错误码是紧凑递增的（`PROTOCOL.md` §14 的 0–11），以后还会加；App 自己的
+/// “根本没收到回包”必须和固件错误码区分开，所以从 20 起编，中间留空档。
+let kAppCalErrorBase = 20
+
+/// 对应 `kAppCalErrorBase + n` 的文案，顺序与下标一致。
+let appCalReasons = [
+  "标定前握手没有回包：检查链路，并确认固件 ≥1.1.0",
+  "固件没有回应标定命令：确认固件 ≥1.1.0 且未丢包",
+]
+
 /// 会话编排：**所有跟焦逻辑的唯一位置**。
 ///
 /// 职责边界：
@@ -100,6 +124,8 @@ public final class FollowFocusSession {
   public let cal: MotorCal
   public let store: LensStore
   public let link: MotorLink
+  /// 上次用过的板子，冷启动自动恢复（见 [DeviceMemo]）。
+  private let memo: DeviceMemo
 
   /// 状态快照回调（主线程）。约 20Hz；未连接且无变化时不重复推。
   public var onState: ((FollowFocusState) -> Void)?
@@ -152,9 +178,10 @@ public final class FollowFocusSession {
   private var calHighestState: UInt8 = 0
   private var calRecoveryRequired = false
 
-  public init(store: LensStore, cal: MotorCal = MotorCal()) {
+  public init(store: LensStore, cal: MotorCal = MotorCal(), memo: DeviceMemo = DeviceMemo()) {
     self.store = store
     self.cal = cal
+    self.memo = memo
     self.link = MotorLink()
     link.onStatus = { [weak self] s in self?.queue.async { self?.applyStatus(s) } }
     link.onStatusV2 = { [weak self] s in self?.queue.async { self?.applyStatusV2(s) } }
@@ -183,6 +210,9 @@ public final class FollowFocusSession {
 
   public func start() {
     queue.async {
+      // 冷启动先认回上次那台板子，省掉"重新扫描 + 选用"两步。
+      // 放在 timer 守卫之前：重复调用 start() 时也要能补上这次恢复。
+      self.restoreDeviceOnQueue()
       guard self.timer == nil else { return }
       let t = DispatchSource.makeTimerSource(queue: self.queue)
       t.schedule(deadline: .now() + 0.02, repeating: 0.02, leeway: .milliseconds(5))
@@ -191,6 +221,21 @@ public final class FollowFocusSession {
       t.resume()
       self.emit()
     }
+  }
+
+  /// 恢复上次的板子并直接连接。没有存过、或者已经选过设备就什么都不做。
+  ///
+  /// 和设备页里手动"选用"走同一条 [openLinkOnQueue]：同样会下发速度/限位/待机
+  /// 偏好和 ENABLE(1)。**这是有物理后果的**（线圈通电、镜头被握住），和用户手动
+  /// 点"连接电机"一致；所以只在有存档时做，且只在启动时做一次。
+  private func restoreDeviceOnQueue() {
+    guard device == nil, let saved = memo.load() else { return }
+    device = saved
+    state.deviceId = saved.deviceId
+    state.calSupported = saved.fwMajor > 1 || (saved.fwMajor == 1 && saved.fwMinor >= 1)
+    link.useDevice(saved)
+    openLinkOnQueue()
+    setMsg("已恢复上次的板子 \(saved.deviceId)：\(saved.host):\(saved.udpPort)")
   }
 
   public func stop() {
@@ -232,6 +277,7 @@ public final class FollowFocusSession {
       self.device = d
       self.state.calSupported = d.fwMajor > 1 || (d.fwMajor == 1 && d.fwMinor >= 1)
       self.link.useDevice(d)
+      self.memo.save(d)
       self.state.deviceId = d.deviceId
       self.setMsg("已选 \(d.deviceId)（\(d.host):\(d.udpPort)）")
     }
@@ -745,6 +791,8 @@ public final class FollowFocusSession {
     }
   }
 
+  /// `error` 是固件错误码；`>= kAppCalErrorBase` 的是 App 自己判定出来的
+  /// 通信失败（固件根本没能参与），文案在同一张表里，界面不用分两套。
   private func failCalibration(error: Int) {
     state.calError = error
     state.calStage = "failed"
@@ -764,7 +812,15 @@ public final class FollowFocusSession {
       "行程过短或空载读数无效，请调整阈值并检查机械行程", "用户取消",
       "DIAG 未接通：请连接驱动器 DIAG 到 ESP32 GPIO11",
     ]
-    let reason = reasons.indices.contains(error) ? reasons[error] : "未知错误"
+    let reason: String
+    let appIndex = error - kAppCalErrorBase
+    if error >= kAppCalErrorBase, appCalReasons.indices.contains(appIndex) {
+      reason = appCalReasons[appIndex]
+    } else if reasons.indices.contains(error) {
+      reason = reasons[error]
+    } else {
+      reason = "未知错误 \(error)"
+    }
     invalidatePosition("自动标定失败：\(reason)")
   }
 
@@ -954,9 +1010,11 @@ public final class FollowFocusSession {
   private func tickCalibration(_ now: Date) {
     guard link.isOpen else { cancelCalibrationOnQueue("连接已断开"); return }
     switch calPhase {
+    // 还没发出 CAL_START 就超时：连 STOP/QUERY/ENABLE 的回包都没到，
+    // 这不是“保活”，而是链路或固件版本问题，必须分开报。
     case .stopping, .checking, .enabling, .reading:
       if now.timeIntervalSince(calSentAt) > 1.2 {
-        failCalibration(error: 7)
+        failCalibration(error: kAppCalErrorBase + 0)
       }
     case .starting:
       if now.timeIntervalSince(calLastQuery) >= 0.2 {
@@ -967,8 +1025,10 @@ public final class FollowFocusSession {
         link.calStart(runId: calRun, threshold: calThreshold, maxSteps: calMaxSteps)
         calSentAt = now
       }
+      // 3 s 是“连 CAL_START 的拒绝回包都没收到”。收到拒绝会立刻走
+      // `applyCalStatus`，所以这里只可能是丢包或固件不认这条命令。
       if now.timeIntervalSince(calLastReply) > 3.0 {
-        failCalibration(error: 7)
+        failCalibration(error: kAppCalErrorBase + 1)
       }
     case .running:
       if now.timeIntervalSince(calLastQuery) >= 0.2 {
@@ -977,6 +1037,7 @@ public final class FollowFocusSession {
         calQueries.insert(seq)
         if calQueries.count > 32 { calQueries.removeAll(); calQueries.insert(seq) }
       }
+      // 已经在跑，查询也一直发：这才是真正的保活断链（固件 1000 ms 停机）。
       if now.timeIntervalSince(calLastReply) > 1.2 { failCalibration(error: 7) }
     case .direction:
       if now.timeIntervalSince(calLastQuery) >= 0.2 {
@@ -1230,6 +1291,8 @@ public final class FollowFocusSession {
     s.socketError = socketErrorText
     s.statusAgeMs = lastStatusAt.map { Int(Date().timeIntervalSince($0) * 1000) }
     s.echoAgeMs = link.lastEchoAt.map { Int(Date().timeIntervalSince($0) * 1000) }
+    s.linkAlive =
+      link.isOpen && lastStatusAt.map { Date().timeIntervalSince($0) < kLinkAliveWindow } ?? false
     return s
   }
 

@@ -208,6 +208,11 @@ class FfTmc {
 
 /// 一条聚合状态快照。UI 只渲染最新一条，不做累积。
 class FfState {
+  /// App 版本，格式 `<pubspec version>`（例如 `1.1.0+2`）。
+  ///
+  /// 由 iOS 壳从 `Bundle.main`（= Flutter 构建时写进 Info.plist 的 pubspec 版本）
+  /// 注入快照；功能层是纯 Swift Package，读不到 App 的 Bundle。
+  final String appVersion;
   final bool calSupported;
   final String calStage;
   final int calError;
@@ -216,6 +221,12 @@ class FfState {
   final bool calDirectionPending;
   // 链路
   final bool connected;
+  /// 链路**真的通**：socket 开着且最近收到过状态回包。
+  ///
+  /// `connected` 只表示 socket bind 成功；手机掉出板子热点、App 刚回前台还没发包时
+  /// 它照样是 true，而 `enabled/standby/uartOk` 是"收到过就不再失效"的字段。
+  /// 判断"现在通不通"只能用这个，见 [FollowFocusState.linkAlive]。
+  final bool linkAlive;
   final String? deviceId;
   final String? host;
   final int port;
@@ -279,6 +290,7 @@ class FfState {
   final String msg;
 
   const FfState({
+    this.appVersion = '',
     this.calSupported = false,
     this.calStage = 'idle',
     this.calError = 0,
@@ -286,6 +298,7 @@ class FfState {
     this.calTravel = 0,
     this.calDirectionPending = false,
     this.connected = false,
+    this.linkAlive = false,
     this.deviceId,
     this.host,
     this.port = 4210,
@@ -340,6 +353,7 @@ class FfState {
   factory FfState.fromMap(Map<dynamic, dynamic> m) {
     final tmc = m['tmc'];
     return FfState(
+      appVersion: (m['app_version'] as String?) ?? '',
       calSupported: (m['cal_supported'] as bool?) ?? false,
       calStage: (m['cal_stage'] as String?) ?? 'idle',
       calError: (m['cal_error'] as num?)?.toInt() ?? 0,
@@ -347,6 +361,7 @@ class FfState {
       calTravel: (m['cal_travel'] as num?)?.toInt() ?? 0,
       calDirectionPending: (m['cal_direction_pending'] as bool?) ?? false,
       connected: (m['connected'] as bool?) ?? false,
+      linkAlive: (m['link_alive'] as bool?) ?? false,
       deviceId: m['device_id'] as String?,
       host: m['host'] as String?,
       port: (m['port'] as num?)?.toInt() ?? 4210,

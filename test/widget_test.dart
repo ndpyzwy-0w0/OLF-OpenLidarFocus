@@ -89,10 +89,16 @@ FfState stateFor({
   bool calSupported = false,
   bool calDirectionPending = false,
   String calStage = 'idle',
+  String appVersion = '',
+  bool linkAlive = true,
+  int? statusAgeMs,
 }) {
   final l = current ?? lens();
   return FfState(
+    appVersion: appVersion,
     connected: connected,
+    linkAlive: connected && linkAlive,
+    statusAgeMs: statusAgeMs,
     calSupported: calSupported,
     calDirectionPending: calDirectionPending,
     calStage: calStage,
@@ -167,6 +173,36 @@ Future<void> tapVisible(WidgetTester tester, Finder f) async {
 }
 
 void main() {
+  testWidgets('app bar shows the version the core reported', (tester) async {
+    final core = FakeCore(
+      stateFor(phase: SetupPhase.stroke, nearSteps: null, appVersion: '9.9.9+7'),
+    );
+    await pumpFollowPage(tester, core);
+    expect(find.text('v9.9.9+7'), findsOneWidget, reason: '版本要显示在主界面标题下');
+  });
+
+  testWidgets('app bar tells a dead link apart from a live one', (tester) async {
+    // socket 开着但收不到状态回包：必须说"失去回包"，不能继续显示 EN/SLP/UART。
+    final dead = FakeCore(
+      stateFor(
+        phase: SetupPhase.stroke,
+        nearSteps: null,
+        linkAlive: false,
+        statusAgeMs: 42000,
+      ),
+    );
+    await pumpFollowPage(tester, dead);
+    expect(find.textContaining('失去回包'), findsOneWidget);
+
+    // 同一个 socket，回包正常时照旧报 EN/IDLE（UART 位取决于 TMC 自检结果）。
+    final alive = FakeCore(
+      stateFor(phase: SetupPhase.stroke, nearSteps: null, statusAgeMs: 120),
+    );
+    await pumpFollowPage(tester, alive);
+    expect(find.textContaining('失去回包'), findsNothing);
+    expect(find.textContaining('IDLE'), findsOneWidget);
+  });
+
   testWidgets('auto stroke requires explicit confirmation and direction choice', (tester) async {
     final core = FakeCore(stateFor(phase: SetupPhase.stroke, nearSteps: null,
       current: lens(calibrated: false), calSupported: true));

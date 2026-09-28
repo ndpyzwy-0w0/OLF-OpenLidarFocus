@@ -17,6 +17,7 @@ extension FollowFocusState {
     var m: [String: Any] = [
       // 链路
       "connected": connected,
+      "link_alive": linkAlive,
       "port": Int(port),
       "local_addrs": localAddrs,
       "devices": devices.map(\.channelObject),

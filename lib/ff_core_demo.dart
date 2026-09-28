@@ -265,12 +265,14 @@ class FfCoreDemo extends FfCore {
     final l = _cur;
     final r = _softLimits;
     return FfState(
+      appVersion: '0.0.0+demo',
       calSupported: true,
       calStage: _calStage,
       calSafeSpan: _calSafeSpan,
       calTravel: _calTravel,
       calDirectionPending: _calDirectionPending,
       connected: _connected,
+      linkAlive: _connected,
       deviceId: 'FF-DEMO01',
       host: '192.168.4.1',
       port: 4210,
