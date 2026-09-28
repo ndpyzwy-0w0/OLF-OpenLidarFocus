@@ -130,6 +130,40 @@ Super Mini 不同。本项目已实测 `r12 t12`、115200、地址 0、TMC2209 v
 4. 首次进入 `loop()` 时尝试 TMC UART，避免 UART 异常阻塞热点和按键。
 5. 主循环处理 DNS、HTTP、UDP、待机和按键。
 
+### 4.1 构建与刷写（macOS 现在也能做）
+
+2026-09-29 起本机（macOS）就能编译和刷写，不必再借 Windows：
+
+```bash
+python3 -m venv ~/.pio-venv && ~/.pio-venv/bin/pip install -U platformio   # 只需一次
+~/.pio-venv/bin/pio run -d firmware            # 编译（首次约 2 分钟，含下载工具链）
+~/.pio-venv/bin/pio run -d firmware -t upload  # 刷写，板子在 /dev/cu.usbmodem*
+```
+
+`pio upload` 会**独占串口**：抓日志的 `tool/serial_tap.py` 必须先停掉，否则刷不进。
+
+### 4.2 TMC 寄存器读的重试与串口诊断（2026-09-29）
+
+半双工单线在 Wi-Fi 抢占下会偶发丢回包，真机标定起手读 `DRV_STATUS`/`IFCNT` 曾大约
+一半的尝试拿到 `0xFFFFFFFF`，整轮标定因此被判 `CAL_UART = 3`。现在：
+
+- `tmcReadReg` 4 次尝试、窗口 15 ms，**每次失败后排空 RX 再等 2 ms**（晚到的回包会
+  污染下一轮，这是连续两次都失败的主因）；四次全败才返回失败并打印
+  `tmc read fail addr=0xNN (total=N)`。
+- 标定的"写九个寄存器 + IFCNT +9 校验"整块最多重来 3 次（丢写和读计数失败都靠它兜），
+  仍不成立才 `CAL_UART`。
+- 串口 TMC 行末尾新增 `drv_valid=`（DRV_STATUS 这次读成功了吗）和 `readfail=`（累计
+  失败次数）。**协议没有变**：线上 `drv_status` 读失败仍按 0 发，"真读到 0"和"读失败"
+  在线上依旧分不开 —— 要区分就看串口这一行。
+- **堵转后那次 DRV_STATUS 读失败不再作废整轮**：DIAG 已经响了，UART 只是"顺便问一句
+  有没有驱动故障"。读不到就记账（`calFaultChecksSkipped`）继续扫描，**发布 state=5 之前
+  再补问一次**（那时电机已停、总线空闲，最容易问通）；补问读到故障位才 `CAL_DRIVER`，
+  仍读不到才放行（串口留 `cal final drv check drv=0xFFFFFFFF` 痕迹）。真机上 6 次标定
+  有 4 次死在这一读上，这条是成功率的主要来源。
+- 串口 TMC 行再加 `diag=<上升沿累计>/<当前电平>`：静止时边沿数若还在涨 = 纯噪声；
+  只有电机运动时涨 = 接错脚/与步进线串扰；两边都不涨而标定仍一动就停 = 芯片真在报。
+
+
 ## 5. 运动后端和单位
 
 当前不是 FastAccelStepper，也不是 RMT 队列。使用：
@@ -533,6 +567,39 @@ xcrun devicectl list devices        # 查 UDID
 flutter build ios --profile         # 产物 build/ios/iphoneos/Runner.app
 xcrun devicectl device install app --device <UDID> build/ios/iphoneos/Runner.app
 ```
+
+#### App 版本号（每次改动都要动）
+
+版本号的唯一来源是 [pubspec.yaml](pubspec.yaml) 的 `version:`（`<semver>+<build>`）。
+iOS 构建把它写进 `Info.plist` 的 `CFBundleShortVersionString` / `CFBundleVersion`，
+iOS 壳再从 `Bundle.main` 读出来放进快照（`app_version`），主界面标题下方直接显示
+（形如 `v1.1.0+2`）。**改了行为就把这一行 bump 一次**：版本没变，装到手机上就分不清
+是不是新版。约定：普通改动 `+n` 加一，功能或修 bug 提升前面的数字。网页预览
+（`tool/ui_preview.sh`）显示的是 `v0.0.0+demo`，不是真机版本。
+
+#### 冷启动重连与“链路真的通”
+
+两个都会误导排查的问题（2026-09-29 真机上踩到）：
+
+- **`connected` 只代表本地 socket bind 成功。** 手机掉出板子热点、App 刚从后台醒来还没发包、
+  板子重启，它照样是 true；`enabled/standby/uartOk` 更是“收到过一次就永不失效”。
+  于是顶栏会显示 `EN SLP UART`，实际一个包都不通，把人带去查 UART。
+  现在快照里多了 `link_alive`（socket 开着 **且** 1.5 s 内收到过状态回包，
+  见 `kLinkAliveWindow`），顶栏第三种状态是橙色的“`FF-XXXXXX · 失去回包 42s`”。
+  判断“现在通不通”只能用 `link_alive`（Dart 侧 `FfState.linkAlive`），不要再看 `connected`。
+- **冷启动后不用重新扫描了。** 选用过的板子（`device_id`/host/port/固件版本）记在
+  `UserDefaults`（`DeviceMemo`，§13 的功能层里，Foundation 自带、不引新依赖），
+  下次启动自动认回并走同一条 `openLinkOnQueue` 连接 —— 注意这**和手动点“连接电机”
+  一样会 ENABLE(1)**，线圈会通电；所以只在有存档时做一次，且位置/对齐状态一律不恢复。
+
+#### 依赖与构建的两个坑
+- `flutter build ios` **不会**因为 `pubspec.lock` 变了就重跑 `pub get`：它只看
+  `pubspec.yaml` 是否比 `.dart_tool/package_config.json` 新。手动还原或切换过 lock
+  之后要显式跑一次 `flutter pub get`，否则编译仍沿用旧的解析结果（产物和 lock 不一致）。
+- 本机 `~/.zshrc` 里设了 `PUB_HOSTED_URL=https://pub.flutter-io.cn` 走国内镜像，而
+  非交互 shell（脚本/agent）不会读它，`pub get` 会改走官方源并把 lock 里的 `url:`
+  整体改写。要在脚本里复现镜像解析，显式带上 `PUB_HOSTED_URL` 与
+  `FLUTTER_STORAGE_BASE_URL`。
 
 #### `flutter attach` 必须先起监听再启动 App
 
@@ -1041,3 +1108,66 @@ Swift 功能层已按 §14 解码 CAL_STATUS，负责固件版本门控、停止
 后续机械验收至少需要：从中点及两端分别启动、多次扫描比较行程、两种方向确认、
 模拟断联和取消、齿轮打滑/无挡块失败验证，并在实际电流/细分下记录 SG 数值与所用阈值。
 安全范围是开环估计，连续低值检测存在延迟，回退余量不能代替实际镜头负载验证。
+
+### 现场记录 2026-09-29（真机第一次跑起来）
+
+App 侧两个误导性 bug 已修（见 §8.1 与 `FfProtocol.swift` 注释）：CAL_STATUS 的
+`error` 曾被解码器卡在 ≤10，固件回 `CAL_DIAG=11` 时整包被丢，界面只会说
+“标定保活超时，请检查连接”；修好后 App 能直接显示“DIAG 未接通”。
+
+接线补齐后（`GPIO11 <- TMC DIAG`，`cal DIAG GPIO11 pullup=0 pulldown=0` 即已接通），
+固件能启动标定并真的转动电机，但连续 6 次都没走完，串口日志给出两类原因：
+
+| 现象 | 串口 | 判断 |
+| --- | --- | --- |
+| 每段只走 ~317 步就判堵转 | `cal DIAG run=N phase=1 pos=-317`（1600 步/秒 ≈ 198 ms） | 恰好卡在固件的 200 ms 启动屏蔽之后 → **堵转判定一直在成立**，即 `SGTHRS=60`（比较基准 2×60=120）高于实际 SG 读数（TMC_QUERY 读到 26–86）→ **阈值过大，误判为空载即堵转** |
+| 两端只有 ~870 步 | `state=7 error=9`（`CAL_SHORT_TRAVEL`） | 行程过短的保护正确触发，是上面误判的后果，不是新问题 |
+| 堵转后读诊断失败 | `drv=0xFFFFFFFF` → `state=7 error=3`（`CAL_UART`） | 停转瞬间那次 `tmcReadReg(0x6F)` 半双工丢包；已加固（见 §4.2）：4 次重试 + 重试前排空与延时 |
+
+**当晚结论（阈值填 1 之后）**：`SGTHRS=1` 时空载不再误判，电机能持续走；
+运行中用**手代替镜头限位**挡住输出轴，DIAG 立即触发、端点识别成立 ——
+**自动识别行程的机制在真机上第一次跑通**（此前只是固件/主机模拟验证）。
+
+由此可以定下几个数：
+
+- 这台机器的**空载 SG 读数落在"阈值 1 不触发、阈值 10 就触发"之间**：60 和 10 每段都恰好
+  在 200 ms 屏蔽结束处被当成堵转（`pos≈-317` 与 `pos≈-321` 几乎相同，说明与阈值高低无关，
+  而是空载读数一直在触发侧）。**阈值必须现场标定**，不能沿用文档里的默认 60。
+- 判定与"电机是否有负载"无关：StallGuard 是**负载测量**，空载读数落在阈值哪一侧取决于
+  阈值本身；所以拆掉负载不能当作"不会误判"的证据（固件文案 `error=9` 里的
+  "空载读数无效"就是这个意思）。
+- 电池/电流不是这一轮的原因：负载拆掉后现象不变，问题在阈值与 DIAG 信号本身。
+
+下一步（按性价比排序）：
+
+1. **拿着 `SGTHRS=1` 上真实镜头**，从行程中点开始标定：真挡块能触发就说明可用；
+   若一路顶到每段上限报 `error=5`（`CAL_DISTANCE`），把阈值往上加几档（2–5）再试。
+   验收项见本节的"后续机械验收至少需要"。
+2. **加固堵转后那次 DRV_STATUS 读**（§14 讨论）：读失败时按堵转继续、完成前补一次检查，
+   避免"没问到诊断值"就把整轮标定作废（真机上 6 次里 4 次死在这里）。
+3. **加 `diagEdges` 电平/边沿计数**到周期串口行：静止若在涨=纯噪声，只有走步时涨=接错脚/串扰，
+   两者都不涨但标定仍 200 ms 停=芯片真在报 —— 三种情况一眼分开。
+
+排查用工具：`python3 tool/serial_tap.py`（本仓库，只读抓 115200 串口并打时间戳，
+USB CDC 掉线会自动重连，板子被拔时会干净退出）。App 报错时对照同一时刻的固件输出，
+比在 App 侧猜快得多。
+
+### 固件侧完成情况（2026-09-29）
+
+上面 3 条已做完并**已刷进板子**（`FF-75A578`，本机 macOS 用 `~/.pio-venv` 的
+PlatformIO 编译 + 刷写，见 §4.1）：
+
+- `tmcReadReg`：4 次尝试 / 15 ms 窗口 / 失败后**排空 + 2 ms** 再重试；
+- 标定的寄存器配置块（9 次写 + IFCNT +9 校验）最多整块重来 3 次；
+- 串口诊断：失败时 `tmc read fail addr=0xNN (total=N)`，TMC 行加
+  `drv_valid=` / `readfail=`（线上协议**未改**，见 §4.2）；
+- **主机模拟重新能编译 DIAG 版固件**：`test/firmware_host/Arduino.h` 补了
+  `digitalRead`/上拉下拉/`attachInterrupt`，并新增三条钉住现场结论的用例
+  （DIAG 未接必须在运动前拒绝、扫描期间丢包不打断、堵转误判→`CAL_SHORT_TRAVEL`），
+  见 `test/firmware_host/README.md`。
+
+剩下的仍然是**机械调参**：现场已确定 `SGTHRS=1` 在空载下可用（见上一节的现场记录），
+真实镜头要从行程中点开始验，必要时加几档阈值或调 `maxRevs`；电流/细分组合也属于现场决定，
+代码侧没有可替代的验证。
+
+
