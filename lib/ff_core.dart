@@ -98,6 +98,12 @@ class FfLens {
   /// 行程圈数。圈数与细分无关，列表页直接显示它。
   final double strokeRevs;
   final int lutCount;
+  final int? autoTravel;
+  final int? autoSafeSpan;
+  final int? autoRmsMa;
+  final int? autoThreshold;
+  final int? autoMaxSteps;
+  final String? autoFirmware;
 
   const FfLens({
     required this.id,
@@ -108,6 +114,12 @@ class FfLens {
     required this.strokeSteps,
     required this.strokeRevs,
     required this.lutCount,
+    this.autoTravel,
+    this.autoSafeSpan,
+    this.autoRmsMa,
+    this.autoThreshold,
+    this.autoMaxSteps,
+    this.autoFirmware,
   });
 
   factory FfLens.fromMap(Map<dynamic, dynamic> m) => FfLens(
@@ -119,6 +131,12 @@ class FfLens {
     strokeSteps: (m['stroke_steps'] as num?)?.toInt() ?? 0,
     strokeRevs: (m['stroke_revs'] as num?)?.toDouble() ?? 0,
     lutCount: (m['lut_count'] as num?)?.toInt() ?? 0,
+    autoTravel: (m['auto_travel'] as num?)?.toInt(),
+    autoSafeSpan: (m['auto_safe_span'] as num?)?.toInt(),
+    autoRmsMa: (m['auto_rms_ma'] as num?)?.toInt(),
+    autoThreshold: (m['auto_threshold'] as num?)?.toInt(),
+    autoMaxSteps: (m['auto_max_steps'] as num?)?.toInt(),
+    autoFirmware: m['auto_firmware'] as String?,
   );
 }
 
@@ -190,6 +208,12 @@ class FfTmc {
 
 /// 一条聚合状态快照。UI 只渲染最新一条，不做累积。
 class FfState {
+  final bool calSupported;
+  final String calStage;
+  final int calError;
+  final int calSafeSpan;
+  final int calTravel;
+  final bool calDirectionPending;
   // 链路
   final bool connected;
   final String? deviceId;
@@ -255,6 +279,12 @@ class FfState {
   final String msg;
 
   const FfState({
+    this.calSupported = false,
+    this.calStage = 'idle',
+    this.calError = 0,
+    this.calSafeSpan = 0,
+    this.calTravel = 0,
+    this.calDirectionPending = false,
     this.connected = false,
     this.deviceId,
     this.host,
@@ -310,6 +340,12 @@ class FfState {
   factory FfState.fromMap(Map<dynamic, dynamic> m) {
     final tmc = m['tmc'];
     return FfState(
+      calSupported: (m['cal_supported'] as bool?) ?? false,
+      calStage: (m['cal_stage'] as String?) ?? 'idle',
+      calError: (m['cal_error'] as num?)?.toInt() ?? 0,
+      calSafeSpan: (m['cal_safe_span'] as num?)?.toInt() ?? 0,
+      calTravel: (m['cal_travel'] as num?)?.toInt() ?? 0,
+      calDirectionPending: (m['cal_direction_pending'] as bool?) ?? false,
       connected: (m['connected'] as bool?) ?? false,
       deviceId: m['device_id'] as String?,
       host: m['host'] as String?,
@@ -423,6 +459,7 @@ class FfCore {
     'device_id': d.deviceId,
     'host': d.host,
     'port': d.udpPort,
+    'firmware': d.firmware,
   });
 
   Future<void> connect() => invoke('connect');
@@ -462,6 +499,10 @@ class FfCore {
   Future<void> recordStrokeA() => invoke('recordStrokeA');
   Future<void> finishStroke() => invoke('finishStroke');
   Future<void> recalibrateStroke() => invoke('recalibrateStroke');
+  Future<void> startAutoCalibration({required int threshold, required double maxRevs}) =>
+      invoke('startAutoCalibration', {'threshold': threshold, 'maxRevs': maxRevs});
+  Future<void> cancelAutoCalibration() => invoke('cancelAutoCalibration');
+  Future<void> leaveLens() => invoke('leaveLens');
 
   // ② 单侧对齐
   Future<void> confirmNear() => invoke('confirmNear');

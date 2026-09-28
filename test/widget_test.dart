@@ -86,10 +86,18 @@ FfState stateFor({
   List<String> tmcLog = const [],
   int limitLo = 1000,
   int limitHi = 7400,
+  bool calSupported = false,
+  bool calDirectionPending = false,
+  String calStage = 'idle',
 }) {
   final l = current ?? lens();
   return FfState(
     connected: connected,
+    calSupported: calSupported,
+    calDirectionPending: calDirectionPending,
+    calStage: calStage,
+    calSafeSpan: 8000,
+    calTravel: 8512,
     enabled: enabled,
     pos: pos,
     target: pos,
@@ -159,6 +167,22 @@ Future<void> tapVisible(WidgetTester tester, Finder f) async {
 }
 
 void main() {
+  testWidgets('auto stroke requires explicit confirmation and direction choice', (tester) async {
+    final core = FakeCore(stateFor(phase: SetupPhase.stroke, nearSteps: null,
+      current: lens(calibrated: false), calSupported: true));
+    await pumpFollowPage(tester, core);
+    await tapVisible(tester, find.text('自动识别行程'));
+    expect(find.textContaining('机械挡块'), findsOneWidget);
+    await tester.tap(find.text('确认开始转动'));
+    await tester.pumpAndSettle();
+    expect(core.called('startAutoCalibration'), isTrue);
+    expect(core.args['startAutoCalibration'], {'threshold': 60, 'maxRevs': 2.0});
+    core.push(stateFor(phase: SetupPhase.align, calSupported: true,
+      calDirectionPending: true, calStage: 'completed', nearSteps: null));
+    await tester.pumpAndSettle();
+    await tapVisible(tester, find.text('正步数变近'));
+    expect(core.args['setDir'], {'dir': -1});
+  });
   testWidgets('app starts on the lens picker', (tester) async {
     final core = FakeCore();
     await tester.pumpWidget(FollowApp(core: core));

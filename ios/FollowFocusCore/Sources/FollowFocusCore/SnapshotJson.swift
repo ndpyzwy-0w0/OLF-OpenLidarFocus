@@ -65,6 +65,12 @@ extension FollowFocusState {
       "last_echoed_sequence": Int(lastEchoedSequence),
       "tmc_log": tmcLog,
       "msg": msg,
+      "cal_supported": calSupported,
+      "cal_stage": calStage,
+      "cal_error": calError,
+      "cal_safe_span": calSafeSpan,
+      "cal_travel": calTravel,
+      "cal_direction_pending": calDirectionPending,
     ]
 
     if let v = lensId { m["lens_id"] = v }
@@ -101,7 +107,7 @@ extension Lens {
   /// 所以连圈数一起给出去，省得 UI 自己换算。
   public func channelObject(cal: MotorCal) -> [String: Any] {
     let steps = strokeAt(strokeMicrosteps)
-    return [
+    var m: [String: Any] = [
       "id": id,
       "name": name,
       "params": params,
@@ -111,6 +117,13 @@ extension Lens {
       "stroke_revs": cal.stepsToRevs(steps, strokeMicrosteps),
       "lut_count": lut.points.count,
     ]
+    if let autoTravel { m["auto_travel"] = autoTravel }
+    if let autoSafeSpan { m["auto_safe_span"] = autoSafeSpan }
+    if let autoRmsMa { m["auto_rms_ma"] = autoRmsMa }
+    if let autoThreshold { m["auto_threshold"] = autoThreshold }
+    if let autoMaxSteps { m["auto_max_steps"] = autoMaxSteps }
+    if let autoFirmware { m["auto_firmware"] = autoFirmware }
+    return m
   }
 }
 

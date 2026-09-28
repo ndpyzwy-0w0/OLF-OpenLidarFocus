@@ -38,6 +38,10 @@ class FfCoreDemo extends FfCore {
   bool _faces = false;
   bool _following = true;
   bool _stopLatched = false;
+  String _calStage = 'idle';
+  bool _calDirectionPending = false;
+  int _calSafeSpan = 0;
+  int _calTravel = 0;
   int _pos = 1000;
   int _microsteps = 16;
   double _slider = 0.5;
@@ -160,6 +164,7 @@ class FfCoreDemo extends FfCore {
       case 'selectLens':
         _currentId = a?['id'] as String? ?? _currentId;
         _following = false;
+        _calDirectionPending = false;
       case 'createLens':
         final id = 'demo-${_lenses.length + 1}';
         _lenses.add(
@@ -194,6 +199,27 @@ class FfCoreDemo extends FfCore {
           ..nearSteps = null;
         _cur.lut.clear();
         _following = false;
+      case 'startAutoCalibration':
+        _calStage = 'completed';
+        _calDirectionPending = true;
+        _calSafeSpan = _toSteps(1.5);
+        _calTravel = _calSafeSpan + 32 * _microsteps;
+        _cur
+          ..calibrated = true
+          ..strokeRevs = 1.5
+          ..nearSteps = null;
+        _cur.lut.clear();
+        _pos = _calSafeSpan;
+        _following = false;
+      case 'cancelAutoCalibration':
+        _calStage = 'cancelled';
+        _calDirectionPending = false;
+        _cur.nearSteps = null;
+        _following = false;
+      case 'leaveLens':
+        _calDirectionPending = false;
+        _enabled = false;
+        _following = false;
 
       // ② 单侧对齐
       case 'confirmNear':
@@ -201,6 +227,10 @@ class FfCoreDemo extends FfCore {
         _following = false;
       case 'setDir':
         _cur.dir = a?['dir'] as int? ?? 1;
+        if (_calDirectionPending) {
+          _cur.nearSteps = _cur.dir > 0 ? 0 : _calSafeSpan;
+          _calDirectionPending = false;
+        }
       case 'startFollow':
         _following = true;
       case 'unalign':
@@ -235,6 +265,11 @@ class FfCoreDemo extends FfCore {
     final l = _cur;
     final r = _softLimits;
     return FfState(
+      calSupported: true,
+      calStage: _calStage,
+      calSafeSpan: _calSafeSpan,
+      calTravel: _calTravel,
+      calDirectionPending: _calDirectionPending,
       connected: _connected,
       deviceId: 'FF-DEMO01',
       host: '192.168.4.1',

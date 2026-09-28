@@ -18,6 +18,12 @@ public struct Lens: Equatable {
   public var strokeSteps: Int?
   public var strokeMicrosteps: Int
   public var dir: Int
+  public var autoTravel: Int?
+  public var autoSafeSpan: Int?
+  public var autoRmsMa: Int?
+  public var autoThreshold: Int?
+  public var autoMaxSteps: Int?
+  public var autoFirmware: String?
 
   public init(
     id: String,
@@ -26,7 +32,13 @@ public struct Lens: Equatable {
     lut: LensLut = LensLut([]),
     strokeSteps: Int? = nil,
     strokeMicrosteps: Int = 16,
-    dir: Int = 1
+    dir: Int = 1,
+    autoTravel: Int? = nil,
+    autoSafeSpan: Int? = nil,
+    autoRmsMa: Int? = nil,
+    autoThreshold: Int? = nil,
+    autoMaxSteps: Int? = nil,
+    autoFirmware: String? = nil
   ) {
     self.id = id
     self.name = name
@@ -35,6 +47,12 @@ public struct Lens: Equatable {
     self.strokeSteps = strokeSteps
     self.strokeMicrosteps = strokeMicrosteps
     self.dir = dir >= 0 ? 1 : -1
+    self.autoTravel = autoTravel
+    self.autoSafeSpan = autoSafeSpan
+    self.autoRmsMa = autoRmsMa
+    self.autoThreshold = autoThreshold
+    self.autoMaxSteps = autoMaxSteps
+    self.autoFirmware = autoFirmware
   }
 
   /// 行程是否已标定。未标定就不能对齐，也不能自动跟焦。
@@ -124,6 +142,12 @@ public extension Lens {
       "lut": lut.jsonObject,
     ]
     if let strokeSteps { o["stroke"] = strokeSteps }
+    if let autoTravel { o["autoTravel"] = autoTravel }
+    if let autoSafeSpan { o["autoSafeSpan"] = autoSafeSpan }
+    if let autoRmsMa { o["autoRmsMa"] = autoRmsMa }
+    if let autoThreshold { o["autoThreshold"] = autoThreshold }
+    if let autoMaxSteps { o["autoMaxSteps"] = autoMaxSteps }
+    if let autoFirmware { o["autoFirmware"] = autoFirmware }
     return o
   }
 
@@ -136,7 +160,13 @@ public extension Lens {
       lut: LensLut(jsonObject: (o["lut"] as? [String: Any]) ?? [:]),
       strokeSteps: number(o["stroke"])?.intValue,
       strokeMicrosteps: number(o["strokeMs"])?.intValue ?? 16,
-      dir: (number(o["dir"])?.intValue ?? 1) >= 0 ? 1 : -1
+      dir: (number(o["dir"])?.intValue ?? 1) >= 0 ? 1 : -1,
+      autoTravel: number(o["autoTravel"])?.intValue,
+      autoSafeSpan: number(o["autoSafeSpan"])?.intValue,
+      autoRmsMa: number(o["autoRmsMa"])?.intValue,
+      autoThreshold: number(o["autoThreshold"])?.intValue,
+      autoMaxSteps: number(o["autoMaxSteps"])?.intValue,
+      autoFirmware: o["autoFirmware"] as? String
     )
   }
 }

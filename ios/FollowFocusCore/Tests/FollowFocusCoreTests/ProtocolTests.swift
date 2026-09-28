@@ -5,6 +5,38 @@ import XCTest
 /// 从 Dart 的 `test/ff_protocol_test.dart` 逐条搬过来（发现/链路的网络测试
 /// 留在链路那一层，不在这里）。
 final class ProtocolTests: XCTestCase {
+  func testCalStatusExactWireLayoutAndRejectsMalformed() {
+    var raw = [UInt8](repeating: 0, count: 32)
+    raw[0] = kFfMagic
+    raw[1] = kFfCalStatus
+    raw[2] = 5
+    raw[3] = 37
+    raw[4] = 0
+    raw[5] = 9
+    raw[6] = 60
+    raw[7] = 1
+    writeInt32LE(&raw, 8, 8000)
+    writeInt32LE(&raw, 12, 8512)
+    writeInt32LE(&raw, 16, 0)
+    writeInt32LE(&raw, 20, 8000)
+    writeUInt16LE(&raw, 24, 123)
+    writeUInt16LE(&raw, 26, 16)
+    raw[28] = 0x78; raw[29] = 0x56; raw[30] = 0x34; raw[31] = 0x12
+    let c = CalStatus.decode(raw)
+    XCTAssertEqual(c?.state, 5)
+    XCTAssertEqual(c?.sequence, 37)
+    XCTAssertEqual(c?.runId, 9)
+    XCTAssertEqual(c?.pos, 8000)
+    XCTAssertEqual(c?.travel, 8512)
+    XCTAssertEqual(c?.safeMax, 8000)
+    XCTAssertEqual(c?.sg, 123)
+    XCTAssertEqual(c?.microsteps, 16)
+    XCTAssertEqual(c?.elapsedMs, 0x12345678)
+    XCTAssertNil(CalStatus.decode(Array(raw.dropLast())))
+    XCTAssertNil(CalStatus.decode(raw + [0]))
+    raw[7] = 2
+    XCTAssertNil(CalStatus.decode(raw))
+  }
   func testPacketRoundtripMatches12ByteLayout() {
     let raw = FfPacket(cmd: kFfSetPos, sequence: 42, a: 1234, b: -5).encode()
     XCTAssertEqual(raw.count, 12)

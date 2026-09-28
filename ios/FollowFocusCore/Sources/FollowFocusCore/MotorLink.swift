@@ -26,6 +26,7 @@ public final class MotorLink {
   public var onStatus: ((MotorStatus) -> Void)?
   public var onStatusV2: ((MotorStatusV2) -> Void)?
   public var onTmc: ((TmcDump) -> Void)?
+  public var onCalStatus: ((CalStatus) -> Void)?
   public var onSent: ((UInt8) -> Void)?
   public var onSocketError: ((Error) -> Void)?
 
@@ -80,25 +81,35 @@ public final class MotorLink {
   public func setPos(_ steps: Int32) { send(FfPacket(cmd: kFfSetPos, a: steps)) }
   public func home() { send(FfPacket(cmd: kFfHome)) }
   public func jog(_ delta: Int32) { send(FfPacket(cmd: kFfJog, a: delta)) }
-  public func stop() { send(FfPacket(cmd: kFfStop)) }
-  public func enable(_ on: Bool) { send(FfPacket(cmd: kFfEnable, a: on ? 1 : 0)) }
+  @discardableResult public func stop() -> UInt8 { send(FfPacket(cmd: kFfStop)) }
+  @discardableResult public func enable(_ on: Bool) -> UInt8 { send(FfPacket(cmd: kFfEnable, a: on ? 1 : 0)) }
   public func setLimits(_ min: Int32, _ max: Int32) {
     send(FfPacket(cmd: kFfSetLimits, a: min, b: max))
   }
   public func setSpeed(_ hz: Int32, _ accel: Int32) {
     send(FfPacket(cmd: kFfSetSpeed, a: hz, b: accel))
   }
-  public func query() { send(FfPacket(cmd: kFfQuery)) }
+  @discardableResult public func query() -> UInt8 { send(FfPacket(cmd: kFfQuery)) }
   public func queryTmc() { send(FfPacket(cmd: kFfTmcQuery)) }
   public func setTmc(_ key: Int32, _ value: Int32) {
     send(FfPacket(cmd: kFfTmcSet, a: key, b: value))
   }
+  public func calStart(runId: UInt8, threshold: Int32, maxSteps: Int32) {
+    send(FfPacket(cmd: kFfCalStart, sequence: runId, a: threshold, b: maxSteps),
+      sequence: runId)
+  }
+  @discardableResult public func calQuery(runId: UInt8) -> UInt8 {
+    send(FfPacket(cmd: kFfCalQuery, a: Int32(runId)))
+  }
+  @discardableResult public func calCancel() -> UInt8 {
+    send(FfPacket(cmd: kFfCalCancel))
+  }
 
   // MARK: - 内部
 
-  private func send(_ p: FfPacket) {
-    guard let target = host, let sock else { return }  // 还没选设备，静默丢弃
-    let seq = ffNextSequence(after: nextSequence)
+  @discardableResult private func send(_ p: FfPacket, sequence: UInt8? = nil) -> UInt8 {
+    guard let target = host, let sock else { return 0 }
+    let seq = sequence ?? ffNextSequence(after: nextSequence)
     nextSequence = seq
     do {
       try sock.send(
@@ -110,6 +121,7 @@ public final class MotorLink {
     } catch {
       onSocketError?(error)
     }
+    return seq
   }
 
   private func handle(_ bytes: [UInt8]) {
@@ -119,6 +131,8 @@ public final class MotorLink {
       return
     }
     switch bytes[1] {
+    case kFfCalStatus:
+      if let c = CalStatus.decode(bytes) { onCalStatus?(c) }
     case kFfTmcDump:
       if let t = TmcDump.decode(bytes) { onTmc?(t) }
     case kFfStatusV2:

@@ -35,6 +35,14 @@ private final class FakeFirmware {
   private let _microsteps = Locked(16)
   private let _commands = Locked<[[UInt8]]>([])
   private let _target = Locked<Int32>(0)
+  private let _calRun = Locked<UInt8>(0)
+  private let _calStage = Locked<UInt8>(0)
+  var dropFirstStartReply = false
+  var rejectStart = false
+  var dropCalQueries = false
+  var invalidateCalResult = false
+  var wrongRunReplies = 0
+  var dropStatusReplies = false
 
   /// 关掉时，即使收到 ENABLE 也继续回 enabled=0，用来模拟板子刚重启的固件状态。
   var acksEnable = true
@@ -88,6 +96,38 @@ private final class FakeFirmware {
     guard let p = FfPacket.decode(bytes) else { return }
     _commands.mutate { $0.append(bytes) }
     switch p.cmd {
+    case kFfCalStart:
+      if rejectStart {
+        reply(calStatus(sequence: p.sequence, error: 2), to: host, port: port)
+        return
+      }
+      if _calRun.current != p.sequence {
+        _calRun.set(p.sequence)
+        _calStage.set(1)
+      }
+      if dropFirstStartReply {
+        dropFirstStartReply = false
+        return
+      }
+      reply(calStatus(sequence: p.sequence), to: host, port: port)
+      return
+    case kFfCalQuery:
+      if dropCalQueries { return }
+      if p.a == Int32(_calRun.current) && p.a != 0 {
+        _calStage.set(min(_calStage.current + 1, 5))
+        if _calStage.current == 5 { _pos.set(8000); _target.set(8000) }
+      }
+      var response = calStatus(sequence: p.sequence)
+      if wrongRunReplies > 0 && p.a != 0 {
+        wrongRunReplies -= 1
+        response[5] = _calRun.current &+ 1
+      }
+      reply(response, to: host, port: port)
+      return
+    case kFfCalCancel:
+      if _calStage.current < 5 { _calStage.set(6); _enabled.set(false) }
+      reply(calStatus(sequence: p.sequence), to: host, port: port)
+      return
     case kFfEnable:
       if acksEnable { _enabled.set(p.a != 0) }
     case kFfJog:
@@ -106,6 +146,7 @@ private final class FakeFirmware {
     default:
       break
     }
+    if p.cmd == kFfQuery && dropStatusReplies { return }
     reply(status(sequence: p.sequence), to: host, port: port)
   }
 
@@ -122,6 +163,21 @@ private final class FakeFirmware {
       a: _pos.current,
       b: _target.current
     ).encode()
+  }
+
+  private func calStatus(sequence: UInt8, error: UInt8 = 0) -> [UInt8] {
+    var b = [UInt8](repeating: 0, count: 32)
+    b[0] = kFfMagic; b[1] = kFfCalStatus
+    b[2] = _calStage.current; b[3] = sequence
+    b[4] = error; b[5] = _calRun.current
+    b[6] = 60; b[7] = _calStage.current == 5 && !invalidateCalResult ? 1 : 0
+    writeInt32LE(&b, 8, _pos.current)
+    writeInt32LE(&b, 12, 8512)
+    writeInt32LE(&b, 16, 0)
+    writeInt32LE(&b, 20, 8000)
+    writeUInt16LE(&b, 24, 100)
+    writeUInt16LE(&b, 26, UInt16(_microsteps.current))
+    return b
   }
 
   private func tmcDump() -> [UInt8] {
@@ -179,6 +235,118 @@ private final class Harness {
 }
 
 final class SessionTests: XCTestCase {
+  private func prepareAuto(_ h: Harness) {
+    h.session.selectDevice(FfDiscovery(deviceId: "FF-TEST01", mac: "", kind: 1,
+      protocolVersion: 1, udpPort: Int(h.firmware.port), fwMajor: 1,
+      fwMinor: 1, fwPatch: 0, host: "127.0.0.1"))
+    h.session.createLens(name: "自动测试", params: "")
+    h.session.connect()
+    XCTAssertTrue(waitUntil { h.latest.current?.calSupported == true &&
+      h.latest.current?.tmc?.rmsMa == 800 })
+  }
+
+  func testAutoCalibrationOldFirmwareIsGated() throws {
+    let h = try Harness(); defer { h.stop() }
+    h.session.createLens(name: "旧板子", params: "")
+    h.session.connect()
+    XCTAssertTrue(waitUntil { h.latest.current?.connected == true })
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    pump(0.2)
+    XCTAssertEqual(h.firmware.count(kFfCalStart), 0)
+  }
+
+  func testAutoCalibrationCompletesInBothDirectionsWithoutHomeOrLimits() throws {
+    for direction in [1, -1] {
+      let h = try Harness(); defer { h.stop() }
+      prepareAuto(h)
+      let limitsBefore = h.firmware.count(kFfSetLimits)
+      h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+      XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+      XCTAssertEqual(h.latest.current?.calSafeSpan, 8000)
+      XCTAssertEqual(h.firmware.count(kFfHome), 0)
+      XCTAssertEqual(h.firmware.count(kFfSetLimits), limitsBefore)
+      pump(2.3)
+      XCTAssertTrue(h.latest.current?.calDirectionPending == true)
+      h.session.setDir(direction)
+      XCTAssertTrue(waitUntil { h.latest.current?.calDirectionPending == false })
+      h.session.startFollow()
+      XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
+      XCTAssertEqual(h.latest.current?.nearSteps, direction > 0 ? 0 : 8000)
+      XCTAssertEqual(h.latest.current?.limitLo, 0)
+      XCTAssertEqual(h.latest.current?.limitHi, 8000)
+      XCTAssertEqual(h.firmware.count(kFfSetLimits), limitsBefore)
+      XCTAssertEqual(h.store.lenses.first?.autoTravel, 8512)
+      XCTAssertEqual(h.store.lenses.first?.autoRmsMa, 800)
+    }
+  }
+
+  func testDroppedStartReplyUsesRunQueryAndCancelReleases() throws {
+    let h = try Harness(); defer { h.stop() }
+    h.firmware.dropFirstStartReply = true
+    prepareAuto(h)
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+    XCTAssertGreaterThan(h.firmware.count(kFfCalQuery), 1)
+    h.session.cancelAutoCalibration()
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "cancelled" })
+    XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
+    XCTAssertEqual(h.latest.current?.phase, .stroke)
+  }
+
+  func testRejectedStartUsesRequestSequenceEvenWithOldRun() throws {
+    let h = try Harness(); defer { h.stop() }
+    h.firmware.rejectStart = true
+    prepareAuto(h)
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "failed" })
+    XCTAssertEqual(h.latest.current?.calError, 2)
+    XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
+  }
+
+  func testWrongRunIsIgnoredAndCancellationStopsRunningScan() throws {
+    let h = try Harness(); defer { h.stop() }
+    h.firmware.wrongRunReplies = 2
+    prepareAuto(h)
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "seek_negative" })
+    h.session.cancelAutoCalibration()
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "cancelled" })
+    XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
+    XCTAssertEqual(h.firmware.count(kFfSetPos), 0)
+  }
+
+  func testResultLossAndHomeInvalidatePosition() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+    h.firmware.invalidateCalResult = true
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "failed" })
+    XCTAssertEqual(h.latest.current?.phase, .stroke)
+    h.firmware.invalidateCalResult = false
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+    h.session.setDir(1)
+    XCTAssertTrue(waitUntil { h.latest.current?.calDirectionPending == false })
+    h.session.homePressed()
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .stroke })
+    h.session.recalibrateStroke()
+    XCTAssertTrue(waitUntil { h.latest.current?.strokeSteps == 0 })
+    XCTAssertNil(h.store.lenses.first?.autoTravel)
+  }
+
+  func testLostStatusAfterFollowReleasesOldCoordinates() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+    h.session.setDir(-1)
+    h.session.startFollow()
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
+    h.firmware.dropStatusReplies = true
+    XCTAssertTrue(waitUntil(3) { h.latest.current?.phase == .stroke })
+    XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
+  }
   /// 等条件成立。注意必须**泵主队列**：会话的 onState 派发到 main，
   /// 用 usleep 等的话主队列永远不排空，快照永远是 nil。
   private func waitUntil(

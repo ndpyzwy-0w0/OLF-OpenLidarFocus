@@ -20,10 +20,40 @@ public let kFfTmcQuery: UInt8 = 0x08
 public let kFfTmcSet: UInt8 = 0x09
 public let kFfHome: UInt8 = 0x0A
 public let kFfDiscover: UInt8 = 0x0B
+public let kFfCalStart: UInt8 = 0x0C
+public let kFfCalQuery: UInt8 = 0x0D
+public let kFfCalCancel: UInt8 = 0x0E
 public let kFfStatus: UInt8 = 0x81
 public let kFfTmcDump: UInt8 = 0x82
 public let kFfStatusV2: UInt8 = 0x83
 public let kFfDiscoverReply: UInt8 = 0x84
+public let kFfCalStatus: UInt8 = 0x85
+
+public struct CalStatus: Equatable {
+  public let state: UInt8
+  public let sequence: UInt8
+  public let error: UInt8
+  public let runId: UInt8
+  public let threshold: UInt8
+  public let valid: Bool
+  public let pos: Int32
+  public let travel: Int32
+  public let safeMin: Int32
+  public let safeMax: Int32
+  public let sg: UInt16
+  public let microsteps: UInt16
+  public let elapsedMs: UInt32
+
+  public static func decode(_ b: [UInt8]) -> CalStatus? {
+    guard b.count == 32, b[0] == kFfMagic, b[1] == kFfCalStatus,
+      b[2] <= 7, b[4] <= 10, b[7] <= 1 else { return nil }
+    return CalStatus(state: b[2], sequence: b[3], error: b[4], runId: b[5],
+      threshold: b[6], valid: b[7] == 1, pos: readInt32LE(b, 8),
+      travel: readInt32LE(b, 12), safeMin: readInt32LE(b, 16),
+      safeMax: readInt32LE(b, 20), sg: readUInt16LE(b, 24),
+      microsteps: readUInt16LE(b, 26), elapsedMs: readUInt32LE(b, 28))
+  }
+}
 
 /// 板子 SoftAP 的固定地址。只在**发现**时当候选目标；控制目标一律来自回包源地址。
 public let kFfSoftApHost = "192.168.4.1"

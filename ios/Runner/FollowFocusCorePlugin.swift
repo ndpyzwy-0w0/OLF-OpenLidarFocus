@@ -1,5 +1,6 @@
 import Flutter
 import FollowFocusCore
+import UIKit
 
 /// `ff.core` 的桥：把 [FollowFocusSession] 暴露给 UI 层。
 ///
@@ -28,7 +29,13 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     LidarEngine.shared.onDistance = { meters in session.ingest(distanceMeters: meters) }
 
     session.start()
+    NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
+      name: UIApplication.didEnterBackgroundNotification, object: nil)
   }
+
+  deinit { NotificationCenter.default.removeObserver(self) }
+
+  @objc private func didEnterBackground() { session.cancelAutoCalibration() }
 
   static func register(with registrar: FlutterPluginRegistrar) {
     // 存档在这里加载：插件自己持有功能层，UI 侧不管存档路径。
@@ -64,6 +71,7 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         result(FlutterError(code: "bad_args", message: "selectDevice 缺 host/port", details: nil))
         return
       }
+      let version = (string(a, "firmware") ?? "").split(separator: ".").compactMap { Int($0) }
       session.selectDevice(
         FfDiscovery(
           deviceId: string(a, "device_id") ?? "",
@@ -71,9 +79,9 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           kind: 1,
           protocolVersion: 1,
           udpPort: port,
-          fwMajor: 0,
-          fwMinor: 0,
-          fwPatch: 0,
+          fwMajor: version.count > 0 ? version[0] : 0,
+          fwMinor: version.count > 1 ? version[1] : 0,
+          fwPatch: version.count > 2 ? version[2] : 0,
           host: host
         )
       )
@@ -149,6 +157,16 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       result(nil)
     case "recalibrateStroke":
       session.recalibrateStroke()
+      result(nil)
+    case "startAutoCalibration":
+      session.startAutoCalibration(threshold: int(a, "threshold") ?? 60,
+        maxRevs: double(a, "maxRevs") ?? 2)
+      result(nil)
+    case "cancelAutoCalibration":
+      session.cancelAutoCalibration()
+      result(nil)
+    case "leaveLens":
+      session.leaveLens()
       result(nil)
 
     // ② 单侧对齐

@@ -124,7 +124,7 @@ class _LensPageState extends State<LensPage> {
         children: [
           const Text(
             '每个镜头单独保存行程标定、变远方向和距离标定表。'
-            '新镜头第一次进入要先手动标定行程；标定过的每次进入都要先做单侧对齐。',
+            '新镜头第一次进入需标定行程，可选自动识别或手动记录两端。每次重新连接后需重新定位。',
           ),
           const Divider(height: 24),
           if (_lenses.isEmpty)

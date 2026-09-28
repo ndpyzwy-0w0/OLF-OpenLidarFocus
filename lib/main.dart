@@ -109,6 +109,7 @@ class _FollowPageState extends State<FollowPage> {
 
   @override
   void dispose() {
+    widget.core.leaveLens();
     _sub?.cancel();
     _lidar.dispose();
     _revsText.dispose();
@@ -164,7 +165,7 @@ class _FollowPageState extends State<FollowPage> {
         actions: [
           IconButton(
             tooltip: '设备',
-            onPressed: _openDevicePage,
+            onPressed: _calRunning || _s.calDirectionPending ? null : _openDevicePage,
             icon: Icon(_s.deviceId == null ? Icons.router_outlined : Icons.router),
           ),
           Padding(
@@ -230,13 +231,13 @@ class _FollowPageState extends State<FollowPage> {
                     runSpacing: 8,
                     children: [
                       FilledButton(
-                        onPressed: () => widget.core.connect(),
+                        onPressed: _calRunning || _s.calDirectionPending ? null : () => widget.core.connect(),
                         child: Text(_s.connected ? '重连' : '连接电机'),
                       ),
                       FilterChip(
                         label: const Text('使能'),
                         selected: _s.enabled,
-                        onSelected: (v) => widget.core.enable(v),
+                        onSelected: _calRunning || _s.calDirectionPending ? null : (v) => widget.core.enable(v),
                       ),
                       FilterChip(
                         // 自动跟焦要先对齐、还要有两点距离标定，否则没有可信的目标。
@@ -248,6 +249,7 @@ class _FollowPageState extends State<FollowPage> {
                         ),
                         selected: _s.auto && _s.phase == SetupPhase.follow,
                         onSelected:
+                            !_calRunning && !_s.calDirectionPending &&
                             _s.lutReady && _s.phase == SetupPhase.follow
                             ? (v) => widget.core.setAuto(v)
                             : null,
@@ -266,7 +268,7 @@ class _FollowPageState extends State<FollowPage> {
                         child: const Text('停'),
                       ),
                       OutlinedButton(
-                        onPressed: _s.connected && !_s.moving
+                        onPressed: _s.connected && !_s.moving && !_calRunning && !_s.calDirectionPending
                             ? () => widget.core.homePressed()
                             : null,
                         child: Text(_s.positionTrusted ? '已校零' : '设当前位置为原点'),
@@ -394,7 +396,8 @@ class _FollowPageState extends State<FollowPage> {
                   ],
                   const SizedBox(height: 8),
                   _diagnosticPanel(),
-                  _tmcPanel(),
+                  AbsorbPointer(absorbing: _calRunning || _s.calDirectionPending,
+                    child: _tmcPanel()),
                 ],
               ),
             ),
@@ -504,6 +507,7 @@ class _FollowPageState extends State<FollowPage> {
   }
 
   Widget _setupPanel() {
+    if (_s.calDirectionPending || _calRunning) return _autoCalibrationPanel();
     switch (_s.phase) {
       case SetupPhase.stroke:
         return _strokePanel();
@@ -514,6 +518,90 @@ class _FollowPageState extends State<FollowPage> {
     }
   }
 
+  bool get _calRunning => const {
+    'preparing', 'starting', 'seek_negative', 'backoff_negative',
+    'seek_positive', 'backoff_positive',
+  }.contains(_s.calStage);
+
+  Future<void> _startAutoCalibration() async {
+    final threshold = TextEditingController(text: '60');
+    final maxRevs = TextEditingController(text: '2');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('自动识别行程'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('仅适用于有机械挡块的对焦环。请确认齿轮已啮合、两端没有障碍物；识别过程中电机会自行转动。'),
+            TextField(controller: threshold, keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: '堵转阈值 SGTHRS（1–255，默认 60）')),
+            TextField(controller: maxRevs, keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(labelText: '每段最大电机圈数（0.5–10，默认 2）')),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('返回')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确认开始转动')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final t = int.tryParse(threshold.text.trim());
+    final r = double.tryParse(maxRevs.text.trim());
+    if (t == null || t < 1 || t > 255 || r == null || r < 0.5 || r > 10) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请输入有效的阈值和电机圈数')));
+      }
+      return;
+    }
+    await widget.core.startAutoCalibration(threshold: t, maxRevs: r);
+  }
+
+  Widget _autoCalibrationEntry() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      if (_s.calSupported)
+        OutlinedButton.icon(
+          onPressed: _s.connected ? _startAutoCalibration : null,
+          icon: const Icon(Icons.auto_fix_high),
+          label: const Text('自动识别行程'),
+        )
+      else
+        const Text('此固件不支持自动识别行程，可继续手动标定。'),
+      if (_s.calStage == 'failed' || _s.calStage == 'cancelled')
+        Text(_s.msg, style: const TextStyle(color: Colors.orangeAccent)),
+    ],
+  );
+
+  Widget _autoCalibrationPanel() {
+    const labels = {
+      'preparing': '正在检查电机', 'starting': '正在启动标定',
+      'seek_negative': '寻找第一端', 'backoff_negative': '从第一端退回',
+      'seek_positive': '寻找第二端', 'backoff_positive': '从第二端退回',
+    };
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Divider(height: 16),
+      const Text('自动识别行程', style: TextStyle(fontWeight: FontWeight.bold)),
+      if (_s.calDirectionPending) ...[
+        Text('安全行程 ${_s.calSafeSpan} 步；估计机械行程 ${_s.calTravel} 步。'),
+        const Text('请观察对焦环：正步数移动时，对焦距离会怎样变化？'),
+        Wrap(spacing: 8, children: [
+          FilledButton(onPressed: () => widget.core.setDir(1),
+            child: const Text('正步数变远')),
+          FilledButton(onPressed: () => widget.core.setDir(-1),
+            child: const Text('正步数变近')),
+        ]),
+        const Text('确认方向后仍需重新记录距离标定点。'),
+      ] else ...[
+        Text(labels[_s.calStage] ?? '正在标定'),
+        const LinearProgressIndicator(),
+      ],
+      TextButton(onPressed: () => widget.core.cancelAutoCalibration(),
+        child: const Text('取消并释放电机')),
+    ]);
+  }
+
   /// ① 新镜头：手动量出行程（两个端点之间的距离）。
   Widget _strokePanel() {
     final a = _s.strokeA;
@@ -522,6 +610,11 @@ class _FollowPageState extends State<FollowPage> {
       children: [
         const Divider(height: 16),
         const Text('① 标定行程', style: TextStyle(fontWeight: FontWeight.bold)),
+        _autoCalibrationEntry(),
+        if (_s.strokeSteps > 0) ...[
+          const Text('上次行程的坐标已失效。可重新自动识别，或长按下面入口清空旧行程并改用手动标定。'),
+          _recalibrateTile(),
+        ] else ...[
         const Text(
           '新镜头要先量出行程：把跟焦器转到对焦环的一端，记录 A；'
           '再转到另一端，记录 B。两点之间的距离就是行程，'
@@ -551,6 +644,7 @@ class _FollowPageState extends State<FollowPage> {
           const Text('先在上面“连接电机”，再用这里自由微调到行程两端。')
         else if (a != null)
           const Text('把跟焦器转到行程另一端，再点右边按钮。'),
+        ],
       ],
     );
   }
@@ -580,6 +674,7 @@ class _FollowPageState extends State<FollowPage> {
           '把当前位置认成“焦距最近点”，再选哪边是焦距变远的方向。'
           '这样只会在这段行程内转，不会拧反、也不会超行程。',
         ),
+        _autoCalibrationEntry(),
         if (near == null) ...[
           Text('当前 ${_s.pos} 步（${_s.posRevs.toStringAsFixed(2)} 圈）'),
           _jogControls(),
