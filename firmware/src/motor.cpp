@@ -50,6 +50,12 @@ static const uint32_t kMoveUpdateDelayMs = 50;
 
 static uint8_t tmcSlave = 0;
 static uint8_t tmcVer = 0;
+// 寄存器读的重试参数，理由见 `tmcReadReg`。
+static const int kTmcReadAttempts = 4;
+static const uint32_t kTmcReadWaitMs = 15;
+static const uint32_t kTmcReadRetryGapMs = 2;
+// 配置写入 + IFCNT 校验的整块重试次数（丢写和读计数失败都靠它兜）。
+static const int kTmcConfigAttempts = 3;
 static uint16_t tmcRmsMa = kRmsMa;
 static uint16_t tmcHoldMa = kHoldMa;
 static uint16_t tmcMsSet = kMicrosteps;
@@ -70,6 +76,11 @@ static uint32_t calStartedMs, calPhaseMs, calKeepaliveMs, calSampleMs;
 static int32_t calMaxTravel, calMargin, calSpeedSaved, calAccelSaved;
 static uint8_t calStealthSaved;
 static bool calSawFree;
+/// 本轮标定里有没有"堵转后没问到驱动状态"的情况（见 calibrationTick）。
+/// 有的话发布结果前会再补问一次；补问仍失败就放行，只在串口留痕。
+static bool calFaultCheckPending;
+/// 累计跳过的驱动状态检查次数，纯诊断（主机模拟会断言它）。
+static uint32_t calFaultChecksSkipped;
 static void calibrationTick();
 static void calibrationFinish(uint8_t state, uint8_t error);
 
@@ -172,6 +183,16 @@ static int tmcReadRaw(uint8_t slave, uint8_t reg, uint8_t *raw, int rawMax, uint
   return n;
 }
 
+/// 半双工读失败的累计次数，只用于串口诊断（协议里没有多余位可以带这个信息）。
+static uint32_t tmcReadFails = 0;
+
+/// 丢掉 RX 里的残留字节。上一次请求的回包晚到（超时窗口之外）时会留在 FIFO 里，
+/// 下一次读请求先收到的就是它 —— 虽然 `tmcFindReply` 会扫描偏移，但残留越长，
+/// CRC 撞上的概率越低。所以重试前一定先排空。
+static void tmcDrainRx() {
+  while (Serial2.available()) Serial2.read();
+}
+
 static bool tmcFindReply(const uint8_t *raw, int n, uint8_t reg, uint32_t *val) {
   for (int i = 0; i + 7 < n; i++) {
     if (raw[i] == 0x05 && raw[i + 1] == 0xFF && raw[i + 2] == reg &&
@@ -197,15 +218,27 @@ static void tmcWriteReg(uint8_t addr, uint32_t val) {
   delay(3);
 }
 
+/// 单次寄存器读。
+///
+/// 重试策略是现场调出来的（2026-09-29 真机：标定起手读 DRV_STATUS/IFCNT 大约
+/// 一半的尝试拿到 0xFFFFFFFF，于是整轮标定被判成 CAL_UART = 3）：
+/// - 每次失败后**排空 + 小延时**再发下一次，让晚到的回包先落地，不要污染下一轮；
+/// - 尝试次数 4、窗口 15 ms：Wi-Fi 中断抢占下 12 ms 有时不够，四次全丢才认输；
+/// - 只在**全部失败**时打印一次，避免在轮询里刷屏。
 static uint32_t tmcReadReg(uint8_t addr) {
-  // A single missed half-duplex reply is common while Wi-Fi and step pulses
-  // are active. Retry the request before reporting a disconnected driver.
-  for (int attempt = 0; attempt < 2; ++attempt) {
+  for (int attempt = 0; attempt < kTmcReadAttempts; ++attempt) {
+    if (attempt) {
+      tmcDrainRx();
+      delay(kTmcReadRetryGapMs);
+    }
     uint8_t raw[24];
-    int n = tmcReadRaw(tmcSlave, addr, raw, 24, 12);
+    int n = tmcReadRaw(tmcSlave, addr, raw, 24, kTmcReadWaitMs);
     uint32_t val = 0xFFFFFFFF;
     if (tmcFindReply(raw, n, addr, &val)) return val;
+    ++tmcReadFails;
   }
+  Serial.printf("tmc read fail addr=0x%02X (total=%lu)\n", addr,
+                (unsigned long)tmcReadFails);
   return 0xFFFFFFFF;
 }
 
@@ -688,6 +721,7 @@ bool motorMoving() {
 bool motorUartOk() { return uartOk; }
 bool motorPositionTrusted() { return positionTrusted; }
 const char *motorUartHint() { return uartHint; }
+uint32_t motorTmcReadFails() { return tmcReadFails; }
 MotorCommandResult motorCommandResult() { return commandResult; }
 void motorTmcSnap(TmcSnap *o) {
   memset(o, 0, sizeof(*o));
@@ -702,9 +736,12 @@ void motorTmcSnap(TmcSnap *o) {
   o->irun = tmcIrunCs;
   o->version = tmcVer;
   o->csActual = tmcCs;
+  o->drvStatusValid = tmcDrv != 0xFFFFFFFF;
   o->drvStatus = tmcDrv == 0xFFFFFFFF ? 0 : tmcDrv;
   o->sg = tmcSg;
   o->tstep = tmcTstep;
+  o->diagEdges = diagEdges;
+  o->diagLevel = digitalRead(PIN_TMC_DIAG) == HIGH;
   if (tmcDrv == 0xFFFFFFFF) return;
   if (tmcDrv & 2) o->flags |= TMC_F_OT;
   if (tmcDrv & 1) o->flags |= TMC_F_OTPW;
@@ -879,27 +916,41 @@ uint8_t motorCalibrationStart(uint8_t runId, int32_t threshold, int32_t maxTrave
   calibration.microsteps = tmcMsSet;
   calMaxTravel = maxTravel;
   calMargin = 16 * tmcMsSet;
+  calFaultCheckPending = false;
   calStartedMs = calKeepaliveMs = millis();
   positionTrusted = false;
   communicationWatchdogArmed = false;
   limitHit = false;
   wake();
   calibrationRebase(0);
-  tmcStealthSet = 1;
-  tmcApply();
-  tmcWriteReg(0x13, 0); // TPWMTHRS: no switch to SpreadCycle
-  tmcWriteReg(0x14, 0xFFFFF);
-  tmcWriteReg(0x40, threshold);
-  tmcWriteReg(0x42, 0); // COOLCONF: constant current, no CoolStep
-  // SGTHRS/TCOOLTHRS/TPWMTHRS/COOLCONF are write-only. IFCNT confirms all
-  // nine writes (five in tmcApply plus four here), including counter wrap.
-  const uint32_t gc = tmcReadReg(0x00);
-  const uint32_t afterWrites = tmcReadReg(0x02);
-  if (gc == 0xFFFFFFFF || (gc & 4) || afterWrites == 0xFFFFFFFF ||
-      (uint8_t)(afterWrites - beforeWrites) != 9) {
-    Serial.printf("cal config: GCONF=0x%08lX IFCNT=%lu->%lu expected +9\n",
-                  (unsigned long)gc, (unsigned long)beforeWrites,
-                  (unsigned long)afterWrites);
+  // SGTHRS/TCOOLTHRS/TPWMTHRS/COOLCONF 是**只写**寄存器，读不回来，只能靠 IFCNT
+  // 的增量确认（九次写：tmcApply 五次 + 这里四次）。半双工丢包会同时影响写入和
+  // 计数读取，所以整块重来，而不是一次不符就判 CAL_UART（真机现场就是这么被打回
+  // 来的：GCONF 读到了、IFCNT 读回 0xFFFFFFFF）。
+  bool configOk = false;
+  uint32_t gc = 0xFFFFFFFF, afterWrites = 0xFFFFFFFF;
+  for (int attempt = 0; attempt < kTmcConfigAttempts && !configOk; ++attempt) {
+    if (attempt) {
+      tmcDrainRx();
+      delay(kTmcReadRetryGapMs);
+    }
+    tmcStealthSet = 1;
+    tmcApply();
+    tmcWriteReg(0x13, 0); // TPWMTHRS: no switch to SpreadCycle
+    tmcWriteReg(0x14, 0xFFFFF);
+    tmcWriteReg(0x40, threshold);
+    tmcWriteReg(0x42, 0); // COOLCONF: constant current, no CoolStep
+    gc = tmcReadReg(0x00);
+    afterWrites = tmcReadReg(0x02);
+    configOk = gc != 0xFFFFFFFF && !(gc & 4) && afterWrites != 0xFFFFFFFF &&
+      (uint8_t)(afterWrites - beforeWrites) == 9;
+    if (!configOk) {
+      Serial.printf("cal config try=%d: GCONF=0x%08lX IFCNT=%lu->%lu expected +9\n",
+                    attempt + 1, (unsigned long)gc, (unsigned long)beforeWrites,
+                    (unsigned long)afterWrites);
+    }
+  }
+  if (!configOk) {
     calibrationFinish(CAL_FAILED, CAL_UART);
     return CAL_OK;
   }
@@ -962,8 +1013,15 @@ static void calibrationTick() {
     const uint32_t drv = tmcReadReg(0x6F);
     Serial.printf("cal DIAG run=%u phase=%u pos=%ld drv=0x%08lX\n",
                   calibration.runId, calibration.state, (long)pos, (unsigned long)drv);
-    if (drv == 0xFFFFFFFF) { calibrationFinish(CAL_FAILED, CAL_UART); return; }
-    if (drv & 0x3F) { calibrationFinish(CAL_FAILED, CAL_DRIVER); return; }
+    // 读不到**不等于**不是堵转：DIAG 已经响了，UART 只是"顺便问一句有没有故障"。
+    // 真机 2026-09-29：6 次标定里 4 次就死在这一读上（停下瞬间半双工丢回包），
+    // 于是明确是端点的一次识别被判成 CAL_UART=3。现在改成记账后继续，完成前再补问。
+    if (drv == 0xFFFFFFFF) {
+      calFaultCheckPending = true;
+      ++calFaultChecksSkipped;
+    } else if (drv & 0x3F) {
+      calibrationFinish(CAL_FAILED, CAL_DRIVER); return;
+    }
     if (calibration.state == CAL_BACKOFF_NEGATIVE ||
         calibration.state == CAL_BACKOFF_POSITIVE ||
         (calibration.state == CAL_SEEK_POSITIVE &&
@@ -993,6 +1051,16 @@ static void calibrationTick() {
   if (calibration.state == CAL_BACKOFF_POSITIVE) {
     if (arrived) {
       if (!calSawFree) { calibrationFinish(CAL_FAILED, CAL_SHORT_TRAVEL); return; }
+      // 发布结果前补一次驱动状态：这时电机已停、总线空闲，是整轮里最问得通的时刻。
+      // 问到故障就作废（不发布可能来自故障的假行程）；仍然问不到才放行，
+      // 并在串口留下 drv_valid=0 的痕迹，由 App 侧人工确认兜底。
+      if (calFaultCheckPending) {
+        const uint32_t drv = tmcReadReg(0x6F);
+        Serial.printf("cal final drv check drv=0x%08lX\n", (unsigned long)drv);
+        if (drv != 0xFFFFFFFF && (drv & 0x3F)) {
+          calibrationFinish(CAL_FAILED, CAL_DRIVER); return;
+        }
+      }
       const int32_t safeSpan = calibration.travel - 2 * calMargin;
       calibrationRebase(safeSpan);
       minLim = 0; maxLim = safeSpan; limExplicit = true;

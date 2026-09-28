@@ -57,6 +57,9 @@ enum TmcFlag : uint8_t {
 struct TmcSnap {
   bool uartOk;
   bool stealth;
+  /// 最近一次 DRV_STATUS 读成功了吗。**只对串口诊断有意义**：协议里的
+  /// `drv_status` 读失败时按 0 发，和“真读到 0”在线上分不开（见 §14）。
+  bool drvStatusValid;
   uint16_t rmsMa;
   uint16_t microsteps;
   uint8_t toff;
@@ -68,10 +71,18 @@ struct TmcSnap {
   uint32_t drvStatus;
   uint16_t sg;
   uint16_t tstep;
+  /// DIAG（GPIO11）的累计上升沿数与当前电平，**只用于串口诊断**。
+  ///
+  /// 用途：堵转判定依赖这根线。静止时边沿数若还在涨 = 纯噪声；只有电机运动时涨 =
+  /// 接错脚/与步进线串扰；两边都不涨而标定仍一动就停 = 芯片真的在报（阈值问题）。
+  uint32_t diagEdges;
+  bool diagLevel;
 };
 
 void motorTmcSnap(TmcSnap *o);
 void motorTmcSet(int32_t key, int32_t val);
+/// 寄存器读的累计失败次数（串口诊断用，协议里没有多余位能带它）。
+uint32_t motorTmcReadFails();
 
 enum MotorCommandResult : uint8_t {
   MOTOR_RESULT_IDLE = 0,

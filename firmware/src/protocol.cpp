@@ -114,9 +114,11 @@ static void protocolSendTmc(const IPAddress &ip, uint16_t port) {
   udp->endPacket();
   Serial.printf(
       "tmc uart=%u stealth=%u rms=%u ms=%u toff=%u ihold=%u irun=%u ver=%u cs=%u "
-      "sg=%u tstep=%u drv=0x%08lx flags=0x%02x\n",
+      "sg=%u tstep=%u drv=0x%08lx flags=0x%02x drv_valid=%u readfail=%lu diag=%lu/%u\n",
       d.uart_ok, d.stealth, d.rms_ma, d.microsteps, d.toff, d.ihold, d.irun,
-      d.version, d.cs_actual, d.sg, d.tstep, (unsigned long)d.drv_status, d.drv_flags);
+      d.version, d.cs_actual, d.sg, d.tstep, (unsigned long)d.drv_status, d.drv_flags,
+      s.drvStatusValid ? 1 : 0, (unsigned long)motorTmcReadFails(),
+      (unsigned long)s.diagEdges, s.diagLevel ? 1 : 0);
 }
 
 static void sendCalibration(const IPAddress &ip, uint16_t port, uint8_t sequence,
