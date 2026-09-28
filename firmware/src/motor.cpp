@@ -68,7 +68,7 @@ static uint16_t tmcTstep = 0;
 static CalibrationSnapshot calibration{};
 static uint32_t calStartedMs, calPhaseMs, calKeepaliveMs, calSampleMs;
 static int32_t calMaxTravel, calMargin, calSpeedSaved, calAccelSaved;
-static uint8_t calStealthSaved, calLowCount;
+static uint8_t calStealthSaved;
 static bool calSawFree;
 static void calibrationTick();
 static void calibrationFinish(uint8_t state, uint8_t error);
@@ -138,7 +138,6 @@ static void tmcTxWait() {
 }
 
 static void tmcUartOpen(int rx, int tx, uint32_t baud) {
-  pinMode(PIN_TMC_TX, INPUT);
   pinMode(PIN_TMC_RX, INPUT);
   Serial2.end();
   delay(5);
@@ -199,11 +198,15 @@ static void tmcWriteReg(uint8_t addr, uint32_t val) {
 }
 
 static uint32_t tmcReadReg(uint8_t addr) {
-  uint8_t raw[24];
-  int n = tmcReadRaw(tmcSlave, addr, raw, 24, 12);
-  uint32_t val = 0xFFFFFFFF;
-  tmcFindReply(raw, n, addr, &val);
-  return val;
+  // A single missed half-duplex reply is common while Wi-Fi and step pulses
+  // are active. Retry the request before reporting a disconnected driver.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    uint8_t raw[24];
+    int n = tmcReadRaw(tmcSlave, addr, raw, 24, 12);
+    uint32_t val = 0xFFFFFFFF;
+    if (tmcFindReply(raw, n, addr, &val)) return val;
+  }
+  return 0xFFFFFFFF;
 }
 
 static uint8_t maToCs(uint16_t ma) {
@@ -318,14 +321,11 @@ static bool tmcTryPair(int rx, int tx, uint32_t baud) {
 }
 
 static bool tmcBringUp() {
-  // GPIO12 is wired to the module's RX pad (verified); talk on that pin like the
-  // working IO17 setup in esp32s3-tb6600-stepper. GPIO11 stays Hi-Z.
-  Serial.println("tmc: half-duplex on GPIO12 -> module RX pad, GPIO11 unused");
+  // GPIO12 is the verified single-wire UART. GPIO11 is reserved for DIAG;
+  // never probe it as a UART output while it is connected to the driver.
+  Serial.println("tmc: half-duplex UART on GPIO12, DIAG input on GPIO11");
   if (tmcTryPair(PIN_TMC_RX, PIN_TMC_RX, 115200)) return true;
-  if (tmcTryPair(PIN_TMC_TX, PIN_TMC_TX, 115200)) return true;
-  if (tmcTryPair(PIN_TMC_RX, PIN_TMC_TX, 19200)) return true;
   Serial2.end();
-  pinMode(PIN_TMC_TX, INPUT);
   pinMode(PIN_TMC_RX, INPUT);
   snprintf(uartHint, sizeof(uartHint), "chk RX");
   Serial.println("tmc uart fail: GPIO12 to module RX, VDD=3.3V, VM on");
@@ -352,11 +352,27 @@ static volatile uint32_t phase = 0;
 static volatile uint32_t calServiceTicks = 0;
 static volatile bool calGuardArmed = false;
 static volatile bool calGuardExpired = false;
+static volatile uint32_t diagEdges = 0;
+static volatile bool calDiagArmed = false;
+static volatile bool calDiagTriggered = false;
+static uint32_t calDiagSeen = 0;
+static uint32_t calLastDiagMs = 0;
+static int32_t calPhaseStartPos = 0;
 static int8_t outputSign = -1;
 static int32_t speedLimit = (int32_t)kDefaultHz;
 static int32_t accelLimit = (int32_t)kDefaultAccel;
 static float plannedRate = 0.0f;
 static uint32_t lastPlanUs = 0;
+
+static void IRAM_ATTR onDiagRise() {
+  ++diagEdges;
+  if (!calDiagArmed) return;
+  portENTER_CRITICAL_ISR(&stepMux);
+  stepRate = 0;
+  stepTarget = currentPos;
+  calDiagTriggered = true;
+  portEXIT_CRITICAL_ISR(&stepMux);
+}
 
 static void IRAM_ATTR onStepTimer() {
   portENTER_CRITICAL_ISR(&stepMux);
@@ -503,6 +519,8 @@ void motorBegin() {
   pinMode(PIN_EN, OUTPUT);
   pinMode(PIN_STEP, OUTPUT);
   pinMode(PIN_DIR, OUTPUT);
+  pinMode(PIN_TMC_DIAG, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_TMC_DIAG), onDiagRise, RISING);
   digitalWrite(PIN_EN, HIGH);
   digitalWrite(PIN_STEP, LOW);
   digitalWrite(PIN_DIR, LOW);
@@ -762,9 +780,13 @@ static void calibrationRebase(int32_t pos) {
 }
 
 static void calibrationMove(uint8_t state, int32_t goal) {
+  calDiagArmed = false;
+  calDiagTriggered = false;
+  calDiagSeen = diagEdges;
+  calLastDiagMs = millis();
+  calPhaseStartPos = motorPos();
   calibration.state = state;
   calPhaseMs = millis();
-  calLowCount = 0;
   calSawFree = false;
   target = goal;
   commandResult = MOTOR_RESULT_ACCEPTED;
@@ -781,6 +803,7 @@ static void calibrationFinish(uint8_t state, uint8_t error) {
   calibration.elapsedMs = millis() - calStartedMs;
   portENTER_CRITICAL(&stepMux);
   calGuardArmed = false;
+  calDiagArmed = false;
   portEXIT_CRITICAL(&stepMux);
   motorStop();
   communicationWatchdogArmed = false;
@@ -805,22 +828,47 @@ static void calibrationFinish(uint8_t state, uint8_t error) {
                 (long)minLim, (long)maxLim);
 }
 
+static bool calibrationDiagConnected() {
+  // A floating, unwired GPIO follows both weak pulls. The driver's DIAG
+  // output drives a fixed level in both cases. Reject before any motion.
+  pinMode(PIN_TMC_DIAG, INPUT_PULLUP);
+  delayMicroseconds(100);
+  const int up = digitalRead(PIN_TMC_DIAG);
+  pinMode(PIN_TMC_DIAG, INPUT_PULLDOWN);
+  delayMicroseconds(100);
+  const int down = digitalRead(PIN_TMC_DIAG);
+  // A disconnected wire reads active/high during motion and stops the scan.
+  pinMode(PIN_TMC_DIAG, INPUT_PULLUP);
+  Serial.printf("cal DIAG GPIO11 pullup=%d pulldown=%d\n", up, down);
+  return up == down;
+}
+
 uint8_t motorCalibrationStart(uint8_t runId, int32_t threshold, int32_t maxTravel) {
   if (!runId) return CAL_BAD_PARAMETER;
   // UDP retransmission of the last accepted run is never a new motion command.
   if (calibration.runId == runId) return CAL_OK;
   if (motorCalibrationActive() || motorMoving() || !enabled || !stepTimer) return CAL_BUSY;
-  if (!uartOk || tmcVer != 0x21) return CAL_UART;
+  if (!uartOk || tmcVer != 0x21) {
+    Serial.printf("cal reject: UART init=%u ver=0x%02X\n", uartOk, tmcVer);
+    return CAL_UART;
+  }
+  if (!calibrationDiagConnected()) return CAL_DIAG;
   if (tmcMsSet < 8 || tmcMsSet > 256 || (tmcMsSet & (tmcMsSet - 1))) return CAL_BAD_PARAMETER;
   if (threshold == 0) threshold = 60;
   if (maxTravel == 0) maxTravel = stepsPerRevFw() * 2;
   if (threshold < 1 || threshold > 255 || maxTravel < 128 * tmcMsSet ||
       maxTravel > stepsPerRevFw() * 10) return CAL_BAD_PARAMETER;
   const uint32_t drv = tmcReadReg(0x6F);
-  if (drv == 0xFFFFFFFF) return CAL_UART;
+  if (drv == 0xFFFFFFFF) {
+    Serial.println("cal reject: DRV_STATUS read failed");
+    return CAL_UART;
+  }
   if (drv & 0x3F) return CAL_DRIVER; // thermal prewarning/shutdown and both short types
   const uint32_t beforeWrites = tmcReadReg(0x02);
-  if (beforeWrites == 0xFFFFFFFF) return CAL_UART;
+  if (beforeWrites == 0xFFFFFFFF) {
+    Serial.println("cal reject: IFCNT read failed");
+    return CAL_UART;
+  }
 
   calSpeedSaved = speedLimit;
   calAccelSaved = accelLimit;
@@ -849,7 +897,14 @@ uint8_t motorCalibrationStart(uint8_t runId, int32_t threshold, int32_t maxTrave
   const uint32_t afterWrites = tmcReadReg(0x02);
   if (gc == 0xFFFFFFFF || (gc & 4) || afterWrites == 0xFFFFFFFF ||
       (uint8_t)(afterWrites - beforeWrites) != 9) {
+    Serial.printf("cal config: GCONF=0x%08lX IFCNT=%lu->%lu expected +9\n",
+                  (unsigned long)gc, (unsigned long)beforeWrites,
+                  (unsigned long)afterWrites);
     calibrationFinish(CAL_FAILED, CAL_UART);
+    return CAL_OK;
+  }
+  if (digitalRead(PIN_TMC_DIAG) == HIGH) {
+    calibrationFinish(CAL_FAILED, CAL_DRIVER);
     return CAL_OK;
   }
   speedLimit = 100 * tmcMsSet;
@@ -886,23 +941,48 @@ static void calibrationTick() {
   if (now - calPhaseMs >= 60000) { calibrationFinish(CAL_FAILED, CAL_TIMEOUT); return; }
   if (now - calSampleMs < 20) return;
   calSampleMs = now;
-  const uint32_t drv = tmcReadReg(0x6F);
-  const uint32_t sg = tmcReadReg(0x41);
-  const uint32_t ts = tmcReadReg(0x12);
-  if (drv == 0xFFFFFFFF || sg == 0xFFFFFFFF || ts == 0xFFFFFFFF) {
-    calibrationFinish(CAL_FAILED, CAL_UART); return;
+  const uint32_t edges = diagEdges;
+  if (edges != calDiagSeen) {
+    calDiagSeen = edges;
+    calLastDiagMs = now;
   }
-  if (drv & 0x3F) { calibrationFinish(CAL_FAILED, CAL_DRIVER); return; }
   portENTER_CRITICAL(&stepMux);
   const bool expired = calGuardExpired;
   if (!expired) calServiceTicks = kTimerHz / 5;
   portEXIT_CRITICAL(&stepMux);
   if (expired) { calibrationFinish(CAL_FAILED, CAL_SAMPLE_TIMEOUT); return; }
-  calibration.sg = tmcSg = sg & 0x3FF;
-  tmcDrv = drv;
-  tmcTstep = ts > 0xFFFF ? 0xFFFF : ts;
   const int32_t pos = motorPos();
   const bool arrived = pos == target;
+
+  if (calDiagTriggered || (calDiagArmed && digitalRead(PIN_TMC_DIAG) == HIGH)) {
+    // Stop first, then use UART once while stationary to distinguish a driver
+    // fault from a StallGuard pulse. UART is never polled during a scan.
+    calibrationRebase(pos);
+    calDiagArmed = false;
+    const uint32_t drv = tmcReadReg(0x6F);
+    Serial.printf("cal DIAG run=%u phase=%u pos=%ld drv=0x%08lX\n",
+                  calibration.runId, calibration.state, (long)pos, (unsigned long)drv);
+    if (drv == 0xFFFFFFFF) { calibrationFinish(CAL_FAILED, CAL_UART); return; }
+    if (drv & 0x3F) { calibrationFinish(CAL_FAILED, CAL_DRIVER); return; }
+    if (calibration.state == CAL_BACKOFF_NEGATIVE ||
+        calibration.state == CAL_BACKOFF_POSITIVE ||
+        (calibration.state == CAL_SEEK_POSITIVE &&
+         (!calSawFree || pos <= 4 * calMargin))) {
+      calibrationFinish(CAL_FAILED, CAL_SHORT_TRAVEL); return;
+    }
+    if (calibration.state == CAL_SEEK_NEGATIVE) {
+      calibrationRebase(0);
+      calibrationMove(CAL_BACKOFF_NEGATIVE, calMargin);
+    } else {
+      calibration.travel = pos;
+      calibrationMove(CAL_BACKOFF_POSITIVE, pos - calMargin);
+    }
+    return;
+  }
+
+  const bool freeMotion = now - calLastDiagMs >= 100 &&
+      abs(pos - calPhaseStartPos) >= 4 * tmcMsSet;
+  if (freeMotion) calSawFree = true;
   if (calibration.state == CAL_BACKOFF_NEGATIVE) {
     if (arrived) {
       calibrationRebase(pos);
@@ -911,9 +991,6 @@ static void calibrationTick() {
     return;
   }
   if (calibration.state == CAL_BACKOFF_POSITIVE) {
-    if (fabsf(plannedRate) >= speedLimit * 0.5f &&
-        (drv & (1u << 30)) && calibration.sg >= 2 * calibration.threshold)
-      calSawFree = true;
     if (arrived) {
       if (!calSawFree) { calibrationFinish(CAL_FAILED, CAL_SHORT_TRAVEL); return; }
       const int32_t safeSpan = calibration.travel - 2 * calMargin;
@@ -924,29 +1001,10 @@ static void calibrationTick() {
     return;
   }
   if (arrived) { calibrationFinish(CAL_FAILED, CAL_DISTANCE); return; }
-  // SG updates per full step. Ignore ramp/startup and samples outside the
-  // StealthChop velocity window; debounce only independent full-step readings.
-  if (now - calPhaseMs < 200 || fabsf(plannedRate) < speedLimit * 0.9f ||
-      !(drv & (1u << 30)) || ts == 0 || ts >= 0xFFFFF) {
-    calLowCount = 0; return;
-  }
-  if (calibration.sg >= 2 * calibration.threshold) {
-    calSawFree = true;
-    calLowCount = 0;
-    return;
-  }
-  if (++calLowCount < 3) return;
-  // A positive scan must actually have cleared the first stop. Otherwise a
-  // jam or an over-sensitive threshold could fabricate a small valid range.
-  if (calibration.state == CAL_SEEK_POSITIVE && (!calSawFree || pos <= 4 * calMargin)) {
-    calibrationFinish(CAL_FAILED, CAL_SHORT_TRAVEL); return;
-  }
-  calibrationRebase(pos); // stop pulses before reversing or rebasing
-  if (calibration.state == CAL_SEEK_NEGATIVE) {
-    calibrationRebase(0);
-    calibrationMove(CAL_BACKOFF_NEGATIVE, calMargin);
-  } else {
-    calibration.travel = pos;
-    calibrationMove(CAL_BACKOFF_POSITIVE, pos - calMargin);
+  // Ignore startup pulses until speed is stable, then let the DIAG interrupt
+  // halt the step timer at the first stall pulse. The distance cap still applies.
+  if (!calDiagArmed && now - calPhaseMs >= 200 &&
+      fabsf(plannedRate) >= speedLimit * 0.9f) {
+    calDiagArmed = true;
   }
 }

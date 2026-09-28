@@ -76,14 +76,14 @@ f28e153 refactor: split lidar native interface
 | EN，低有效 | 7 |
 | OLED SDA/SCL | 8/9 |
 | TMC UART | 12，同脚半双工 |
-| 未使用 | 11 |
+| TMC DIAG 堵转/故障输出 | 11，输入 |
 | USB D-/D+ | 19/20 |
 
 TMC2209 实测可用接线：
 
 ```text
 GPIO12 -> TMC 模块标记为 RX 的引脚
-GPIO11 不接
+GPIO11 <- TMC 模块 DIAG 引脚（新增；自动识别行程必需）
 模块 TX 不接
 VDD/VIO = 3.3 V
 VM/VS 使用电机电源
@@ -94,6 +94,9 @@ ESP32 和驱动器共地
 不要根据参考工程的引脚名称直接改线。参考工程
 `J:\softwareProject\esp32s3-tb6600-stepper` 是 DevKitC，使用 GPIO17，和本项目
 Super Mini 不同。本项目已实测 `r12 t12`、115200、地址 0、TMC2209 version `0x21`。
+固件在标定前通过 UART 设置并验证驱动参数；标定运动中只监视 DIAG 脉冲，
+停止运动后才读取 UART 诊断寄存器。GPIO11 未连接时，自动标定会在运动前拒绝启动。
+手动标定不依赖 DIAG。
 
 不要重新引入 `neopixelWrite`。旧版 RMT API 和 IDF5/RMT 资源可能冲突，当前 WS2812
 没有使用。
@@ -965,15 +968,16 @@ Dart 版自动跟焦的死区判断写成了 `abs(want - (lastSent ?? want)) < �
 ### 已完成范围
 
 检查确认原固件只有 `SG_RESULT` 诊断读取，没有 StallGuard4 自动行程状态机。
-现在基于原 `hw_timer_t` 脉冲和本地规划器实现双端寻位，不更换驱动框架，不需要新增 DIAG 接线。
+现在基于原 `hw_timer_t` 脉冲和本地规划器实现双端寻位，不更换驱动框架；
+2026-09-28 起运动中改由新增的 DIAG→GPIO11 接线检测堵转。
 新增 CAL_START / CAL_QUERY / CAL_CANCEL / CAL_STATUS，wire 契约以 PROTOCOL.md §14 为准。
 固件版本改为 1.1.0，协议主版本仍为 1，原 12/16/22/32 字节回包保持兼容。
 本次仅修改固件、固件测试工具和交接文档；Flutter/iOS 页面由 Mac 设备接续开发。
 
 流程：负向寻找第一端 → 正向回退 → 正向寻找另一端 → 负向回退 → 发布安全范围。
-两端各退 16 整步；采用 `SG_RESULT < 2*SGTHRS` 连续三次，启动 200 ms 屏蔽，
-正向扫描和最终回退还需要观察到正常负载。每段有最大步数和 60 秒上限，
-1000 ms 标定保活超时、200 ms ISR 采样服务超时均会停止。
+两端各退 16 整步；启动 200 ms 后才响应 DIAG 堵转脉冲，
+正向扫描和最终回退还需要观察到一段无 DIAG 脉冲的运动。每段有最大步数和 60 秒上限，
+1000 ms 标定保活超时、200 ms ISR 服务超时均会停止。
 UART 回复必须通过 CRC，写配置通过 IFCNT 的九次增量确认（这些 SG 寄存器是只写，不能靠读回确认）。
 失败、取消或驱动异常停止并禁用电机，坐标不可信，软限位收紧至当前位置。
 成功后保留保持电流，直至用户主动禁用或用 HOME/SET_LIMITS 等使结果失效，避免选择方向时丢原点。

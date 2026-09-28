@@ -139,6 +139,8 @@ static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
   switch (in.cmd) {
     case FF_CAL_START: {
       const uint8_t error = motorCalibrationStart(in.pad, in.a, in.b);
+      Serial.printf("cal request run=%u threshold=%ld max=%ld error=%u enabled=%u\n",
+                    in.pad, (long)in.a, (long)in.b, error, motorEnabled());
       sendCalibration(ip, port, in.pad, error);
       return;
     }

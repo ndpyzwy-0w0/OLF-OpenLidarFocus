@@ -13,6 +13,9 @@ lib/                   Flutter UI，只通过 `ff.core` 读写功能层
 firmware/              ESP32-S3 固件
 ```
 
+自动识别镜头行程需要 TMC2209 的 DIAG 接到 ESP32 GPIO11；原 UART 仍接 GPIO12，
+用于运动前设置驱动。未接 DIAG 时可继续手动标定，接线见 [HANDOFF.md](HANDOFF.md) §3。
+
 功能层**不能** import Flutter/UIKit，由编译器强制；UI 里不写控制逻辑。
 契约与边界见 [HANDOFF.md](HANDOFF.md) §12/§13。
 

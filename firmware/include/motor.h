@@ -4,11 +4,11 @@
 
 // Super Mini header is GPIO0–13 (+ USB 19/20, LED 48). Avoid 0 BOOT.
 // TMC2209 single-wire UART: GPIO12 (same-pin half-duplex) -> module RX pad.
-// GPIO11 unused; no series resistor. Verified: "U r12 t12 a0".
+// GPIO11 <- TMC2209 DIAG; GPIO12 remains the verified UART pin.
 static const int PIN_STEP = 5;
 static const int PIN_DIR = 6;
 static const int PIN_EN = 7;
-static const int PIN_TMC_TX = 11;
+static const int PIN_TMC_DIAG = 11;
 static const int PIN_TMC_RX = 12;
 
 void motorBegin();
@@ -91,6 +91,7 @@ enum CalibrationState : uint8_t {
 enum CalibrationError : uint8_t {
   CAL_OK, CAL_BAD_PARAMETER, CAL_BUSY, CAL_UART, CAL_DRIVER, CAL_DISTANCE,
   CAL_TIMEOUT, CAL_LINK_TIMEOUT, CAL_SAMPLE_TIMEOUT, CAL_SHORT_TRAVEL, CAL_USER_CANCEL,
+  CAL_DIAG,
 };
 struct CalibrationSnapshot {
   uint8_t state, error, runId, threshold;

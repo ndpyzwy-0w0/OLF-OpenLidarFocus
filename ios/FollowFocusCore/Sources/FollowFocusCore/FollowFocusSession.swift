@@ -762,6 +762,7 @@ public final class FollowFocusSession {
       "寻端超过最大距离，请检查挡块或增大最大圈数", "阶段超时，请检查齿轮啮合",
       "标定保活超时，请检查连接", "采样中断超时，请重试",
       "行程过短或空载读数无效，请调整阈值并检查机械行程", "用户取消",
+      "DIAG 未接通：请连接驱动器 DIAG 到 ESP32 GPIO11",
     ]
     let reason = reasons.indices.contains(error) ? reasons[error] : "未知错误"
     invalidatePosition("自动标定失败：\(reason)")
