@@ -112,11 +112,13 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     case "stopPressed":
       session.stopPressed()
       result(nil)
-    case "homePressed":
-      session.homePressed()
-      result(nil)
     case "jog":
-      session.jog(Int32(int(a, "delta") ?? 0))
+      guard let delta = int(a, "delta"), let coordinate = Int32(exactly: delta),
+        (-4096...4096).contains(coordinate) else {
+        result(FlutterError(code: "bad_args", message: "坐标增量须在 -4096～4096", details: nil))
+        return
+      }
+      session.jog(coordinate)
       result(nil)
     case "setSlider":
       session.setSlider(double(a, "value") ?? 0)
@@ -154,19 +156,12 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       session.deleteLens(id: string(a, "id") ?? "")
       result(nil)
 
-    // ① 行程标定
-    case "recordStrokeA":
-      session.recordStrokeA()
-      result(nil)
-    case "finishStroke":
-      session.finishStroke()
-      result(nil)
-    case "recalibrateStroke":
-      session.recalibrateStroke()
+    // ① FM03 内部寻限位
+    case "resetLensCalibration":
+      session.resetLensCalibration()
       result(nil)
     case "startAutoCalibration":
-      session.startAutoCalibration(threshold: int(a, "threshold") ?? 60,
-        maxRevs: double(a, "maxRevs") ?? 2)
+      session.startAutoCalibration()
       result(nil)
     case "cancelAutoCalibration":
       session.cancelAutoCalibration()
@@ -175,10 +170,7 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       session.leaveLens()
       result(nil)
 
-    // ② 单侧对齐
-    case "confirmNear":
-      session.confirmNear()
-      result(nil)
+    // ② 物距方向
     case "setDir":
       session.setDir(int(a, "dir") ?? 1)
       result(nil)
@@ -191,7 +183,7 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     // ③ 距离标定
     case "addLutPoint":
-      session.addLutPoint()
+      session.addLutPoint(meters: double(a, "meters"))
       result(nil)
     case "removeLutPoint":
       session.removeLutPoint(at: int(a, "index") ?? -1)

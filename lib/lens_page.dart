@@ -97,7 +97,7 @@ class _LensPageState extends State<LensPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('删除 ${lens.name}？'),
-        content: const Text('会同时删掉它的行程标定和距离标定表。'),
+        content: const Text('会删除镜头信息、方向选择和距离标定表。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -123,8 +123,8 @@ class _LensPageState extends State<LensPage> {
         padding: const EdgeInsets.all(12),
         children: [
           const Text(
-            '每个镜头单独保存行程标定、变远方向和距离标定表。'
-            '新镜头第一次进入需标定行程，可选自动识别或手动记录两端。每次重新连接后需重新定位。',
+            '新建镜头 → FM03 自动寻限位 → 选择物距变近方向 → 手动对焦标定至少 5 点 → 跟焦。'
+            '每个镜头保存方向和物距—旋转位置图表；机械限位由电机保留。重新连接或换镜头后先寻限位。',
           ),
           const Divider(height: 24),
           if (_lenses.isEmpty)
@@ -147,15 +147,14 @@ class _LensPageState extends State<LensPage> {
   Widget _row(FfLens l) {
     final parts = <String>[
       if (l.params.isNotEmpty) l.params,
-      if (l.calibrated) '行程 ${l.strokeRevs.toStringAsFixed(2)} 行程' else '未标定行程',
-      if (l.lutCount >= 2) '距离标定 ${l.lutCount} 点',
-      '焦距变远：${l.dir > 0 ? "+" : "-"} 方向',
+      '距离标定 ${l.lutCount} 点${l.lutReady ? " · 可跟焦" : " · 至少需 5 点"}',
+      l.directionConfirmed ? '物距变近：${l.dir < 0 ? "+" : "−"} 方向' : '待选择物距方向',
     ];
     return Card(
       child: ListTile(
         leading: Icon(
-          l.calibrated ? Icons.check_circle : Icons.error_outline,
-          color: l.calibrated ? Colors.greenAccent : Colors.orangeAccent,
+          l.lutReady ? Icons.check_circle : Icons.error_outline,
+          color: l.lutReady ? Colors.greenAccent : Colors.orangeAccent,
         ),
         title: Text(l.name.isEmpty ? '(未命名)' : l.name),
         subtitle: Text(parts.join(' · ')),

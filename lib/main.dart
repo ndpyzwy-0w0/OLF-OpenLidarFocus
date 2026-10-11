@@ -8,6 +8,7 @@ import 'ff_core.dart';
 import 'ff_core_demo.dart';
 import 'lens_page.dart';
 import 'lidar.dart';
+import 'lens_chart.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -59,7 +60,8 @@ class FollowPage extends StatefulWidget {
 class _FollowPageState extends State<FollowPage> {
   final _lidar = LidarChannel();
   final _revsText = TextEditingController(text: '1');
-  final _stepsText = TextEditingController(text: '800');
+  final _stepsText = TextEditingController(text: '80');
+  final _distanceText = TextEditingController();
   StreamSubscription<FfState>? _sub;
 
   FfState _s = const FfState();
@@ -116,19 +118,20 @@ class _FollowPageState extends State<FollowPage> {
     _lidar.dispose();
     _revsText.dispose();
     _stepsText.dispose();
+    _distanceText.dispose();
     super.dispose();
   }
 
   void _goSteps(int sign) {
     final n = int.tryParse(_stepsText.text.trim());
-    if (n == null || n == 0) return;
+    if (n == null || n == 0 || n.abs() > 4096) return;
     widget.core.jog(sign * n.abs());
   }
 
   void _goRevs(int sign) {
     final r = double.tryParse(_revsText.text.trim());
-    if (r == null || r == 0) return;
-    // 行程 → 坐标：脉冲/圈由核心给出，UI 只做这一次乘法。
+    if (r == null || !r.isFinite || r == 0 || r.abs() > 1) return;
+    // 归一化行程比例 → FM03 坐标增量。
     widget.core.jog(sign * (r.abs() * _s.stepsPerRev).round());
   }
 
@@ -136,10 +139,10 @@ class _FollowPageState extends State<FollowPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('清空行程标定？'),
+        title: const Text('清空距离标定表？'),
         content: Text(
-          '${_s.lensName} 的行程 ${_s.strokeSteps} 坐标会被清空，'
-          '之后要重新量一次行程才能跟焦。',
+          '${_s.lensName} 的物距—旋转位置图表和方向选择会被清空，'
+          '需要重新记录至少五个点。FM03 内部限位由电机保留。',
         ),
         actions: [
           TextButton(
@@ -153,7 +156,7 @@ class _FollowPageState extends State<FollowPage> {
         ],
       ),
     );
-    if (ok == true) await widget.core.recalibrateStroke();
+    if (ok == true) await widget.core.resetLensCalibration();
   }
 
   /// 顶栏右侧的链路状态。**三种情况必须分开**：
@@ -261,9 +264,10 @@ class _FollowPageState extends State<FollowPage> {
                         ),
                       ),
                       Text(switch (_s.phase) {
-                        SetupPhase.stroke => '① 标定行程',
-                        SetupPhase.align => '② 单侧对齐',
-                        SetupPhase.follow => '③ 跟焦',
+                        SetupPhase.stroke => '① 自动寻限位',
+                        SetupPhase.align => '② 选择方向',
+                        SetupPhase.calibrate => '③ 标定物距',
+                        SetupPhase.follow => '④ 跟焦',
                       }, style: const TextStyle(fontSize: 12)),
                     ],
                   ),
@@ -285,12 +289,12 @@ class _FollowPageState extends State<FollowPage> {
                             : (v) => widget.core.enable(v),
                       ),
                       FilterChip(
-                        // 自动跟焦要先对齐、还要有两点距离标定，否则没有可信的目标。
+                        // 核心决定图表是否可用，UI 只显示五点标定门槛。
                         // 能不能开由核心决定（setAuto 会自己拒绝），这里只管显示。
                         label: Text(
                           _s.phase != SetupPhase.follow
-                              ? '自动(先对齐)'
-                              : (_s.lutReady ? '自动跟焦' : '自动(需2点标定)'),
+                              ? '自动(先完成标定)'
+                              : (_s.lutReady ? '自动跟焦' : '自动(需5点标定)'),
                         ),
                         selected: _s.auto && _s.phase == SetupPhase.follow,
                         onSelected:
@@ -314,20 +318,14 @@ class _FollowPageState extends State<FollowPage> {
                             : null,
                         child: const Text('停'),
                       ),
-                      OutlinedButton(
-                        onPressed:
-                            _s.connected &&
-                                !_s.moving &&
-                                !_calRunning &&
-                                !_s.calDirectionPending
-                            ? () => widget.core.homePressed()
-                            : null,
-                        child: Text(_s.positionTrusted ? '已校零' : '设当前位置为原点'),
-                      ),
                     ],
                   ),
+                  _autoCalibrationEntry(),
                   _setupPanel(),
-                  if (_s.phase == SetupPhase.follow) ...[
+                  if ((_s.phase == SetupPhase.calibrate ||
+                          _s.phase == SetupPhase.follow ||
+                          _s.phase == SetupPhase.align) &&
+                      !_calRunning) ...[
                     Text(_s.auto ? '手动滑条（自动开时无效）' : '手动焦点'),
                     Slider(
                       value: _sliderDrag ?? _s.slider,
@@ -368,41 +366,12 @@ class _FollowPageState extends State<FollowPage> {
                       style: TextStyle(fontSize: 11),
                     ),
                     _directionRow(),
-                    Row(
-                      children: [
-                        const Text(
-                          '距离标定',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        const Spacer(),
-                        FilledButton.tonal(
-                          onPressed: _s.distanceM == null
-                              ? null
-                              : () => widget.core.addLutPoint(),
-                          child: const Text('记录当前'),
-                        ),
-                      ],
-                    ),
-                    const Text(
-                      'Jog 到实焦后点记录。至少两点；按 1/距离 插值。'
-                      '使用 FM03 坐标；重做内部行程校准后请重新记录。',
-                    ),
-                    for (var i = 0; i < _s.lutPoints.length; i++)
-                      ListTile(
-                        dense: true,
-                        title: Text(
-                          '${_s.lutPoints[i].meters.toStringAsFixed(2)} m  →  '
-                          '${_s.lutPoints[i].steps} 坐标'
-                          '（${(_s.lutPoints[i].steps / _s.stepsPerRev).toStringAsFixed(2)} 行程）',
-                        ),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete),
-                          onPressed: () => widget.core.removeLutPoint(i),
-                        ),
-                      ),
-                    if (_s.lutPoints.isEmpty) const Text('还没有标定点。'),
-                    _recalibrateTile(),
+                    if (_s.phase != SetupPhase.align)
+                      _distanceCalibrationPanel(),
                   ],
+                  if (_s.phase == SetupPhase.stroke && _s.lutPoints.isNotEmpty)
+                    LensChart(points: _s.lutPoints, curve: _s.lutCurve),
+                  if (!_calRunning) _recalibrateTile(),
                   const SizedBox(height: 8),
                   _diagnosticPanel(),
                   AbsorbPointer(
@@ -436,7 +405,7 @@ class _FollowPageState extends State<FollowPage> {
     await widget.core.connect();
   }
 
-  /// 自由微调：走步/走圈/脉冲。标定和对齐阶段靠它把跟焦器转到想要的位置。
+  /// 按 FM03 坐标增量手动微调，观察相机画面进行实焦标定。
   Widget _jogControls() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -453,7 +422,7 @@ class _FollowPageState extends State<FollowPage> {
           ],
         ),
         const Divider(height: 16),
-        // 脉冲 / 行程。这里的“步”是 STEP 脉冲（微步），不是整步。
+        // 原始坐标增量与归一化行程比例。
         Row(
           children: [
             const Text('坐标增量'),
@@ -472,7 +441,7 @@ class _FollowPageState extends State<FollowPage> {
             const SizedBox(width: 8),
             OutlinedButton(
               onPressed: () => _goSteps(1),
-              child: const Text('走步'),
+              child: const Text('移动坐标'),
             ),
             OutlinedButton(
               onPressed: () => _goSteps(-1),
@@ -518,12 +487,13 @@ class _FollowPageState extends State<FollowPage> {
   }
 
   Widget _setupPanel() {
-    if (_s.calDirectionPending || _calRunning) return _autoCalibrationPanel();
+    if (_calRunning) return _autoCalibrationPanel();
     switch (_s.phase) {
       case SetupPhase.stroke:
         return _strokePanel();
       case SetupPhase.align:
         return _alignPanel();
+      case SetupPhase.calibrate:
       case SetupPhase.follow:
         return const SizedBox.shrink();
     }
@@ -546,7 +516,8 @@ class _FollowPageState extends State<FollowPage> {
         content: const Text(
           '确认齿轮已啮合、镜头有机械挡块，RS3 已断开。'
           '电机会自行寻找两端。内部校准暂无已验证的软件取消指令；'
-          '需要立即中止时切断电机电源。完成后坐标为 0～4096，距离标定需重做。',
+          '需要立即中止时切断电机电源。完成后使用 0～4096 归一化坐标。'
+          '已有距离表保留；更换齿轮安装位置或镜头后请长按重置重新标定。',
         ),
         actions: [
           TextButton(
@@ -561,21 +532,24 @@ class _FollowPageState extends State<FollowPage> {
       ),
     );
     if (ok == true) {
-      await widget.core.startAutoCalibration(threshold: 0, maxRevs: 0);
+      await widget.core.startAutoCalibration();
     }
   }
 
   Widget _autoCalibrationEntry() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      if (_s.calSupported)
-        OutlinedButton.icon(
-          onPressed: _s.connected ? _startAutoCalibration : null,
-          icon: const Icon(Icons.auto_fix_high),
-          label: const Text('自动识别行程'),
-        )
-      else
-        const Text('此固件不支持自动识别行程，可继续手动标定。'),
+      OutlinedButton.icon(
+        onPressed: _s.connected && _s.calSupported && !_calRunning
+            ? _startAutoCalibration
+            : null,
+        icon: const Icon(Icons.auto_fix_high),
+        label: const Text('FM03 自动寻限位'),
+      ),
+      if (!_s.connected)
+        const Text('先连接电机，再开始自动寻限位。')
+      else if (!_s.calSupported)
+        const Text('请扫描并选择 FM03 2.x 固件设备。'),
       if (_s.calStage == 'failed' || _s.calStage == 'cancelled')
         Text(_s.msg, style: const TextStyle(color: Colors.orangeAccent)),
     ],
@@ -594,28 +568,12 @@ class _FollowPageState extends State<FollowPage> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Divider(height: 16),
-        const Text('自动识别行程', style: TextStyle(fontWeight: FontWeight.bold)),
-        if (_s.calDirectionPending) ...[
-          Text('已校准坐标行程 0～${_s.calSafeSpan}'),
-          const Text('请观察对焦环：正坐标移动时，对焦距离会怎样变化？'),
-          Wrap(
-            spacing: 8,
-            children: [
-              FilledButton(
-                onPressed: () => widget.core.setDir(1),
-                child: const Text('正坐标变远'),
-              ),
-              FilledButton(
-                onPressed: () => widget.core.setDir(-1),
-                child: const Text('正坐标变近'),
-              ),
-            ],
-          ),
-          const Text('确认方向后仍需重新记录距离标定点。'),
-        ] else ...[
-          Text(labels[_s.calStage] ?? '正在标定'),
-          const LinearProgressIndicator(),
-        ],
+        const Text(
+          'FM03 正在自动寻限位',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        Text(labels[_s.calStage] ?? '正在寻限位'),
+        const LinearProgressIndicator(),
         TextButton(
           onPressed: () => widget.core.cancelAutoCalibration(),
           child: const Text('停止观察（不取消内部校准）'),
@@ -624,163 +582,122 @@ class _FollowPageState extends State<FollowPage> {
     );
   }
 
-  /// ① 新镜头：手动量出行程（两个端点之间的距离）。
-  Widget _strokePanel() {
-    final a = _s.strokeA;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Divider(height: 16),
-        const Text('① 标定行程', style: TextStyle(fontWeight: FontWeight.bold)),
-        _autoCalibrationEntry(),
-        if (_s.strokeSteps > 0) ...[
-          const Text('上次行程的坐标已失效。可重新自动识别，或长按下面入口清空旧行程并改用手动标定。'),
-          _recalibrateTile(),
-        ] else ...[
-          const Text(
-            '新镜头要先量出行程：把跟焦器转到对焦环的一端，记录 A；'
-            '再转到另一端，记录 B。两点之间的距离就是行程，'
-            '之后跟焦的转动范围永远不会超过它。',
-          ),
-          Text('当前位置 ${_s.pos} 坐标（${_s.posRevs.toStringAsFixed(2)} 行程）'),
-          _jogControls(),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              OutlinedButton(
-                onPressed: _s.connected
-                    ? () => widget.core.recordStrokeA()
-                    : null,
-                child: Text(a == null ? '记录这一端 A' : 'A = $a 坐标（重记）'),
-              ),
-              FilledButton(
-                onPressed: _s.connected && a != null
-                    ? () => widget.core.finishStroke()
-                    : null,
-                child: const Text('记录另一端 B，完成标定'),
-              ),
-            ],
-          ),
-          if (!_s.connected)
-            const Text('先在上面“连接电机”，再用这里自由微调到行程两端。')
-          else if (a != null)
-            const Text('把跟焦器转到行程另一端，再点右边按钮。'),
-        ],
-      ],
-    );
-  }
+  Widget _strokePanel() => const Padding(
+    padding: EdgeInsets.symmetric(vertical: 8),
+    child: Text(
+      '① 新镜头、重新连接或换镜头后，先让 FM03 自动寻找两端限位。'
+      '限位保存在电机内部，App 不保存机械行程。',
+    ),
+  );
 
-  /// ② 已标定行程的镜头：每次进入都先做单侧对齐。
-  Widget _alignPanel() {
-    final near = _s.nearSteps;
+  Widget _alignPanel() => const Padding(
+    padding: EdgeInsets.symmetric(vertical: 8),
+    child: Text('② 用下方 + / − 按钮低速试转，结合相机画面判断哪个方向使物距变近，再选择方向。'),
+  );
+
+  Widget _directionRow() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const Divider(height: 16),
+      const Text('物距变近方向', style: TextStyle(fontWeight: FontWeight.bold)),
+      const Text('+ / − 表示 FM03 坐标增减。改变方向会清空距离表。'),
+      Wrap(
+        spacing: 8,
+        children: [
+          for (final d in [-1, 1])
+            ChoiceChip(
+              label: Text(d == -1 ? '+ 方向变近' : '− 方向变近'),
+              selected: !_s.calDirectionPending && _s.dir == d,
+              onSelected: _s.moving ? null : (_) => widget.core.setDir(d),
+            ),
+        ],
+      ),
+      Text(
+        'FM03 当前归一化坐标 ${_s.pos} / 4096',
+        style: const TextStyle(fontSize: 11),
+      ),
+    ],
+  );
+
+  Widget _distanceCalibrationPanel() {
+    final manual = _distanceText.text.trim();
+    final meters = double.tryParse(manual);
+    final validManual =
+        meters != null && meters.isFinite && meters >= 0.05 && meters <= 1000;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Divider(height: 16),
-        Row(
-          children: [
-            const Text('② 单侧对齐', style: TextStyle(fontWeight: FontWeight.bold)),
-            const Spacer(),
-            Text(
-              '行程 ${_s.strokeRevs.toStringAsFixed(2)} 行程',
-              style: const TextStyle(fontSize: 12),
-            ),
-          ],
-        ),
+        const Text('距离标定', style: TextStyle(fontWeight: FontWeight.bold)),
         const Text(
-          '跟焦器没有绝对位置，每次进入都要对齐一次：手动微调到画面最近对焦，'
-          '把当前位置认成“焦距最近点”，再选哪边是焦距变远的方向。'
-          '这样只会在这段行程内转，不会拧反、也不会超行程。',
+          '用手机手动旋转电机，观察相机画面，实焦停稳后记录。'
+          '至少 5 点，建议覆盖最近实用距离、1 m、2 m、3 m 和最远实用距离；可继续补点。'
+          '按 1/物距分段插值，超出标定距离时保持表的端点位置。',
         ),
-        _autoCalibrationEntry(),
-        if (near == null) ...[
-          Text('当前 ${_s.pos} 坐标（${_s.posRevs.toStringAsFixed(2)} 行程）'),
-          _jogControls(),
-          FilledButton(
-            onPressed: _s.connected ? () => widget.core.confirmNear() : null,
-            child: const Text('确认为焦距最近点'),
+        TextField(
+          controller: _distanceText,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          onChanged: (_) => setState(() {}),
+          decoration: InputDecoration(
+            labelText: '物距（m，可手动输入）',
+            hintText: _s.distanceM == null
+                ? '输入实测距离'
+                : '留空使用 LiDAR ${_s.distanceM!.toStringAsFixed(2)} m',
+            errorText: manual.isNotEmpty && !validManual
+                ? '请输入 0.05～1000 m'
+                : null,
           ),
-          if (!_s.connected) const Text('先连接电机，再自由微调到最近对焦。'),
-        ] else ...[
-          Text('最近点 = $near 坐标'),
-          const SizedBox(height: 8),
-          const Text('从最近点往哪个旋转方向是“焦距变远”？'),
-          SegmentedButton<int>(
-            segments: const [
-              ButtonSegment(value: 1, label: Text('+ 方向变远')),
-              ButtonSegment(value: -1, label: Text('- 方向变远')),
-            ],
-            selected: {_s.dir},
-            onSelectionChanged: (s) => widget.core.setDir(s.first),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: [
-              FilledButton(
-                onPressed: _s.connected
-                    ? () => widget.core.startFollow()
-                    : null,
-                child: const Text('开始跟焦'),
-              ),
-              OutlinedButton(
-                onPressed: () => widget.core.unalign(),
-                child: const Text('重选最近点'),
-              ),
-            ],
-          ),
-        ],
-        _recalibrateTile(),
-      ],
-    );
-  }
-
-  /// 焦距变远方向只决定对齐后的软限位区间：选错会把区间放在错误的一侧，
-  /// 表现是往远端走不动，改回来即可，不会真的拧过行程。
-  Widget _directionRow() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Divider(height: 16),
-        Row(
-          children: [
-            const Text('焦距变远方向', style: TextStyle(fontWeight: FontWeight.bold)),
-            const Spacer(),
-            TextButton(
-              onPressed: () => widget.core.unalign(),
-              child: const Text('重新对齐'),
-            ),
-          ],
         ),
-        SegmentedButton<int>(
-          segments: const [
-            ButtonSegment(value: 1, label: Text('+ 方向变远')),
-            ButtonSegment(value: -1, label: Text('- 方向变远')),
-          ],
-          selected: {_s.dir},
-          onSelectionChanged: (s) => widget.core.setDir(s.first),
+        FilledButton.tonal(
+          onPressed:
+              _s.connected &&
+                  _s.positionTrusted &&
+                  !_s.moving &&
+                  !_s.auto &&
+                  (manual.isEmpty ? _s.distanceM != null : validManual)
+              ? () => widget.core.addLutPoint(
+                  meters: manual.isEmpty ? null : meters,
+                )
+              : null,
+          child: const Text('记录当前'),
         ),
         Text(
-          '允许 ${_s.limitLo}..${_s.limitHi} 坐标'
-          '（最近点 ${_s.nearSteps} · 行程 ${_s.strokeSteps} 坐标）',
-          style: const TextStyle(fontSize: 11),
+          '已记录 ${_s.lutPoints.length} / 至少 5 点 · ${_s.lutReady ? "图表可用于跟焦" : "请继续标定"}',
         ),
+        LensChart(points: _s.lutPoints, curve: _s.lutCurve),
+        for (var i = 0; i < _s.lutPoints.length; i++)
+          ListTile(
+            dense: true,
+            title: Text(
+              '${_s.lutPoints[i].meters.toStringAsFixed(2)} m → ${_s.lutPoints[i].steps} 坐标',
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.delete),
+              onPressed: () => widget.core.removeLutPoint(i),
+            ),
+          ),
+        if (_s.lutPoints.isEmpty) const Text('还没有标定点。'),
+        if (_s.phase == SetupPhase.calibrate)
+          FilledButton(
+            onPressed: _s.lutReady && _s.positionTrusted && !_s.moving
+                ? widget.core.startFollow
+                : null,
+            child: const Text('开始跟焦'),
+          ),
+        if (_s.phase == SetupPhase.follow)
+          TextButton(onPressed: widget.core.unalign, child: const Text('继续标定')),
       ],
     );
   }
 
-  /// 行程标定的防误触入口：标过之后要长按再确认才能清空重标。
-  Widget _recalibrateTile() {
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      dense: true,
-      leading: const Icon(Icons.straighten, size: 20),
-      title: const Text('重新标定行程（长按）'),
-      subtitle: const Text('标定过就不怕误触：长按 1 秒，再确认才会清空行程重来。'),
-      onLongPress: _confirmRecalibrate,
-    );
-  }
+  Widget _recalibrateTile() => ListTile(
+    contentPadding: EdgeInsets.zero,
+    dense: true,
+    leading: const Icon(Icons.restart_alt, size: 20),
+    title: const Text('重置距离标定（长按）'),
+    subtitle: const Text('长按并确认后清空图表、重新选择方向；电机内部限位由 FM03 保留。'),
+    onLongPress: _confirmRecalibrate,
+  );
 
   Widget _diagnosticPanel() {
     final statusAge = _s.statusAgeMs;

@@ -1,106 +1,27 @@
 import Foundation
 
-/// 一个镜头的持久化参数：名称、备注、行程标定、变远方向和距离标定表。
-///
-/// [strokeSteps] 是机械行程长度（脉冲），在 [strokeMicrosteps] 细分下量的，
-/// 换细分后用 [strokeAt] 换算——它是**跨会话有效**的物理量。
-///
-/// [dir] = 焦距变远的旋转方向：+1 表示步数增大，-1 表示步数减小。对齐后由它
-/// 决定允许运动的软限位区间，从而保证不会拧反、也不会超出标定过的行程。
-///
-/// “焦距最近点”是**每次进入都要重新对齐**的会话量：步进电机开环、掉电丢绝对
-/// 位置，所以不在这里持久化。
+/// App 只持久化镜头信息、物距变远方向及 FM03 归一化坐标的距离表。
+/// 机械限位由 FM03 保存；寻限位结果与坐标可信度只存在当前会话。
 public struct Lens: Equatable {
   public let id: String
   public var name: String
   public var params: String
   public var lut: LensLut
-  public var strokeSteps: Int?
-  public var strokeMicrosteps: Int
+  /// +1 = 坐标增大时物距变远，-1 = 坐标增大时物距变近。
   public var dir: Int
-  public var autoTravel: Int?
-  public var autoSafeSpan: Int?
-  public var autoFirmware: String?
+  public var directionConfirmed: Bool
 
-  public init(
-    id: String,
-    name: String,
-    params: String = "",
-    lut: LensLut = LensLut([]),
-    strokeSteps: Int? = nil,
-    strokeMicrosteps: Int = 1,
-    dir: Int = 1,
-    autoTravel: Int? = nil,
-    autoSafeSpan: Int? = nil,
-    autoFirmware: String? = nil
-  ) {
+  public init(id: String, name: String, params: String = "",
+    lut: LensLut = LensLut([]), dir: Int = 1, directionConfirmed: Bool = false) {
     self.id = id
     self.name = name
     self.params = params
     self.lut = lut
-    self.strokeSteps = strokeSteps
-    self.strokeMicrosteps = strokeMicrosteps
     self.dir = dir >= 0 ? 1 : -1
-    self.autoTravel = autoTravel
-    self.autoSafeSpan = autoSafeSpan
-    self.autoFirmware = autoFirmware
+    self.directionConfirmed = directionConfirmed
   }
 
-  /// 行程是否已标定。未标定就不能对齐，也不能自动跟焦。
-  public var calibrated: Bool { abs(strokeSteps ?? 0) > 0 }
-
-  public static func newId() -> String {
-    "lens-" + String(Int(Date().timeIntervalSince1970 * 1_000_000), radix: 36)
-  }
-
-  /// 行程脉冲数，换算到指定细分。行程只记长度，不记绝对位置。
-  public func strokeAt(_ microsteps: Int) -> Int {
-    guard let s = strokeSteps, s != 0 else { return 0 }
-    guard strokeMicrosteps > 0, microsteps > 0 else { return abs(s) }
-    return Int((Double(abs(s)) * Double(microsteps) / Double(strokeMicrosteps)).rounded())
-  }
-
-  /// 清空行程标定（“重新标定行程”用），距离标定表和方向保留。
-  public func withoutStroke() -> Lens {
-    Lens(
-      id: id,
-      name: name,
-      params: params,
-      lut: lut,
-      strokeSteps: nil,
-      strokeMicrosteps: strokeMicrosteps,
-      dir: dir
-    )
-  }
-}
-
-// MARK: - 对齐
-
-/// 对齐后的软限位区间：最近点 [near] 沿变远方向最多走 [stroke] 个脉冲。
-///
-/// 这就是“不会拧反、也不会超过标定行程”的落点：区间只在最近点到远端这一侧。
-public func alignedRange(_ near: Int, _ dir: Int, _ stroke: Int)
-  -> (lo: Int, hi: Int)
-{
-  let far = dir >= 0 ? near + stroke : near - stroke
-  return far >= near ? (lo: near, hi: far) : (lo: far, hi: near)
-}
-
-/// 从距离标定表推断“焦距变远”的方向：距离越远、步数越大就是 +1。
-/// 表里不足两点或两点同值返回 nil（让用户自己选）。
-public func inferDir(_ lut: LensLut) -> Int? {
-  guard lut.ready, let near = lut.points.first?.steps,
-    let far = lut.points.last?.steps
-  else { return nil }
-  if near == far { return nil }
-  return far > near ? 1 : -1
-}
-
-/// 对齐后把距离标定表平移到本次会话的坐标系：让表里距离最小（焦距最近）的那个
-/// 点落在今天的最近点上。表里存的是标定当次会话的步数，跨会话必须重锚。
-public func lutRebaseDelta(_ near: Int, _ lut: LensLut) -> Int {
-  guard let first = lut.points.first else { return 0 }
-  return near - first.steps
+  public static func newId() -> String { "lens-" + UUID().uuidString }
 }
 
 // MARK: - JSON
@@ -108,7 +29,6 @@ public func lutRebaseDelta(_ near: Int, _ lut: LensLut) -> Int {
 public extension LensLut {
   var jsonObject: [String: Any] {
     [
-      "microsteps": microsteps,
       "points": points.map { ["m": $0.meters, "s": $0.steps] },
     ]
   }
@@ -118,41 +38,26 @@ public extension LensLut {
       guard let m = number(p["m"]), let s = number(p["s"]) else { return nil }
       return LutPoint(meters: m.doubleValue, steps: s.intValue)
     }
-    self.init(raw, microsteps: number(o["microsteps"])?.intValue ?? 1)
+    self.init(raw)
   }
 }
 
 public extension Lens {
   var jsonObject: [String: Any] {
-    var o: [String: Any] = [
-      "id": id,
-      "name": name,
-      "params": params,
-      "dir": dir,
-      "strokeMs": strokeMicrosteps,
-      "lut": lut.jsonObject,
-    ]
-    if let strokeSteps { o["stroke"] = strokeSteps }
-    if let autoTravel { o["autoTravel"] = autoTravel }
-    if let autoSafeSpan { o["autoSafeSpan"] = autoSafeSpan }
-    if let autoFirmware { o["autoFirmware"] = autoFirmware }
-    return o
+    ["id": id, "name": name, "params": params, "dir": dir,
+     "directionConfirmed": directionConfirmed,
+     "coordinateSystem": "fm03-normalized-v1", "lut": lut.jsonObject]
   }
 
   init?(jsonObject o: [String: Any]) {
     guard let id = o["id"] as? String else { return nil }
-    self.init(
-      id: id,
-      name: (o["name"] as? String) ?? "",
-      params: (o["params"] as? String) ?? "",
-      lut: LensLut(jsonObject: (o["lut"] as? [String: Any]) ?? [:]),
-      strokeSteps: number(o["stroke"])?.intValue,
-      strokeMicrosteps: number(o["strokeMs"])?.intValue ?? 1,
-      dir: (number(o["dir"])?.intValue ?? 1) >= 0 ? 1 : -1,
-      autoTravel: number(o["autoTravel"])?.intValue,
-      autoSafeSpan: number(o["autoSafeSpan"])?.intValue,
-      autoFirmware: o["autoFirmware"] as? String
-    )
+    // 旧版表可能被“最近点对齐”平移过，不能当作 FM03 原始坐标继续跟焦。
+    let normalized = o["coordinateSystem"] as? String == "fm03-normalized-v1"
+    self.init(id: id, name: o["name"] as? String ?? "",
+      params: o["params"] as? String ?? "",
+      lut: normalized ? LensLut(jsonObject: o["lut"] as? [String: Any] ?? [:]) : LensLut([]),
+      dir: number(o["dir"])?.intValue ?? 1,
+      directionConfirmed: normalized && o["directionConfirmed"] as? Bool == true)
   }
 }
 

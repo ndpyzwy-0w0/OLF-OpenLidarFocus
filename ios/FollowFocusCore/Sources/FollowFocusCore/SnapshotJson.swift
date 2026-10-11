@@ -58,6 +58,8 @@ extension FollowFocusState {
       "dir": dir,
       "stroke_steps": strokeSteps,
       "lut_points": lutPoints.map(\.channelObject),
+      "lut_curve": lutCurve.map(\.channelObject),
+      "lut_ready": lutReady,
       "limit_lo": limitLo,
       "limit_hi": limitHi,
 
@@ -79,7 +81,6 @@ extension FollowFocusState {
     if let v = host { m["host"] = v }
     if let v = localPort { m["local_port"] = Int(v) }
     if let v = nearSteps { m["near_steps"] = v }
-    if let v = strokeA { m["stroke_a"] = v }
     if let v = distanceM { m["distance_m"] = v }
     if let v = statusAgeMs { m["status_age_ms"] = v }
     if let v = echoAgeMs { m["echo_age_ms"] = v }
@@ -104,24 +105,10 @@ extension FfDiscovery {
 }
 
 extension Lens {
-  /// 列表页要显示“行程 x 圈”，而行程是按**镜头自己的细分**记的，
-  /// 所以连圈数一起给出去，省得 UI 自己换算。
   public func channelObject(cal: MotorCal) -> [String: Any] {
-    let steps = strokeAt(strokeMicrosteps)
-    var m: [String: Any] = [
-      "id": id,
-      "name": name,
-      "params": params,
-      "dir": dir,
-      "calibrated": calibrated,
-      "stroke_steps": steps,
-      "stroke_revs": cal.stepsToRevs(steps, strokeMicrosteps),
-      "lut_count": lut.points.count,
-    ]
-    if let autoTravel { m["auto_travel"] = autoTravel }
-    if let autoSafeSpan { m["auto_safe_span"] = autoSafeSpan }
-    if let autoFirmware { m["auto_firmware"] = autoFirmware }
-    return m
+    ["id": id, "name": name, "params": params, "dir": dir,
+     "direction_confirmed": directionConfirmed,
+     "lut_count": lut.points.count, "lut_ready": lut.ready && lut.matchesDirection(dir)]
   }
 }
 

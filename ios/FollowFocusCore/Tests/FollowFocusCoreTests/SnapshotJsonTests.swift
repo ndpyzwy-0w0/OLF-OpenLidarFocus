@@ -48,7 +48,6 @@ final class SnapshotJsonTests: XCTestCase {
     s.lutPoints = [LutPoint(meters: 1, steps: 1000)]
     s.limitLo = 1000
     s.limitHi = 7400
-    s.strokeA = 500
     s.distanceM = 1.75
     s.statusAgeMs = 12
     s.echoAgeMs = 40
@@ -59,7 +58,7 @@ final class SnapshotJsonTests: XCTestCase {
     s.msg = "就绪"
     s.fm03 = Fm03Dump(online: true, stage: 3, value: 0, maxSpeed: 64, tolerance: 4, gain: 4, rawPosition: 1000, txFailures: 0, rxMissed: 0, feedbackAge: 12)
     s.lenses = [
-      Lens(id: "L1", name: "50mm F1.4", params: "F1.4", strokeSteps: 4096),
+      Lens(id: "L1", name: "50mm F1.4", params: "F1.4"),
       Lens(id: "L2", name: "85mm", params: ""),
     ]
     return s
@@ -81,7 +80,7 @@ final class SnapshotJsonTests: XCTestCase {
       "standby_feature", "faces",
       // 镜头与流程
       "lens_id", "lens_name", "lenses", "phase", "near_steps", "dir",
-      "stroke_steps", "lut_points", "limit_lo", "limit_hi", "stroke_a",
+      "stroke_steps", "lut_points", "lut_curve", "lut_ready", "limit_lo", "limit_hi",
       // 距离与诊断
       "distance_m", "status_age_ms", "echo_age_ms", "socket_error", "fm03",
       "last_sent_sequence", "last_echoed_sequence", "fm03_log", "msg",
@@ -117,12 +116,12 @@ final class SnapshotJsonTests: XCTestCase {
 
     let lens = (m["lenses"] as! [[String: Any]])[0]
     for key in [
-      "id", "name", "params", "dir", "calibrated", "stroke_steps", "stroke_revs", "lut_count",
+      "id", "name", "params", "dir", "direction_confirmed", "lut_count", "lut_ready",
     ] {
       XCTAssertNotNil(lens[key], "镜头条目缺键 \(key)")
     }
-    XCTAssertEqual(lens["calibrated"] as? Bool, true)
-    XCTAssertEqual(lens["stroke_revs"] as? Double ?? -1, 1.0, accuracy: 1e-9)
+    XCTAssertNil(lens["stroke_steps"])
+    XCTAssertNil(lens["stroke_revs"])
 
     let point = (m["lut_points"] as! [[String: Any]])[0]
     XCTAssertEqual(point["meters"] as? Double, 1.0)
@@ -135,7 +134,7 @@ final class SnapshotJsonTests: XCTestCase {
 
   func testPhaseUsesTheStringsTheUIParses() {
     for (phase, raw) in [
-      (SetupPhase.stroke, "stroke"), (SetupPhase.align, "align"), (SetupPhase.follow, "follow"),
+      (SetupPhase.stroke, "stroke"), (SetupPhase.align, "align"), (SetupPhase.calibrate, "calibrate"), (SetupPhase.follow, "follow"),
     ] {
       var s = FollowFocusState()
       s.phase = phase
@@ -143,22 +142,14 @@ final class SnapshotJsonTests: XCTestCase {
     }
   }
 
-  /// 未标定镜头的行程必须是 0，否则列表页会把它显示成“已标定”。
-  func testUncalibratedLensReportsZeroStroke() {
+  func testLensSnapshotContainsNoMechanicalLimits() {
     var s = FollowFocusState()
     s.lenses = [Lens(id: "L", name: "新镜头")]
     let lens = (s.channelObject(cal: cal)["lenses"] as! [[String: Any]])[0]
-    XCTAssertEqual(lens["calibrated"] as? Bool, false)
-    XCTAssertEqual(lens["stroke_steps"] as? Int, 0)
-    XCTAssertEqual(lens["stroke_revs"] as? Double, 0)
-  }
-
-  /// 行程按镜头自己的细分记录，所以圈数换算必须用镜头的细分，不能用当前细分。
-  func testLensStrokeFractionUsesFm03Coordinates() {
-    var s=FollowFocusState()
-    s.lenses=[Lens(id: "L",name: "50mm",strokeSteps: 4096,strokeMicrosteps: 1)]
-    let lenses=s.channelObject(cal: MotorCal())["lenses"] as! [[String: Any]]
-    XCTAssertEqual(lenses[0]["stroke_revs"] as? Double,1)
+    XCTAssertFalse(lens["lut_ready"] as! Bool)
+    for key in ["calibrated", "stroke_steps", "stroke_revs", "auto_travel", "auto_safe_span"] {
+      XCTAssertNil(lens[key])
+    }
   }
 
   func testDiscoveryObjectCarriesWhatTheDevicePageShows() {

@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 /// `ff.core` 通道的 Dart 客户端。
 ///
 /// **只做两件事**：把命令发下去、把状态快照解出来。
-/// 不含任何控制逻辑 —— 软限位、自动跟焦死区、相位机、镜头对齐全在 Swift 侧的
+/// 不含任何控制逻辑 —— 自动跟焦死区、相位机、镜头标定全在 Swift 侧的
 /// `FollowFocusSession` 里（见 HANDOFF §13）。
 ///
 /// 所以这里只允许出现“字段搬运”，不要在这里加 `_limitsFor`、`_autoSteps`
@@ -27,13 +27,15 @@ const int kResultLimited = 3;
 const int kResultRejected = 4;
 const int kResultStopped = 5;
 
-/// 跟焦前的三步。
-enum SetupPhase { stroke, align, follow }
+/// 寻限位、方向、物距标定、跟焦。
+enum SetupPhase { stroke, align, calibrate, follow }
 
 SetupPhase _phaseFrom(String? s) {
   switch (s) {
     case 'align':
       return SetupPhase.align;
+    case 'calibrate':
+      return SetupPhase.calibrate;
     case 'follow':
       return SetupPhase.follow;
     default:
@@ -67,7 +69,7 @@ class FfDevice {
   );
 }
 
-/// 距离标定点。`steps` 是FM03 坐标（软件置零后的坐标系）。
+/// 距离标定点。`steps` 是FM03 坐标（内部限位校准后的归一化坐标）。
 class FfLutPoint {
   final double meters;
   final int steps;
@@ -87,28 +89,18 @@ class FfLens {
 
   /// 焦距变远方向：+1 表示步数增大，-1 表示减小。
   final int dir;
-  final bool calibrated;
-  final int strokeSteps;
-
-  /// 行程比例。1.0 对应完整4096坐标行程。
-  final double strokeRevs;
+  final bool directionConfirmed;
+  final bool lutReady;
   final int lutCount;
-  final int? autoTravel;
-  final int? autoSafeSpan;
-  final String? autoFirmware;
 
   const FfLens({
     required this.id,
     required this.name,
     required this.params,
     required this.dir,
-    required this.calibrated,
-    required this.strokeSteps,
-    required this.strokeRevs,
+    this.directionConfirmed = false,
+    this.lutReady = false,
     required this.lutCount,
-    this.autoTravel,
-    this.autoSafeSpan,
-    this.autoFirmware,
   });
 
   factory FfLens.fromMap(Map<dynamic, dynamic> m) => FfLens(
@@ -116,13 +108,9 @@ class FfLens {
     name: (m['name'] as String?) ?? '',
     params: (m['params'] as String?) ?? '',
     dir: (m['dir'] as num?)?.toInt() ?? 1,
-    calibrated: (m['calibrated'] as bool?) ?? false,
-    strokeSteps: (m['stroke_steps'] as num?)?.toInt() ?? 0,
-    strokeRevs: (m['stroke_revs'] as num?)?.toDouble() ?? 0,
+    directionConfirmed: m['direction_confirmed'] == true,
+    lutReady: m['lut_ready'] == true,
     lutCount: (m['lut_count'] as num?)?.toInt() ?? 0,
-    autoTravel: (m['auto_travel'] as num?)?.toInt(),
-    autoSafeSpan: (m['auto_safe_span'] as num?)?.toInt(),
-    autoFirmware: m['auto_firmware'] as String?,
   );
 }
 
@@ -226,9 +214,10 @@ class FfState {
   final int dir;
   final int strokeSteps;
   final List<FfLutPoint> lutPoints;
+  final List<FfLutPoint> lutCurve;
+  final bool lutReady;
   final int limitLo;
   final int limitHi;
-  final int? strokeA;
 
   // 距离
   final double? distanceM;
@@ -290,9 +279,10 @@ class FfState {
     this.dir = 1,
     this.strokeSteps = 0,
     this.lutPoints = const [],
+    this.lutCurve = const [],
+    this.lutReady = false,
     this.limitLo = 0,
     this.limitHi = 0,
-    this.strokeA,
     this.distanceM,
     this.lastSentSequence = 0,
     this.lastEchoedSequence = 0,
@@ -353,9 +343,10 @@ class FfState {
       dir: (m['dir'] as num?)?.toInt() ?? 1,
       strokeSteps: (m['stroke_steps'] as num?)?.toInt() ?? 0,
       lutPoints: _maps(m['lut_points']).map(FfLutPoint.fromMap).toList(),
+      lutCurve: _maps(m['lut_curve']).map(FfLutPoint.fromMap).toList(),
+      lutReady: m['lut_ready'] == true,
       limitLo: (m['limit_lo'] as num?)?.toInt() ?? 0,
       limitHi: (m['limit_hi'] as num?)?.toInt() ?? 0,
-      strokeA: (m['stroke_a'] as num?)?.toInt(),
       distanceM: (m['distance_m'] as num?)?.toDouble(),
       lastSentSequence: (m['last_sent_sequence'] as num?)?.toInt() ?? 0,
       lastEchoedSequence: (m['last_echoed_sequence'] as num?)?.toInt() ?? 0,
@@ -367,9 +358,6 @@ class FfState {
       msg: (m['msg'] as String?) ?? '',
     );
   }
-
-  /// 距离标定表够不够两点。自动跟焦需要它。
-  bool get lutReady => lutPoints.length >= 2;
 
   /// 最近命令结果的中文说明。
   String get resultLabel {
@@ -440,7 +428,6 @@ class FfCore {
   // 手动控制
   Future<void> enable(bool on) => invoke('enable', {'on': on});
   Future<void> stopPressed() => invoke('stopPressed');
-  Future<void> homePressed() => invoke('homePressed');
   Future<void> jog(int delta) => invoke('jog', {'delta': delta});
   Future<void> setSlider(double value) => invoke('setSlider', {'value': value});
   Future<void> setAuto(bool on) => invoke('setAuto', {'on': on});
@@ -463,28 +450,20 @@ class FfCore {
       invoke('createLens', {'name': name, 'params': params});
   Future<void> deleteLens(String id) => invoke('deleteLens', {'id': id});
 
-  // ① 行程标定
-  Future<void> recordStrokeA() => invoke('recordStrokeA');
-  Future<void> finishStroke() => invoke('finishStroke');
-  Future<void> recalibrateStroke() => invoke('recalibrateStroke');
-  Future<void> startAutoCalibration({
-    required int threshold,
-    required double maxRevs,
-  }) => invoke('startAutoCalibration', {
-    'threshold': threshold,
-    'maxRevs': maxRevs,
-  });
+  // ① FM03 内部寻限位
+  Future<void> resetLensCalibration() => invoke('resetLensCalibration');
+  Future<void> startAutoCalibration() => invoke('startAutoCalibration');
   Future<void> cancelAutoCalibration() => invoke('cancelAutoCalibration');
   Future<void> leaveLens() => invoke('leaveLens');
 
-  // ② 单侧对齐
-  Future<void> confirmNear() => invoke('confirmNear');
+  // ② 物距方向
   Future<void> setDir(int dir) => invoke('setDir', {'dir': dir});
   Future<void> startFollow() => invoke('startFollow');
   Future<void> unalign() => invoke('unalign');
 
   // ③ 距离标定
-  Future<void> addLutPoint() => invoke('addLutPoint');
+  Future<void> addLutPoint({double? meters}) =>
+      invoke('addLutPoint', {'meters': ?meters});
   Future<void> removeLutPoint(int index) =>
       invoke('removeLutPoint', {'index': index});
 

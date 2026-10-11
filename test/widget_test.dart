@@ -64,9 +64,8 @@ FfLens lens({
   name: name,
   params: params,
   dir: dir,
-  calibrated: calibrated,
-  strokeSteps: (strokeRevs * 6400).round(),
-  strokeRevs: strokeRevs,
+  directionConfirmed: calibrated,
+  lutReady: lutCount >= 5,
   lutCount: lutCount,
 );
 
@@ -113,14 +112,19 @@ FfState stateFor({
     lenses: [l],
     nearSteps: nearSteps,
     dir: l.dir,
-    strokeSteps: l.strokeSteps,
-    strokeRevs: l.strokeRevs,
+    strokeSteps: 4096,
+    strokeRevs: 1,
+    positionTrusted: true,
+    lutReady: lutReady,
     lutPoints:
         lutPoints ??
         (lutReady
             ? const [
-                FfLutPoint(meters: 1, steps: 1000),
-                FfLutPoint(meters: 2, steps: 4200),
+                FfLutPoint(meters: 0.5, steps: 100),
+                FfLutPoint(meters: 1, steps: 800),
+                FfLutPoint(meters: 2, steps: 2000),
+                FfLutPoint(meters: 3, steps: 2800),
+                FfLutPoint(meters: 5, steps: 3800),
               ]
             : const []),
     limitLo: limitLo,
@@ -221,15 +225,12 @@ void main() {
         ),
       );
       await pumpFollowPage(tester, core);
-      await tapVisible(tester, find.text('自动识别行程'));
+      await tapVisible(tester, find.text('FM03 自动寻限位'));
       expect(find.textContaining('机械挡块'), findsOneWidget);
       await tester.tap(find.text('开始校准'));
       await tester.pumpAndSettle();
       expect(core.called('startAutoCalibration'), isTrue);
-      expect(core.args['startAutoCalibration'], {
-        'threshold': 0,
-        'maxRevs': 0.0,
-      });
+      expect(core.args['startAutoCalibration'], isNull);
       core.push(
         stateFor(
           phase: SetupPhase.align,
@@ -240,7 +241,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tapVisible(tester, find.text('正坐标变近'));
+      await tapVisible(tester, find.text('+ 方向变近'));
       expect(core.args['setDir'], {'dir': -1});
     },
   );
@@ -267,15 +268,10 @@ void main() {
 
     expect(find.text('50mm F1.4'), findsOneWidget);
     expect(find.text('85mm'), findsOneWidget);
-    // 已标定：显示行程圈数；未标定：明说未标定。
-    expect(
-      find.textContaining('行程 1.00 行程'),
-      findsOneWidget,
-      reason: '已标定行程要显示圈数',
-    );
-    expect(find.textContaining('未标定行程'), findsOneWidget);
     expect(find.textContaining('距离标定 3 点'), findsOneWidget);
-    expect(find.textContaining('焦距变远：- 方向'), findsOneWidget);
+    expect(find.textContaining('待选择物距方向'), findsOneWidget);
+    expect(find.textContaining('物距变近：− 方向'), findsOneWidget);
+    expect(find.textContaining('行程 1.00'), findsNothing);
   });
 
   testWidgets(
@@ -346,90 +342,71 @@ void main() {
     expect(core.args['deleteLens']?['id'], 'L1');
   });
 
-  testWidgets('an uncalibrated lens opens into stroke calibration', (
+  testWidgets(
+    'limit search stays visible before connection and in follow phase',
+    (tester) async {
+      final disconnected = FakeCore(
+        stateFor(phase: SetupPhase.stroke, connected: false),
+      );
+      await pumpFollowPage(tester, disconnected);
+      expect(find.text('FM03 自动寻限位'), findsOneWidget);
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.widgetWithText(OutlinedButton, 'FM03 自动寻限位'),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(find.text('记录这一端 A'), findsNothing);
+      expect(find.text('确认为焦距最近点'), findsNothing);
+      final following = FakeCore(stateFor(calSupported: true));
+      await pumpFollowPage(tester, following);
+      await tapVisible(tester, find.text('FM03 自动寻限位'));
+      expect(find.text('FM03 内部行程校准'), findsOneWidget);
+      await tester.tap(find.text('开始校准'));
+      await tester.pumpAndSettle();
+      expect(following.called('startAutoCalibration'), isTrue);
+    },
+  );
+
+  testWidgets('direction panel permits trial jog and selects near direction', (
     tester,
   ) async {
     final core = FakeCore(
-      stateFor(
-        current: lens(calibrated: false, strokeRevs: 0),
-        phase: SetupPhase.stroke,
-        nearSteps: null,
-      ),
+      stateFor(phase: SetupPhase.align, calDirectionPending: true),
     );
     await pumpFollowPage(tester, core);
-
-    // 顶部相位标签和面板标题都会写“① 标定行程”，所以是两个。
-    expect(find.text('① 标定行程'), findsNWidgets(2));
-    expect(find.text('记录这一端 A'), findsOneWidget);
-    expect(find.text('记录另一端 B，完成标定'), findsOneWidget);
-    // 标定阶段的按钮不能提前可用。
-    expect(
-      tester.widget<FilledButton>(find.byType(FilledButton).last).onPressed,
-      isNull,
-      reason: '还没记录 A 就不能完成标定',
-    );
-    expect(find.textContaining('② 单侧对齐'), findsNothing);
+    expect(find.text('② 选择方向'), findsOneWidget);
+    await tapVisible(tester, find.text('+80'));
+    expect(core.args['jog']?['delta'], 80);
+    await tapVisible(tester, find.text('+ 方向变近'));
+    expect(core.args['setDir']?['dir'], -1);
+    expect(find.text('确认为焦距最近点'), findsNothing);
   });
 
-  testWidgets('a calibrated lens opens straight into single-side alignment', (
+  testWidgets('five-point calibration displays chart and starts follow', (
     tester,
   ) async {
-    final core = FakeCore(stateFor(phase: SetupPhase.align, nearSteps: null));
+    final core = FakeCore(stateFor(phase: SetupPhase.calibrate));
     await pumpFollowPage(tester, core);
-
-    expect(find.text('② 单侧对齐'), findsNWidgets(2));
-    expect(find.text('确认为焦距最近点'), findsOneWidget);
-    expect(find.text('开始跟焦'), findsNothing, reason: '还没确认最近点，不该出现“开始跟焦”');
-    expect(find.text('焦距变远方向'), findsNothing);
-  });
-
-  testWidgets('after confirming the nearest point it asks for the direction', (
-    tester,
-  ) async {
-    final core = FakeCore(stateFor(phase: SetupPhase.align, nearSteps: 1000));
-    await pumpFollowPage(tester, core);
-
-    expect(find.text('最近点 = 1000 坐标'), findsOneWidget);
-    expect(find.text('从最近点往哪个旋转方向是“焦距变远”？'), findsOneWidget);
-    expect(find.text('+ 方向变远'), findsOneWidget);
-
+    expect(find.text('物距—旋转位置图表'), findsOneWidget);
     await tapVisible(tester, find.text('开始跟焦'));
     expect(core.called('startFollow'), isTrue);
   });
 
-  testWidgets('alignment actions go to the core', (tester) async {
-    final core = FakeCore(stateFor(phase: SetupPhase.align, nearSteps: null));
-    await pumpFollowPage(tester, core);
-
-    await tapVisible(tester, find.text('确认为焦距最近点'));
-    expect(core.called('confirmNear'), isTrue);
-  });
-
-  testWidgets('follow phase shows focus controls, not calibration panels', (
-    tester,
-  ) async {
-    final core = FakeCore(stateFor());
-    await pumpFollowPage(tester, core);
-
-    expect(find.text('手动焦点'), findsOneWidget);
-    expect(find.text('距离标定'), findsOneWidget);
-    expect(find.text('焦距变远方向'), findsOneWidget);
-    expect(find.text('① 标定行程'), findsNothing);
-    expect(find.text('② 单侧对齐'), findsNothing);
-    // 软限位区间来自核心，UI 只显示。
-    expect(find.textContaining('允许 1000..7400 坐标'), findsOneWidget);
-  });
-
-  testWidgets('stop and home go to the core', (tester) async {
-    final core = FakeCore(stateFor());
-    await pumpFollowPage(tester, core);
-
-    await tapVisible(tester, find.text('停'));
-    expect(core.called('stopPressed'), isTrue);
-
-    await tapVisible(tester, find.text('设当前位置为原点'));
-    expect(core.called('homePressed'), isTrue);
-  });
+  testWidgets(
+    'follow phase shows motor controls and no software origin action',
+    (tester) async {
+      final core = FakeCore(stateFor());
+      await pumpFollowPage(tester, core);
+      expect(find.text('手动焦点'), findsOneWidget);
+      expect(find.text('物距变近方向'), findsOneWidget);
+      expect(find.text('设当前位置为原点'), findsNothing);
+      await tapVisible(tester, find.text('停'));
+      expect(core.called('stopPressed'), isTrue);
+    },
+  );
 
   testWidgets('jog buttons send relative steps', (tester) async {
     final core = FakeCore(stateFor());
@@ -455,33 +432,34 @@ void main() {
     expect(core.args['jog']?['delta'], 2048);
   });
 
-  testWidgets('auto focus chip is only enabled once aligned with two points', (
-    tester,
-  ) async {
-    // 还没对齐：禁用
-    final notAligned = FakeCore(
-      stateFor(phase: SetupPhase.align, nearSteps: null),
-    );
-    await pumpFollowPage(tester, notAligned);
-    expect(find.text('自动(先对齐)'), findsOneWidget);
-    expect(
-      tester
-          .widget<FilterChip>(find.widgetWithText(FilterChip, '自动(先对齐)'))
-          .onSelected,
-      isNull,
-    );
+  testWidgets(
+    'auto focus chip requires completed setup and a valid five-point map',
+    (tester) async {
+      // 还没对齐：禁用
+      final notAligned = FakeCore(
+        stateFor(phase: SetupPhase.align, nearSteps: null),
+      );
+      await pumpFollowPage(tester, notAligned);
+      expect(find.text('自动(先完成标定)'), findsOneWidget);
+      expect(
+        tester
+            .widget<FilterChip>(find.widgetWithText(FilterChip, '自动(先完成标定)'))
+            .onSelected,
+        isNull,
+      );
 
-    // 对齐了但距离标定只有一点：仍禁用
-    final onePoint = FakeCore(stateFor(lutReady: false));
-    await pumpFollowPage(tester, onePoint);
-    expect(find.text('自动(需2点标定)'), findsOneWidget);
+      // 对齐了但距离标定只有一点：仍禁用
+      final onePoint = FakeCore(stateFor(lutReady: false));
+      await pumpFollowPage(tester, onePoint);
+      expect(find.text('自动(需5点标定)'), findsOneWidget);
 
-    // 对齐 + 两点：可用
-    final ready = FakeCore(stateFor());
-    await pumpFollowPage(tester, ready);
-    await tapVisible(tester, find.text('自动跟焦'));
-    expect(ready.args['setAuto']?['on'], true);
-  });
+      // 对齐 + 两点：可用
+      final ready = FakeCore(stateFor());
+      await pumpFollowPage(tester, ready);
+      await tapVisible(tester, find.text('自动跟焦'));
+      expect(ready.args['setAuto']?['on'], true);
+    },
+  );
 
   testWidgets('manual slider is disabled while auto focus is on', (
     tester,
@@ -523,14 +501,14 @@ void main() {
     await pumpFollowPage(tester, core);
 
     // 需要先滚到“重新标定行程”。
-    await scrollTo(tester, find.text('重新标定行程（长按）'));
-    await tester.longPress(find.text('重新标定行程（长按）'));
+    await scrollTo(tester, find.text('重置距离标定（长按）'));
+    await tester.longPress(find.text('重置距离标定（长按）'));
     await tester.pumpAndSettle();
-    expect(find.text('清空行程标定？'), findsOneWidget, reason: '防误触：要先确认');
+    expect(find.text('清空距离标定表？'), findsOneWidget, reason: '防误触：要先确认');
 
     await tester.tap(find.text('清空重标'));
     await tester.pumpAndSettle();
-    expect(core.called('recalibrateStroke'), isTrue);
+    expect(core.called('resetLensCalibration'), isTrue);
   });
 
   testWidgets('cancelling the recalibrate confirm changes nothing', (
@@ -539,13 +517,13 @@ void main() {
     final core = FakeCore(stateFor());
     await pumpFollowPage(tester, core);
 
-    await scrollTo(tester, find.text('重新标定行程（长按）'));
-    await tester.longPress(find.text('重新标定行程（长按）'));
+    await scrollTo(tester, find.text('重置距离标定（长按）'));
+    await tester.longPress(find.text('重置距离标定（长按）'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
 
-    expect(core.called('recalibrateStroke'), isFalse);
+    expect(core.called('resetLensCalibration'), isFalse);
   });
 
   testWidgets('diagnostics render from the snapshot, not from UI logic', (
@@ -620,5 +598,19 @@ void main() {
           .onSelected,
       isNull,
     );
+  });
+  testWidgets('manual measured distance can record without LiDAR', (
+    tester,
+  ) async {
+    final core = FakeCore(stateFor(phase: SetupPhase.calibrate));
+    await pumpFollowPage(tester, core);
+    await scrollTo(tester, find.widgetWithText(TextField, '物距（m，可手动输入）'));
+    await tester.enterText(
+      find.widgetWithText(TextField, '物距（m，可手动输入）'),
+      '2.5',
+    );
+    await tester.pumpAndSettle();
+    await tapVisible(tester, find.text('记录当前'));
+    expect(core.args['addLutPoint']?['meters'], 2.5);
   });
 }

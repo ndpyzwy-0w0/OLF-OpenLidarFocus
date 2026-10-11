@@ -4,89 +4,24 @@ import XCTest
 
 /// 从 Dart 的 `test/lens_test.dart` 逐条搬过来，外加存储的落盘/迁移。
 final class LensTests: XCTestCase {
-  func testStrokeIsLengthOnlyAndRescalesWithMicrosteps() {
-    let l = Lens(id: "1", name: "x", strokeSteps: 6400, strokeMicrosteps: 16)
-    XCTAssertTrue(l.calibrated)
-    XCTAssertEqual(l.strokeAt(16), 6400)
-    // 1/256 is 16x finer, so the same physical travel needs 16x the pulses.
-    XCTAssertEqual(l.strokeAt(256), 102400)
-    XCTAssertFalse(Lens(id: "2", name: "y").calibrated)
-    // 减号只是方向，行程长度取绝对值。
-    XCTAssertEqual(
-      Lens(id: "3", name: "z", strokeSteps: -6400, strokeMicrosteps: 16).strokeAt(16),
-      6400
-    )
-  }
-
-  func testAlignedRangeOnlyCoversTheFarSideOfTheNearestPoint() {
-    XCTAssertEqual(alignedRange(1000, 1, 500).lo, 1000)
-    XCTAssertEqual(alignedRange(1000, 1, 500).hi, 1500)
-    XCTAssertEqual(alignedRange(1000, -1, 500).lo, 500)
-    XCTAssertEqual(alignedRange(1000, -1, 500).hi, 1000)
-    // 行程为 0 时退化成一个点，而不是一个反向区间。
-    XCTAssertEqual(alignedRange(-3, 1, 0).lo, -3)
-    XCTAssertEqual(alignedRange(-3, 1, 0).hi, -3)
-  }
-
-  func testInferDirReadsTheDistanceTableDirection() {
-    let rising = LensLut([
-      LutPoint(meters: 1, steps: 0),
-      LutPoint(meters: 3, steps: 900),
-    ], microsteps: 16)
-    XCTAssertEqual(inferDir(rising), 1)
-    let falling = LensLut([
-      LutPoint(meters: 1, steps: 900),
-      LutPoint(meters: 3, steps: 0),
-    ], microsteps: 16)
-    XCTAssertEqual(inferDir(falling), -1)
-    XCTAssertNil(inferDir(LensLut([])))
-  }
-
-  func testRebasePutsTheNearestTablePointOntoTodaysNearestPoint() {
-    let lut = LensLut([
-      LutPoint(meters: 1, steps: 300),
-      LutPoint(meters: 3, steps: 5300),
-    ], microsteps: 16)
-    let delta = lutRebaseDelta(-200, lut)
-    XCTAssertEqual(delta, -500)
-    let rebased = lut.shifted(delta)
-    XCTAssertEqual(rebased.points[0].steps, -200)
-    // 平移不改变距离→步数的相对关系。
-    XCTAssertEqual(rebased.stepsFor(2), lut.stepsFor(2)! - 500)
-  }
-
-  func testLensSurvivesAJsonRoundTrip() {
-    let l = Lens(
-      id: "a",
-      name: "50mm",
-      params: "F1.4",
-      lut: LensLut([
-        LutPoint(meters: 1, steps: 0),
-        LutPoint(meters: 2, steps: 6400),
-      ], microsteps: 32),
-      strokeSteps: 8000,
-      strokeMicrosteps: 32,
-      dir: -1
-    )
-    guard let back = Lens(jsonObject: l.jsonObject) else {
-      return XCTFail("round trip failed")
+  func testLensRoundTripSavesOnlyDirectionAndDistanceMap() {
+    let lens = Lens(id: "a", name: "50mm", params: "F1.4",
+      lut: LensLut([LutPoint(meters: 1, steps: 2000)]), dir: -1, directionConfirmed: true)
+    XCTAssertEqual(Lens(jsonObject: lens.jsonObject), lens)
+    for key in ["stroke", "strokeMs", "autoTravel", "autoSafeSpan", "autoFirmware"] {
+      XCTAssertNil(lens.jsonObject[key])
     }
-    XCTAssertEqual(back, l)
   }
 
-  func testWithoutStrokeClearsOnlyTheStroke() {
-    let l = Lens(
-      id: "a",
-      name: "50mm",
-      lut: LensLut([LutPoint(meters: 1, steps: 5)], microsteps: 16),
-      strokeSteps: 8000,
-      dir: -1
-    )
-    let cleared = l.withoutStroke()
-    XCTAssertFalse(cleared.calibrated)
-    // 防误触清空的是行程，方向和历史标定要留着，方便重标后接着用。
-    XCTAssertEqual(cleared.dir, -1)
-    XCTAssertEqual(cleared.lut.points.count, 1)
+  func testOldFm03AlignmentTableRequiresRecalibration() {
+    let old: [String: Any] = ["id": "old", "name": "50mm", "dir": -1,
+      "stroke": 4096, "autoTravel": 4096, "lut": ["points": [["m": 1, "s": 300]]]]
+    let lens = Lens(jsonObject: old)!
+    XCTAssertEqual(lens.name, "50mm")
+    XCTAssertEqual(lens.dir, -1)
+    XCTAssertFalse(lens.directionConfirmed)
+    XCTAssertTrue(lens.lut.points.isEmpty)
+    XCTAssertNil(lens.jsonObject["stroke"])
   }
 
   // MARK: - 存储
@@ -101,10 +36,8 @@ final class LensTests: XCTestCase {
         id: "a",
         name: "50mm F1.4",
         params: "F1.4",
-        lut: LensLut([LutPoint(meters: 2, steps: 300)], microsteps: 16),
-        strokeSteps: 6400,
-        strokeMicrosteps: 16,
-        dir: -1
+        lut: LensLut([LutPoint(meters: 2, steps: 300)]),
+        dir: -1, directionConfirmed: true
       )
     )
     store.upsert(Lens(id: "b", name: "85mm"))
@@ -114,9 +47,9 @@ final class LensTests: XCTestCase {
     XCTAssertEqual(back.lenses.count, 2)
     XCTAssertEqual(back.lenses[0].name, "50mm F1.4")
     XCTAssertEqual(back.lenses[0].dir, -1)
-    XCTAssertEqual(back.lenses[0].strokeAt(256), 102400)
+    XCTAssertTrue(back.lenses[0].directionConfirmed)
     XCTAssertEqual(back.lenses[0].lut.points.count, 1)
-    XCTAssertFalse(back.lenses[1].calibrated)
+    XCTAssertFalse(back.lenses[1].directionConfirmed)
   }
 
   func testStoreUpsertReplacesByIDAndRemoveDrops() throws {
@@ -149,10 +82,27 @@ final class LensTests: XCTestCase {
   func testFm03StorePreservesButDoesNotImportOldStepCalibration() throws {
     let dir=try makeTempDir();defer { try? FileManager.default.removeItem(at:dir) }
     let old=dir.appendingPathComponent("lenses.json")
-    let data=try JSONSerialization.data(withJSONObject:["lenses":[Lens(id:"old",name:"50mm",strokeSteps:6400).jsonObject]])
+    let data=try JSONSerialization.data(withJSONObject:["lenses":[Lens(id:"old",name:"50mm").jsonObject]])
     try data.write(to:old)
     XCTAssertTrue(LensStore.load(directory:dir).lenses.isEmpty)
     XCTAssertEqual(try Data(contentsOf:old),data)
+  }
+
+  func testFivePointChartSurvivesColdStoreReload() throws {
+    let directory = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let lens = Lens(id: "full", name: "85mm", lut: LensLut([
+      LutPoint(meters: 0.5, steps: 4096), LutPoint(meters: 1, steps: 3000),
+      LutPoint(meters: 2, steps: 2000), LutPoint(meters: 3, steps: 1000),
+      LutPoint(meters: 5, steps: 100)]), dir: -1, directionConfirmed: true)
+    let store = LensStore(directory: directory)
+    store.upsert(lens)
+    try store.save()
+    let restored = LensStore.load(directory: directory).lenses[0]
+    XCTAssertEqual(restored, lens)
+    XCTAssertTrue(restored.lut.ready)
+    XCTAssertEqual(restored.lut.curve, lens.lut.curve)
+    XCTAssertEqual(restored.lut.stepsFor(1.5), lens.lut.stepsFor(1.5))
   }
 
   private func makeTempDir() throws -> URL {

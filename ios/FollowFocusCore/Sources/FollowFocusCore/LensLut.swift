@@ -1,8 +1,6 @@
 import Foundation
 
-/// 一个距离标定点：在 [meters] 处的实焦位置是 [steps] 步。
-///
-/// [steps] 是**标定当次会话**的绝对步数（开环计数），跨会话必须靠对齐重锚。
+/// 在 meters 物距处实焦时，FM03 原始归一化坐标为 steps（0～4096）。
 public struct LutPoint: Equatable {
   public let meters: Double
   public let steps: Int
@@ -17,42 +15,44 @@ public struct LutPoint: Equatable {
 public struct LensLut: Equatable {
   public let points: [LutPoint]
 
-  /// 标定点的步数是在这个细分下记录的。换细分后用 [scaledTo] 换算。
-  /// 步数与细分成正比，所以不记录细分，改细分后整套标定会静默错位。
-  public let microsteps: Int
-
-  public init(_ raw: [LutPoint], microsteps: Int = 1) {
-    self.points = raw.sorted { $0.meters < $1.meters }
-    self.microsteps = microsteps
+  public init(_ raw: [LutPoint]) {
+    self.points = raw.filter {
+      $0.meters.isFinite && (0.05...1000).contains($0.meters) && (0...4096).contains($0.steps)
+    }.sorted { $0.meters < $1.meters }
   }
 
-  public var ready: Bool { points.count >= 2 }
+  public static let minimumPoints = 5
 
-  public var minSteps: Int? { points.map(\.steps).min() }
-  public var maxSteps: Int? { points.map(\.steps).max() }
+  public var ready: Bool { points.count >= Self.minimumPoints && isMonotonic }
 
-  /// 把标定步数换算到另一个细分。细分相同时返回自身。
-  public func scaledTo(_ ms: Int) -> LensLut {
-    if ms == microsteps || microsteps <= 0 || ms <= 0 { return self }
-    let k = Double(ms) / Double(microsteps)
-    return LensLut(
-      points.map { LutPoint(meters: $0.meters, steps: Int((Double($0.steps) * k).rounded())) },
-      microsteps: ms
-    )
+  public var isMonotonic: Bool {
+    guard points.count >= 2 else { return false }
+    let dir = points.last!.steps > points.first!.steps ? 1 : -1
+    return zip(points, points.dropFirst()).allSatisfy {
+      $1.meters - $0.meters >= 0.02 && ($1.steps - $0.steps) * dir > 0
+    }
   }
 
-  /// 整体平移标定点。对齐后要把整张表挪到本次会话的坐标系里。
-  public func shifted(_ delta: Int) -> LensLut {
-    delta == 0
-      ? self
-      : LensLut(
-        points.map { LutPoint(meters: $0.meters, steps: $0.steps + delta) },
-        microsteps: microsteps
-      )
+  public func matchesDirection(_ dir: Int) -> Bool {
+    isMonotonic && (points.last!.steps - points.first!.steps) * dir > 0
+  }
+
+  /// 图表与跟焦共用插值；少于五点时显示预览，不能开启自动跟焦。
+  public var curve: [LutPoint] {
+    guard isMonotonic, let first = points.first, let last = points.last else { return [] }
+    return (0...80).compactMap { i in
+      let m = first.meters + (last.meters - first.meters) * Double(i) / 80
+      return interpolatedSteps(m).map { LutPoint(meters: m, steps: $0) }
+    }
   }
 
   public func stepsFor(_ meters: Double) -> Int? {
-    guard ready, let first = points.first, let last = points.last else { return nil }
+    guard ready, meters.isFinite, meters > 0 else { return nil }
+    return interpolatedSteps(meters)
+  }
+
+  private func interpolatedSteps(_ meters: Double) -> Int? {
+    guard let first = points.first, let last = points.last else { return nil }
     let m = max(meters, 0.05)
     if m <= first.meters { return first.steps }
     if m >= last.meters { return last.steps }
@@ -64,21 +64,17 @@ public struct LensLut: Equatable {
     return last.steps
   }
 
-  /// 记录一个标定点。先把已有标定点换算到 [microsteps]，再加新点，
-  /// 保证整套标定始终统一在同一个细分下。
-  public func adding(_ p: LutPoint, microsteps ms: Int? = nil) -> LensLut {
-    let target = ms ?? microsteps
-    let base = scaledTo(target)
-    var next = base.points.filter { abs($0.meters - p.meters) >= 0.02 }
-    next.append(p)
-    return LensLut(next, microsteps: target)
+  /// 距离相差不到 2 cm 的点直接替换；全部使用 FM03 0～4096 坐标。
+  public func adding(_ p: LutPoint) -> LensLut {
+    guard p.meters.isFinite, (0.05...1000).contains(p.meters), (0...4096).contains(p.steps) else { return self }
+    return LensLut(points.filter { abs($0.meters - p.meters) >= 0.02 } + [p])
   }
 
   public func removingAt(_ i: Int) -> LensLut {
     var next = points
     guard next.indices.contains(i) else { return self }
     next.remove(at: i)
-    return LensLut(next, microsteps: microsteps)
+    return LensLut(next)
   }
 }
 

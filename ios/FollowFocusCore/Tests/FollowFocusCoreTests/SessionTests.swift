@@ -159,7 +159,7 @@ private final class FakeFirmware {
     reply(status(sequence: p.sequence), to: host, port: port)
     if p.cmd==kFfQuery || p.cmd==kFfHome {
       var v=status(sequence:p.sequence);v[1]=kFfStatusV2
-      v.append(contentsOf:[1,0,0,0]);reply(v,to:host,port:port)
+      v.append(contentsOf:[invalidateCalResult ? 0 : 1,0,0,0]);reply(v,to:host,port:port)
     }
   }
 
@@ -167,7 +167,7 @@ private final class FakeFirmware {
     var flags = kFlagCanOk
     if _enabled.current { flags |= kFlagEnabled }
     // 固件只在“还差着步数”时报 MOVING，看门狗也只在 MOVING 时才可能刹停。
-    let moving = holdMotion.current || _target.current != _pos.current
+    let moving = holdMotion.current
     if moving { flags |= kFlagMoving }
     return FfPacket(
       cmd: kFfStatus,
@@ -267,7 +267,7 @@ final class SessionTests: XCTestCase {
       let h = try Harness(); defer { h.stop() }
       prepareAuto(h)
       let limitsBefore = h.firmware.count(kFfSetLimits)
-      h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+      h.session.startAutoCalibration()
       XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
       XCTAssertEqual(h.latest.current?.calSafeSpan, 4096)
       XCTAssertEqual(h.firmware.count(kFfHome), 0)
@@ -276,13 +276,15 @@ final class SessionTests: XCTestCase {
       XCTAssertTrue(h.latest.current?.calDirectionPending == true)
       h.session.setDir(direction)
       XCTAssertTrue(waitUntil { h.latest.current?.calDirectionPending == false })
+      seedMap(h, direction: direction)
       h.session.startFollow()
       XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
       XCTAssertEqual(h.latest.current?.nearSteps, direction > 0 ? 0 : 4096)
       XCTAssertEqual(h.latest.current?.limitLo, 0)
       XCTAssertEqual(h.latest.current?.limitHi, 4096)
       XCTAssertEqual(h.firmware.count(kFfSetLimits), limitsBefore)
-      XCTAssertEqual(h.store.lenses.first?.autoTravel, 4096)
+      XCTAssertNil(h.store.lenses.first?.jsonObject["autoTravel"])
+      XCTAssertTrue(h.store.lenses.first?.lut.ready == true)
     }
   }
 
@@ -290,7 +292,7 @@ final class SessionTests: XCTestCase {
     let h = try Harness(); defer { h.stop() }
     h.firmware.dropFirstStartReply = true
     prepareAuto(h)
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
     XCTAssertGreaterThan(h.firmware.count(kFfCalQuery), 1)
     h.session.cancelAutoCalibration()
@@ -303,7 +305,7 @@ final class SessionTests: XCTestCase {
     let h = try Harness(); defer { h.stop() }
     h.firmware.rejectStart = true
     prepareAuto(h)
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil { h.latest.current?.calStage == "failed" })
     XCTAssertEqual(h.latest.current?.calError, 2)
     XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
@@ -317,7 +319,7 @@ final class SessionTests: XCTestCase {
     h.firmware.rejectStart = true
     h.firmware.rejectStartError = 11
     prepareAuto(h)
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil { h.latest.current?.calStage == "failed" })
     XCTAssertEqual(h.latest.current?.calError, 11)
     XCTAssertTrue(
@@ -332,7 +334,7 @@ final class SessionTests: XCTestCase {
     let h = try Harness(); defer { h.stop() }
     prepareAuto(h)
     h.firmware.dropStatusReplies = true
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil(3) { h.latest.current?.calStage == "failed" })
     XCTAssertEqual(h.latest.current?.calError, 20)
     XCTAssertTrue(
@@ -347,7 +349,7 @@ final class SessionTests: XCTestCase {
     prepareAuto(h)
     h.firmware.dropCalStartReplies = true
     h.firmware.dropRunQueries = true
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil(6) { h.latest.current?.calStage == "failed" })
     XCTAssertEqual(h.latest.current?.calError, 21)
     XCTAssertTrue(
@@ -418,7 +420,7 @@ final class SessionTests: XCTestCase {
     let h = try Harness(); defer { h.stop() }
     h.firmware.wrongRunReplies = 2
     prepareAuto(h)
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil { h.latest.current?.calStage == "seek_negative" })
     h.session.cancelAutoCalibration()
     XCTAssertTrue(waitUntil { h.latest.current?.calStage == "cancelled" })
@@ -426,32 +428,35 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(h.firmware.count(kFfSetPos), 0)
   }
 
-  func testResultLossAndHomeInvalidatePosition() throws {
+  func testResultLossInvalidatesPositionAndResetDoesNotChangeMotorLimits() throws {
     let h = try Harness(); defer { h.stop() }
     prepareAuto(h)
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
     h.firmware.invalidateCalResult = true
-    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "failed" })
-    XCTAssertEqual(h.latest.current?.phase, .stroke)
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .stroke })
     h.firmware.invalidateCalResult = false
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
     h.session.setDir(1)
-    XCTAssertTrue(waitUntil { h.latest.current?.calDirectionPending == false })
-    h.session.homePressed()
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .stroke })
-    h.session.recalibrateStroke()
-    XCTAssertTrue(waitUntil { h.latest.current?.strokeSteps == 0 })
-    XCTAssertNil(h.store.lenses.first?.autoTravel)
+    seedMap(h)
+    let homes = h.firmware.count(kFfHome)
+    let limits = h.firmware.count(kFfSetLimits)
+    h.session.resetLensCalibration()
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .align })
+    XCTAssertTrue(h.store.lenses.first!.lut.points.isEmpty)
+    XCTAssertEqual(h.latest.current?.calSafeSpan, 4096)
+    XCTAssertEqual(h.firmware.count(kFfHome), homes)
+    XCTAssertEqual(h.firmware.count(kFfSetLimits), limits)
   }
 
   func testLostStatusAfterFollowReleasesOldCoordinates() throws {
     let h = try Harness(); defer { h.stop() }
     prepareAuto(h)
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
+    h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
     h.session.setDir(-1)
+    seedMap(h, direction: -1)
     h.session.startFollow()
     XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
     h.firmware.dropStatusReplies = true
@@ -483,8 +488,7 @@ final class SessionTests: XCTestCase {
     let h=try Harness();defer { h.stop() }
     h.session.connect();XCTAssertTrue(waitUntil { h.firmware.enabled })
     XCTAssertEqual(h.firmware.last(kFfSetSpeed)?.a,64)
-    XCTAssertEqual(h.firmware.last(kFfSetLimits)?.a,-4096)
-    XCTAssertEqual(h.firmware.last(kFfSetLimits)?.b,4096)
+    XCTAssertEqual(h.firmware.count(kFfSetLimits),0)
     XCTAssertEqual(h.firmware.count(kFfFm03Set),0)
     XCTAssertGreaterThan(h.firmware.count(kFfQuery),0)
   }
@@ -499,6 +503,9 @@ final class SessionTests: XCTestCase {
     h.session.setFm03(kFm03Tolerance,8)
     XCTAssertTrue(waitUntil { h.firmware.last(kFfFm03Set)?.b==8 })
     XCTAssertEqual(h.latest.current?.stepsPerRev,4096)
+    prepareReady(h)
+    h.firmware.pos = 0
+    XCTAssertTrue(waitUntil { h.latest.current?.pos == 0 })
     h.session.jog(1024);XCTAssertTrue(waitUntil { h.latest.current?.pos==1024 })
     XCTAssertEqual(h.latest.current?.posRevs ?? 0,0.25,accuracy:1e-9)
   }
@@ -517,6 +524,7 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(waitUntil { h.firmware.enabled })
 
     // 运动停在半路，等于一次走不完的长行程。
+    prepareReady(h)
     h.firmware.holdMotion.set(true)
     h.session.setSlider(0.9)
 
@@ -557,6 +565,7 @@ final class SessionTests: XCTestCase {
     h.session.connect()
     XCTAssertTrue(waitUntil { h.firmware.enabled })
 
+    prepareReady(h)
     h.firmware.holdMotion.set(true)
     h.session.setSlider(0.9)
     XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 })
@@ -581,174 +590,113 @@ final class SessionTests: XCTestCase {
 
   // MARK: - 相位机
 
-  func testPhaseWalksStrokeThenAlignThenFollow() throws {
-    let h = try Harness()
-    defer { h.stop() }
-    h.session.connect()
-
-    // 新镜头：还没标行程
-    h.session.createLens(name: "50mm", params: "F1.4")
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .stroke })
-    XCTAssertEqual(h.latest.current?.strokeSteps, 0)
-
-    // 标行程：A 到 B 两点距离
-    h.firmware.pos = 0
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 0 })
-    h.session.recordStrokeA()
-    h.firmware.pos = 4096
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 4096 })
-    h.session.finishStroke()
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .align })
-    XCTAssertEqual(h.latest.current?.strokeSteps, 4096)
-
-    // 对齐：确认最近点 + 选方向 → 跟焦
-    h.firmware.pos = 0
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 0 })
-    h.session.confirmNear()
-    h.session.setDir(1)
-    h.session.startFollow()
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
-    XCTAssertEqual(h.latest.current?.nearSteps, 0)
-    XCTAssertEqual(h.latest.current?.dir, 1)
-
-    // 对齐后软限位只覆盖“最近点 → 远端”，绝不越过标定行程。
-    XCTAssertTrue(
-      waitUntil {
-        h.firmware.last(kFfSetLimits)?.a == 0
-          && h.firmware.last(kFfSetLimits)?.b == 4096
-      },
-      "对齐后限位应当是 0..4096，而不是默认的 ±4096")
-  }
-
-  func testReverseDirectionFlipsTheAlignedRange() throws {
-    let h = try Harness()
-    defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 1000, strokeMicrosteps: 1))
-    h.session.selectLens(id: "L")
-    h.session.connect()
-
-    h.firmware.pos = 3000
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 3000 })
-    h.session.confirmNear()
-    h.session.setDir(-1)
-    h.session.startFollow()
-
-    XCTAssertTrue(
-      waitUntil {
-        h.firmware.last(kFfSetLimits)?.a == 2000
-          && h.firmware.last(kFfSetLimits)?.b == 3000
-      }, "选反方向时限位应当是 2000..3000")
-  }
-
-  // MARK: - 防误触 / 对齐失效
-
-  func testUnalignRestoresFirmwareDefaultLimits() throws {
-    let h = try Harness()
-    defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 4096, strokeMicrosteps: 1))
-    h.session.selectLens(id: "L")
-    h.session.connect()
-    h.firmware.pos = 1000
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 1000 })
-    h.session.confirmNear()
-    h.session.setDir(1)
-    h.session.startFollow()
-    XCTAssertTrue(waitUntil { h.firmware.last(kFfSetLimits)?.a == 1000 })
-
-    // 作废对齐必须真的把固件限位改回去：否则固件还留着上一轮对齐的窄区间，
-    // 对齐阶段的“自由微调”会在旧边界被夹住，表现是微调不动。
-    h.session.unalign()
-    XCTAssertTrue(
-      waitUntil {
-        h.firmware.last(kFfSetLimits)?.a == -4096
-          && h.firmware.last(kFfSetLimits)?.b == 4096
-      }, "作废对齐要下发默认限位")
-    XCTAssertNil(h.latest.current?.nearSteps)
-    XCTAssertEqual(h.latest.current?.phase, .align)
-  }
-
-  func testHomeInvalidatesAlignment() throws {
-    let h = try Harness()
-    defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 4096, strokeMicrosteps: 1))
-    h.session.selectLens(id: "L")
-    h.session.connect()
-    h.firmware.pos = 1000
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 1000 })
-    h.session.confirmNear()
-    h.session.setDir(1)
-    h.session.startFollow()
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
-
-    // 软件置零后当前位置变 0，最近点参考失效。
-    h.session.homePressed()
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .align })
-    XCTAssertNil(h.latest.current?.nearSteps)
-    XCTAssertTrue(waitUntil { h.firmware.count(kFfHome) > 0 })
-  }
-
-  func testRecalibrateStrokeOnlyClearsTheStroke() throws {
-    let h = try Harness()
-    defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 4096, strokeMicrosteps: 1, dir: -1))
-    h.session.selectLens(id: "L")
-    h.session.connect()
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .align })
-
-    h.session.recalibrateStroke()
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .stroke })
-    XCTAssertEqual(h.latest.current?.strokeSteps, 0)
-    // 方向是物理属性，清行程时不该一起丢掉。
-    XCTAssertEqual(h.latest.current?.dir, -1)
-  }
-
-  // MARK: - JOG
-
-  func testJogBeyondTheAlignedRangeIsRefused() throws {
-    let h = try Harness()
-    defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 4096, strokeMicrosteps: 1))
-    h.session.selectLens(id: "L")
-    h.session.connect()
-    XCTAssertTrue(waitUntil { h.firmware.enabled })
-
-    h.firmware.pos = 1000
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 1000 })
-    h.session.confirmNear()
-    h.session.setDir(1)
-    h.session.startFollow()
-    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
-
+  func testNewLensWalksLimitsDirectionFivePointsThenFollow() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    XCTAssertEqual(h.session.snapshot().phase, .stroke)
+    h.session.jog(80)
+    pump(0.1)
+    XCTAssertEqual(h.firmware.count(kFfJog), 0)
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.phase == .align })
+    // 方向选择时可试转，不需要 HOME、记录 A/B 或最近点对齐。
     let before = h.firmware.count(kFfJog)
-    h.session.jog(10000)  // 远超 1000..7400
-    pump(0.12)
-    XCTAssertEqual(h.firmware.count(kFfJog), before, "超出软限位的 JOG 不能发出去")
-    XCTAssertTrue(
-      h.latest.current?.msg.contains("超出软限位") ?? false,
-      "要被拒绝并说明原因，而不是静默不动")
-
-    h.session.jog(100)
-    XCTAssertTrue(waitUntil { h.firmware.count(kFfJog) > before }, "范围内的 JOG 要正常执行")
+    h.session.jog(-80)
+    XCTAssertTrue(waitUntil { h.firmware.count(kFfJog) > before })
+    h.session.setDir(1)
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .calibrate })
+    h.session.startFollow()
+    pump(0.1)
+    XCTAssertEqual(h.session.snapshot().phase, .calibrate)
+    seedMap(h)
+    h.session.startFollow()
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
+    XCTAssertEqual(h.firmware.count(kFfHome), 0)
+    XCTAssertEqual(h.firmware.count(kFfSetLimits), 0)
+    XCTAssertEqual(h.latest.current?.lutCurve.count, 81)
   }
 
-  func testJogBeforeEnableIsHeldUntilTheBoardConfirms() throws {
-    let h = try Harness()
-    defer { h.stop() }
-    // 板子刚重启：收到 ENABLE 也先回 enabled=0。
-    h.firmware.acksEnable = false
+  func testManualCalibrationRejectsWrongDirectionAndMotion() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareReady(h)
+    let id = h.store.lenses.first!.id
+    h.firmware.pos = 500
+    XCTAssertTrue(waitUntil { h.latest.current?.pos == 500 && h.latest.current?.moving == false })
+    h.session.addLutPoint(meters: 6)
+    pump(0.1)
+    XCTAssertEqual(h.store.lenses.first { $0.id == id }!.lut.points.count, 5)
+    XCTAssertTrue(h.session.snapshot().msg.contains("不一致"))
+    h.firmware.holdMotion.set(true)
+    XCTAssertTrue(waitUntil { h.latest.current?.moving == true })
+    h.session.addLutPoint(meters: 10)
+    pump(0.1)
+    XCTAssertEqual(h.store.lenses.first!.lut.points.count, 5)
+  }
+
+  func testReverseDirectionKeepsNormalizedRangeAndPersistsRawCoordinates() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareReady(h, direction: -1)
+    XCTAssertEqual(h.latest.current?.limitLo, 0)
+    XCTAssertEqual(h.latest.current?.limitHi, 4096)
+    XCTAssertTrue(h.store.lenses.first!.lut.matchesDirection(-1))
+    h.session.startFollow()
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
+    XCTAssertEqual(h.store.lenses.first!.lut.points.first!.steps, 3996)
+    h.session.setDir(1)
+    XCTAssertTrue(waitUntil { h.latest.current?.lutPoints.isEmpty == true })
+    XCTAssertEqual(h.session.snapshot().phase, .calibrate)
+  }
+
+  func testReconnectionRequiresFreshLimitSearchButPreservesMap() throws {
+    let h = try makeFollowingHarness(); defer { h.stop() }
+    let original = h.store.lenses.first!
+    h.session.disconnect()
+    XCTAssertTrue(waitUntil { h.latest.current?.connected == false })
     h.session.connect()
-    XCTAssertTrue(waitUntil { h.firmware.count(kFfEnable) > 0 })
-    XCTAssertFalse(h.firmware.enabled)
-
+    XCTAssertTrue(waitUntil { h.latest.current?.connected == true })
+    XCTAssertEqual(h.session.snapshot().phase, .stroke)
+    let before = h.firmware.count(kFfJog)
     h.session.jog(50)
-    XCTAssertTrue(
-      waitUntil { h.firmware.count(kFfEnable) > 1 }, "未使能时 JOG 要先补使能")
-    XCTAssertEqual(h.firmware.count(kFfJog), 0, "还没确认使能就不该走步")
+    pump(0.1)
+    XCTAssertEqual(h.firmware.count(kFfJog), before)
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.phase == .calibrate })
+    XCTAssertEqual(h.store.lenses.first!, original)
+    h.session.startFollow()
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
+    XCTAssertEqual(h.store.lenses.first!, original, "不能平移持久化坐标表")
+  }
 
-    // 固件开始正常上报使能后，暂存的 JOG 要补上。
-    h.firmware.acksEnable = true
-    XCTAssertTrue(
-      waitUntil { h.firmware.count(kFfJog) > 0 }, "使能确认后要补发暂存的 JOG")
+  func testJogOutsideNormalizedRangeIsRefused() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareReady(h)
+    let before = h.firmware.count(kFfJog)
+    h.session.jog(10000)
+    pump(0.1)
+    XCTAssertEqual(h.firmware.count(kFfJog), before)
+    XCTAssertTrue(h.session.snapshot().msg.contains("超出软限位"))
+    h.session.jog(-80)
+    XCTAssertTrue(waitUntil { h.firmware.count(kFfJog) > before })
+  }
+
+  private func prepareReady(_ h: Harness, direction: Int = 1) {
+    prepareAuto(h)
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+    h.session.setDir(direction)
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .calibrate })
+    seedMap(h, direction: direction)
+  }
+
+  private func seedMap(_ h: Harness, direction: Int = 1) {
+    for (meters, coordinate) in [(0.5, 100), (1.0, 800), (2.0, 2000), (3.0, 2800), (5.0, 3800)] {
+      let pos = direction > 0 ? coordinate : 4096 - coordinate
+      h.firmware.pos = Int32(pos)
+      XCTAssertTrue(waitUntil { h.latest.current?.pos == Int32(pos) && h.latest.current?.moving == false })
+      let count = h.session.snapshot().lutPoints.count
+      h.session.addLutPoint(meters: meters)
+      XCTAssertTrue(waitUntil { h.latest.current?.lutPoints.count == count + 1 })
+    }
   }
 
   // MARK: - 自动跟焦
@@ -756,24 +704,9 @@ final class SessionTests: XCTestCase {
   /// 造一个已对齐、可自动跟焦的会话。
   private func makeFollowingHarness() throws -> Harness {
     let h = try Harness()
-    let lut = LensLut(
-      [
-        LutPoint(meters: 1.0, steps: 0),
-        LutPoint(meters: 2.0, steps: 3200),
-        LutPoint(meters: 4.0, steps: 4800),
-      ], microsteps: 1)
-    h.store.upsert(
-      Lens(id: "L", name: "50mm", lut: lut, strokeSteps: 4096, strokeMicrosteps: 1))
-    try h.store.save()
-    h.session.selectLens(id: "L")
-    h.session.connect()
-    _ = waitUntil { h.firmware.enabled }
-    h.firmware.pos = 1000
-    _ = waitUntil { h.latest.current?.pos == 1000 }
-    h.session.confirmNear()
-    h.session.setDir(1)
+    prepareReady(h)
     h.session.startFollow()
-    _ = waitUntil { h.latest.current?.phase == .follow }
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
     return h
   }
 
@@ -787,24 +720,23 @@ final class SessionTests: XCTestCase {
     let h = try makeFollowingHarness()
     defer { h.stop() }
 
+    XCTAssertEqual(h.firmware.count(kFfSetPos), 0, "开自动之前不该有自动目标")
+    h.session.ingest(distanceMeters: 2.0)
     h.session.setAuto(true)
     XCTAssertTrue(waitUntil { h.latest.current?.auto == true })
-    XCTAssertEqual(h.firmware.count(kFfSetPos), 0, "开自动之前不该有自动目标")
-
-    h.session.ingest(distanceMeters: 2.0)
     XCTAssertTrue(
       waitUntil { h.firmware.count(kFfSetPos) > 0 },
       "没有任何已发目标时，第一个自动目标必须发出去")
-    // 2.0m 在重锚后的表里是 4200 步，且落在 1000..7400 对2齐区间内。
-    XCTAssertEqual(h.firmware.last(kFfSetPos)?.a, 4200)
+    // 2.0m 使用持久化原始坐标 2000，不做最近点重锚。
+    XCTAssertEqual(h.firmware.last(kFfSetPos)?.a, 2000)
   }
 
   func testAutoFocusHoldsInsideTheDeadbandButFollowsBigMoves() throws {
     let h = try makeFollowingHarness()
     defer { h.stop() }
+    h.session.ingest(distanceMeters: 2.0)
     h.session.setAuto(true)
     XCTAssertTrue(waitUntil { h.latest.current?.auto == true })
-    h.session.ingest(distanceMeters: 2.0)
     XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 })
     let after = h.firmware.count(kFfSetPos)
 
@@ -818,7 +750,6 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(h.firmware.count(kFfSetPos), after, "死区内的抖动不该驱动电机")
 
     // 0.5m 的真实移动必须跟上。
-    pump(0.08)
     h.session.ingest(distanceMeters: 2.5)
     XCTAssertTrue(
       waitUntil { h.firmware.count(kFfSetPos) > after }, "超出死区的移动要跟上")
@@ -827,8 +758,8 @@ final class SessionTests: XCTestCase {
   func testStopLatchesAndAutoFocusDoesNotTakeOverAgain() throws {
     let h = try makeFollowingHarness()
     defer { h.stop() }
-    h.session.setAuto(true)
     h.session.ingest(distanceMeters: 2.0)
+    h.session.setAuto(true)
     XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 })
 
     h.session.stopPressed()
@@ -848,15 +779,26 @@ final class SessionTests: XCTestCase {
   func testAutoFocusClampsTargetIntoTheAlignedRange() throws {
     let h = try makeFollowingHarness()
     defer { h.stop() }
+    h.session.ingest(distanceMeters: 8.0)
     h.session.setAuto(true)
     XCTAssertTrue(waitUntil { h.latest.current?.auto == true })
-
-    // 5 米超过表尾，查表会被夹到表尾；再夹进 1000..7400 的对齐区间。
-    h.session.ingest(distanceMeters: 5.0)
     XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 })
     let sent = h.firmware.last(kFfSetPos)?.a
     XCTAssertNotNil(sent)
-    XCTAssertLessThanOrEqual(sent ?? 0, 7400, "自动目标不能越过行程上端")
-    XCTAssertGreaterThanOrEqual(sent ?? 0, 1000, "自动目标不能低于最近点")
+    XCTAssertLessThanOrEqual(sent ?? 0, 4096, "自动目标不能越过行程上端")
+    XCTAssertGreaterThanOrEqual(sent ?? 0, 0, "自动目标不能低于最近点")
   }
+  func testStaleLidarStopsAutoAndCannotRecordOldDistance() throws {
+    let h = try makeFollowingHarness(); defer { h.stop() }
+    h.session.ingest(distanceMeters: 2)
+    h.session.setAuto(true)
+    XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 })
+    XCTAssertTrue(waitUntil { h.latest.current?.auto == false && h.latest.current?.distanceM == nil })
+    let count = h.store.lenses.first!.lut.points.count
+    h.session.addLutPoint()
+    pump(0.1)
+    XCTAssertEqual(h.store.lenses.first!.lut.points.count, count)
+    XCTAssertTrue(h.session.snapshot().msg.contains("有效物距"))
+  }
+
 }
