@@ -25,7 +25,7 @@ public final class MotorLink {
 
   public var onStatus: ((MotorStatus) -> Void)?
   public var onStatusV2: ((MotorStatusV2) -> Void)?
-  public var onTmc: ((TmcDump) -> Void)?
+  public var onFm03: ((Fm03Dump) -> Void)?
   public var onCalStatus: ((CalStatus) -> Void)?
   public var onSent: ((UInt8) -> Void)?
   public var onSocketError: ((Error) -> Void)?
@@ -90,9 +90,9 @@ public final class MotorLink {
     send(FfPacket(cmd: kFfSetSpeed, a: hz, b: accel))
   }
   @discardableResult public func query() -> UInt8 { send(FfPacket(cmd: kFfQuery)) }
-  public func queryTmc() { send(FfPacket(cmd: kFfTmcQuery)) }
-  public func setTmc(_ key: Int32, _ value: Int32) {
-    send(FfPacket(cmd: kFfTmcSet, a: key, b: value))
+  public func queryFm03() { send(FfPacket(cmd: kFfFm03Query)) }
+  public func setFm03(_ key: Int32, _ value: Int32) {
+    send(FfPacket(cmd: kFfFm03Set, a: key, b: value))
   }
   public func calStart(runId: UInt8, threshold: Int32, maxSteps: Int32) {
     send(FfPacket(cmd: kFfCalStart, sequence: runId, a: threshold, b: maxSteps),
@@ -133,8 +133,8 @@ public final class MotorLink {
     switch bytes[1] {
     case kFfCalStatus:
       if let c = CalStatus.decode(bytes) { onCalStatus?(c) }
-    case kFfTmcDump:
-      if let t = TmcDump.decode(bytes) { onTmc?(t) }
+    case kFfFm03Dump:
+      if let t = Fm03Dump.decode(bytes) { onFm03?(t) }
     case kFfStatusV2:
       if let s = MotorStatusV2.decode(bytes) { onStatusV2?(s) }
     case kFfStatus:

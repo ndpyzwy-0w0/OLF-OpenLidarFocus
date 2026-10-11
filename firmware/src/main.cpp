@@ -33,7 +33,7 @@ static const char kPage[] = R"html(
  pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}
 </style>
 <h1>跟焦器</h1>
-<p>UDP 4210。STEP5 DIR6 EN7 UART GPIO12→TMC RX DIAG→GPIO11 OLED SDA8 SCL9</p>
+<p>UDP 4210。FM03 CAN 1Mbps TX4 RX5 OLED SDA8 SCL9</p>
 <button onclick="ping()">测延迟</button>
 <pre id="out">点按钮测 HTTP 往返。</pre>
 <script>
@@ -134,20 +134,9 @@ void setup() {
 }
 
 void loop() {
-  static bool uartTried = false;
-  if (!uartTried) {
-    uartTried = true;
-    motorUartBegin();
-  }
-  static bool usbOnce = false;
-  if (Serial && !usbOnce) {
-    usbOnce = true;
-    Serial.printf("uart %s ok=%d\n", motorUartHint(), motorUartOk() ? 1 : 0);
-  }
   dns.processNextRequest();
   http.handleClient();
   protocolPoll();
-  motorStandbyTick();
   oledPoll();
   logWiFiState();
 

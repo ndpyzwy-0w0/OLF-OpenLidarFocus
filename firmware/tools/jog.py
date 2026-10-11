@@ -4,7 +4,7 @@
   python jog.py enable
   python jog.py jog 400
   python jog.py pos 0
-  python jog.py --latch pos 40000   # single-shot latch: the comms watchdog cannot cut it short
+  python jog.py --latch pos 3000   # single-shot latch: the comms watchdog cannot cut it short
   python jog.py stop
   python jog.py disable
 """
@@ -29,7 +29,7 @@ CMD = {
 }
 FLAG_ENABLED = 1
 FLAG_MOVING = 2
-FLAG_UART_OK = 4
+FLAG_CAN_OK = 4
 
 
 def pack(cmd, a=0, b=0, flags=0):
@@ -70,8 +70,8 @@ def send(sock, cmd, a=0, b=0, flags=0):
         flags.append("en")
     if p["flags"] & FLAG_MOVING:
         flags.append("run")
-    if p["flags"] & FLAG_UART_OK:
-        flags.append("uart")
+    if p["flags"] & FLAG_CAN_OK:
+        flags.append("can")
     print(f"pos {p['a']}  target {p['b']}  {' '.join(flags) or 'off'}")
     return p
 

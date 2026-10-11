@@ -32,14 +32,14 @@ private final class FakeFirmware {
   private let running = Locked(true)
   private let _pos = Locked<Int32>(0)
   private let _enabled = Locked(false)
-  private let _microsteps = Locked(16)
+  private let _microsteps = Locked(1)
   private let _commands = Locked<[[UInt8]]>([])
   private let _target = Locked<Int32>(0)
   private let _calRun = Locked<UInt8>(0)
   private let _calStage = Locked<UInt8>(0)
   var dropFirstStartReply = false
   var rejectStart = false
-  /// 拒绝 CAL_START 时回的错误码。固件的 `CAL_DIAG = 11` 是最新加的一个。
+  /// 拒绝 CAL_START 时回的错误码。固件的 `CAL_内部取消 = 11` 是最新加的一个。
   var rejectStartError: UInt8 = 2
   /// CAL_START 一律不回（模拟固件不认这条命令）。
   var dropCalStartReplies = false
@@ -124,7 +124,7 @@ private final class FakeFirmware {
       if dropRunQueries && p.a != 0 { return }
       if p.a == Int32(_calRun.current) && p.a != 0 {
         _calStage.set(min(_calStage.current + 1, 5))
-        if _calStage.current == 5 { _pos.set(8000); _target.set(8000) }
+        if _calStage.current == 5 { _pos.set(3789); _target.set(3789) }
       }
       var response = calStatus(sequence: p.sequence)
       if wrongRunReplies > 0 && p.a != 0 {
@@ -147,20 +147,24 @@ private final class FakeFirmware {
       if !holdMotion.current { _pos.set(p.a) }
     case kFfHome:
       _pos.set(0)
-    case kFfTmcSet:
-      if p.a == kTmcMicrosteps { _microsteps.set(Int(p.b)) }
-    case kFfTmcQuery:
-      reply(tmcDump(), to: host, port: port)
+    case kFfFm03Set:
+      break
+    case kFfFm03Query:
+      reply(fm03Dump(), to: host, port: port)
       return
     default:
       break
     }
     if dropStatusReplies { return }
     reply(status(sequence: p.sequence), to: host, port: port)
+    if p.cmd==kFfQuery || p.cmd==kFfHome {
+      var v=status(sequence:p.sequence);v[1]=kFfStatusV2
+      v.append(contentsOf:[1,0,0,0]);reply(v,to:host,port:port)
+    }
   }
 
   private func status(sequence: UInt8) -> [UInt8] {
-    var flags = kFlagUartOk
+    var flags = kFlagCanOk
     if _enabled.current { flags |= kFlagEnabled }
     // 固件只在“还差着步数”时报 MOVING，看门狗也只在 MOVING 时才可能刹停。
     let moving = holdMotion.current || _target.current != _pos.current
@@ -181,25 +185,18 @@ private final class FakeFirmware {
     b[4] = error; b[5] = _calRun.current
     b[6] = 60; b[7] = _calStage.current == 5 && !invalidateCalResult ? 1 : 0
     writeInt32LE(&b, 8, _pos.current)
-    writeInt32LE(&b, 12, 8512)
+    writeInt32LE(&b, 12, 4096)
     writeInt32LE(&b, 16, 0)
-    writeInt32LE(&b, 20, 8000)
+    writeInt32LE(&b, 20, 4096)
     writeUInt16LE(&b, 24, 100)
     writeUInt16LE(&b, 26, UInt16(_microsteps.current))
     return b
   }
 
-  private func tmcDump() -> [UInt8] {
-    var raw = [UInt8](repeating: 0, count: 22)
-    raw[0] = kFfMagic
-    raw[1] = kFfTmcDump
-    raw[2] = 1
-    raw[3] = 1
-    writeUInt16LE(&raw, 4, 800)
-    writeUInt16LE(&raw, 6, UInt16(_microsteps.current))
-    raw[8] = 5
-    raw[13] = 64
-    writeUInt16LE(&raw, 18, 7)
+  private func fm03Dump() -> [UInt8] {
+    var raw=[UInt8](repeating:0,count:26)
+    raw[0]=kFfMagic;raw[1]=kFfFm03Dump;raw[2]=1;raw[3]=3
+    writeUInt16LE(&raw,6,64);writeUInt16LE(&raw,8,4);writeUInt16LE(&raw,10,4)
     return raw
   }
 
@@ -217,7 +214,7 @@ private final class Harness {
 
   private let dir: URL
 
-  init(memoNamespace: String = "ff-test-\(UUID().uuidString)") throws {
+  init(memoNamespace: String = "ff-test-\(UUID().uuidString)", selectDevice: Bool = true) throws {
     dir = FileManager.default.temporaryDirectory
       .appendingPathComponent("ff-session-test-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -226,13 +223,14 @@ private final class Harness {
     // 每个用例一个独立命名空间：否则“记住上次板子”的用例会给别的用例留下存档。
     session = FollowFocusSession(store: store, memo: DeviceMemo(namespace: memoNamespace))
     session.onState = { [weak self] s in self?.latest.set(s) }
-    session.link.useDevice(
+    if selectDevice { session.selectDevice(
       FfDiscovery(
-        deviceId: "FF-TEST01", mac: "", kind: 1, protocolVersion: 1,
-        udpPort: Int(firmware.port), fwMajor: 1, fwMinor: 0, fwPatch: 0,
+        deviceId: "FF-TEST01", mac: "", kind: 1, protocolVersion: 2,
+        udpPort: Int(firmware.port), fwMajor: 2, fwMinor: 0, fwPatch: 0,
         host: "127.0.0.1"
       )
     )
+    }
     firmware.start()
     session.start()
   }
@@ -247,22 +245,21 @@ private final class Harness {
 final class SessionTests: XCTestCase {
   private func prepareAuto(_ h: Harness) {
     h.session.selectDevice(FfDiscovery(deviceId: "FF-TEST01", mac: "", kind: 1,
-      protocolVersion: 1, udpPort: Int(h.firmware.port), fwMajor: 1,
+      protocolVersion: 2, udpPort: Int(h.firmware.port), fwMajor: 2,
       fwMinor: 1, fwPatch: 0, host: "127.0.0.1"))
     h.session.createLens(name: "自动测试", params: "")
     h.session.connect()
     XCTAssertTrue(waitUntil { h.latest.current?.calSupported == true &&
-      h.latest.current?.tmc?.rmsMa == 800 })
+      h.latest.current?.fm03?.maxSpeed == 64 })
   }
 
   func testAutoCalibrationOldFirmwareIsGated() throws {
-    let h = try Harness(); defer { h.stop() }
-    h.session.createLens(name: "旧板子", params: "")
-    h.session.connect()
-    XCTAssertTrue(waitUntil { h.latest.current?.connected == true })
-    h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
-    pump(0.2)
-    XCTAssertEqual(h.firmware.count(kFfCalStart), 0)
+    let h=try Harness(); defer { h.stop() }
+    h.session.selectDevice(FfDiscovery(deviceId:"OLD",mac:"",kind:1,protocolVersion:1,
+      udpPort:Int(h.firmware.port),fwMajor:1,fwMinor:1,fwPatch:0,host:"127.0.0.1"))
+    h.session.connect();pump(0.2)
+    XCTAssertFalse(h.latest.current?.connected ?? true)
+    XCTAssertEqual(h.firmware.count(kFfEnable),0)
   }
 
   func testAutoCalibrationCompletesInBothDirectionsWithoutHomeOrLimits() throws {
@@ -272,7 +269,7 @@ final class SessionTests: XCTestCase {
       let limitsBefore = h.firmware.count(kFfSetLimits)
       h.session.startAutoCalibration(threshold: 60, maxRevs: 2)
       XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
-      XCTAssertEqual(h.latest.current?.calSafeSpan, 8000)
+      XCTAssertEqual(h.latest.current?.calSafeSpan, 4096)
       XCTAssertEqual(h.firmware.count(kFfHome), 0)
       XCTAssertEqual(h.firmware.count(kFfSetLimits), limitsBefore)
       pump(2.3)
@@ -281,12 +278,11 @@ final class SessionTests: XCTestCase {
       XCTAssertTrue(waitUntil { h.latest.current?.calDirectionPending == false })
       h.session.startFollow()
       XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
-      XCTAssertEqual(h.latest.current?.nearSteps, direction > 0 ? 0 : 8000)
+      XCTAssertEqual(h.latest.current?.nearSteps, direction > 0 ? 0 : 4096)
       XCTAssertEqual(h.latest.current?.limitLo, 0)
-      XCTAssertEqual(h.latest.current?.limitHi, 8000)
+      XCTAssertEqual(h.latest.current?.limitHi, 4096)
       XCTAssertEqual(h.firmware.count(kFfSetLimits), limitsBefore)
-      XCTAssertEqual(h.store.lenses.first?.autoTravel, 8512)
-      XCTAssertEqual(h.store.lenses.first?.autoRmsMa, 800)
+      XCTAssertEqual(h.store.lenses.first?.autoTravel, 4096)
     }
   }
 
@@ -313,7 +309,7 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
   }
 
-  /// §14：GPIO11 没接 DIAG 时，固件在运动前就用 `CAL_DIAG = 11` 拒绝启动。
+  /// §14：GPIO11 没接 内部取消 时，固件在运动前就用 `CAL_内部取消 = 11` 拒绝启动。
   /// 解码器曾把 `error > 10` 整包丢掉，这条明确拒绝就变成 App 侧“没收到回包”，
   /// 3 秒后报成“标定保活超时，请检查连接” —— 把用户指向完全错误的方向。
   func testDiagRejectionIsReportedNotAsKeepaliveTimeout() throws {
@@ -325,8 +321,8 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(waitUntil { h.latest.current?.calStage == "failed" })
     XCTAssertEqual(h.latest.current?.calError, 11)
     XCTAssertTrue(
-      h.latest.current?.msg.contains("DIAG") == true,
-      "应报 DIAG 未接通，实际：\(h.latest.current?.msg ?? "")")
+      h.latest.current?.msg.contains("无法软件取消") == true,
+      "应报 内部取消 未接通，实际：\(h.latest.current?.msg ?? "")")
     XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
   }
 
@@ -380,8 +376,8 @@ final class SessionTests: XCTestCase {
     let memo = DeviceMemo(namespace: ns)
     XCTAssertNil(memo.load(), "空命名空间不该有存档")
     memo.save(
-      FfDiscovery(deviceId: "FF-MEMO", mac: "", kind: 1, protocolVersion: 1,
-        udpPort: 4210, fwMajor: 1, fwMinor: 1, fwPatch: 3, host: "192.168.4.1"))
+      FfDiscovery(deviceId: "FF-MEMO", mac: "", kind: 1, protocolVersion: 2,
+        udpPort: 4210, fwMajor: 2, fwMinor: 1, fwPatch: 3, host: "192.168.4.1"))
     XCTAssertEqual(memo.load()?.deviceId, "FF-MEMO")
     XCTAssertEqual(memo.load()?.host, "192.168.4.1")
     XCTAssertEqual(memo.load()?.udpPort, 4210)
@@ -398,14 +394,14 @@ final class SessionTests: XCTestCase {
     let a = try Harness(memoNamespace: ns)
     defer { a.stop() }
     a.session.selectDevice(
-      FfDiscovery(deviceId: "FF-MEMO", mac: "", kind: 1, protocolVersion: 1,
-        udpPort: Int(a.firmware.port), fwMajor: 1, fwMinor: 1, fwPatch: 0,
+      FfDiscovery(deviceId: "FF-MEMO", mac: "", kind: 1, protocolVersion: 2,
+        udpPort: Int(a.firmware.port), fwMajor: 2, fwMinor: 1, fwPatch: 0,
         host: "127.0.0.1"))
     a.session.connect()
     XCTAssertTrue(waitUntil { a.latest.current?.linkAlive == true })
 
     // 第二个会话：不选设备，只带着同一份存档启动。
-    let b = try Harness(memoNamespace: ns)
+    let b = try Harness(memoNamespace: ns, selectDevice: false)
     defer { b.stop() }
     XCTAssertTrue(
       waitUntil(3) {
@@ -483,51 +479,28 @@ final class SessionTests: XCTestCase {
 
   // MARK: - 连接
 
-  func testConnectAppliesSpeedLimitsStandbyAndEnable() throws {
-    let h = try Harness()
-    defer { h.stop() }
-
-    h.session.connect()
-    XCTAssertTrue(
-      waitUntil { h.firmware.enabled }, "连接后应当使能，这样掉电重启能自愈")
-
-    let speed = h.firmware.last(kFfSetSpeed)
-    XCTAssertNotNil(speed, "必须下发速度，否则用固件里的旧值")
-    XCTAssertEqual(
-      speed?.a, 7680, "1.2 圈/秒 × 6400 步/圈，是物理速度换算出来的")
-    XCTAssertEqual(
-      h.firmware.last(kFfTmcSet)?.a, kTmcStandby, "连接时按开关设置待机断电")
-    XCTAssertEqual(h.firmware.last(kFfSetLimits)?.a, -128000)
-    XCTAssertEqual(
-      h.firmware.last(kFfSetLimits)?.b, 128000,
-      "未对齐时用和固件一致的 ±20 圈，好让标定阶段自由微调")
-    XCTAssertGreaterThan(h.firmware.count(kFfQuery), 0, "要有状态轮询")
+  func testConnectAppliesFm03SpeedLimitsAndEnable() throws {
+    let h=try Harness();defer { h.stop() }
+    h.session.connect();XCTAssertTrue(waitUntil { h.firmware.enabled })
+    XCTAssertEqual(h.firmware.last(kFfSetSpeed)?.a,64)
+    XCTAssertEqual(h.firmware.last(kFfSetLimits)?.a,-4096)
+    XCTAssertEqual(h.firmware.last(kFfSetLimits)?.b,4096)
+    XCTAssertEqual(h.firmware.count(kFfFm03Set),0)
+    XCTAssertGreaterThan(h.firmware.count(kFfQuery),0)
   }
 
   /// UI 现在直接显示快照里的圈数/速度上限，不再自己换算。
   /// 这些字段一旦算错，界面就会显示错的圈数和错的细分告警，所以钉住它们。
-  func testSnapshotCarriesDerivedDisplayUnits() throws {
-    let h = try Harness()
-    defer { h.stop() }
-
-    h.session.connect()
-    XCTAssertTrue(waitUntil { h.latest.current?.connected == true })
-
-    // 默认 1/16：6400 脉冲/圈，固件 40000 脉冲/秒上限 → 6.25 圈/秒。
-    XCTAssertEqual(h.latest.current?.stepsPerRev, 6400)
-    XCTAssertEqual(h.latest.current?.maxRevsPerSec ?? 0, 6.25, accuracy: 1e-9)
-    XCTAssertEqual(h.latest.current?.posRevs ?? -1, 0, accuracy: 1e-9)
-
-    // 换细分后两个派生值都要跟着变：脉冲/圈 ×16，上限 ÷16。
-    h.session.setMicrosteps(256)
-    XCTAssertTrue(waitUntil { h.latest.current?.microsteps == 256 })
-    XCTAssertEqual(h.latest.current?.stepsPerRev, 102400)
-    XCTAssertEqual(h.latest.current?.maxRevsPerSec ?? 0, 0.390625, accuracy: 1e-9)
-
-    // 当前位置换算成圈也要跟着新细分走。
-    h.session.jog(1024)
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 1024 })
-    XCTAssertEqual(h.latest.current?.posRevs ?? 0, 0.01, accuracy: 1e-9)
+  func testSnapshotCarriesNormalizedFm03Units() throws {
+    let h=try Harness();defer { h.stop() }
+    h.session.connect();XCTAssertTrue(waitUntil { h.latest.current?.connected==true })
+    XCTAssertEqual(h.latest.current?.stepsPerRev,4096)
+    XCTAssertEqual(h.latest.current?.maxRevsPerSec ?? 0,256.0/4096,accuracy:1e-9)
+    h.session.setFm03(kFm03Tolerance,8)
+    XCTAssertTrue(waitUntil { h.firmware.last(kFfFm03Set)?.b==8 })
+    XCTAssertEqual(h.latest.current?.stepsPerRev,4096)
+    h.session.jog(1024);XCTAssertTrue(waitUntil { h.latest.current?.pos==1024 })
+    XCTAssertEqual(h.latest.current?.posRevs ?? 0,0.25,accuracy:1e-9)
   }
 
   /// 看门狗保活：固件只把 `SET_POS`/`JOG` 当控制包（`motorNoteControlPacket`），
@@ -597,23 +570,13 @@ final class SessionTests: XCTestCase {
       "停机之后保活不能把目标重新发出去")
   }
 
-  func testMicrostepChangeRescalesSpeedAndLimits() throws {
-    let h = try Harness()
-    defer { h.stop() }
-    h.session.connect()
-    XCTAssertTrue(waitUntil { h.firmware.last(kFfSetLimits) != nil })
-
-    // 板子改成 1/256：同样的物理行程需要 16 倍步数。
-    h.firmware.microsteps = 256
-    XCTAssertTrue(
-      waitUntil {
-        h.firmware.last(kFfSetLimits)?.b == 2048000
-      }, "细分变了要按新尺度重新下发限位，否则行程被缩到 1/16")
-
-    XCTAssertEqual(
-      h.firmware.last(kFfSetSpeed)?.a, 40000, "1/256 下 1.2 圈/秒会超过 40k 步/秒上限，应被夹住")
-    XCTAssertEqual(h.latest.current?.microsteps, 256)
-    XCTAssertEqual(h.latest.current?.stepsPerRev, 102400)
+  func testFm03ParameterValidationRejectsOutOfRange() throws {
+    let h=try Harness();defer { h.stop() }
+    h.session.connect();XCTAssertTrue(waitUntil { h.firmware.enabled })
+    h.session.setFm03(kFm03MaxSpeed,257);h.session.setFm03(kFm03Tolerance,0)
+    pump(0.2);XCTAssertEqual(h.firmware.count(kFfFm03Set),0)
+    h.session.setFm03(kFm03Gain,16)
+    XCTAssertTrue(waitUntil { h.firmware.last(kFfFm03Set)?.a==kFm03Gain })
   }
 
   // MARK: - 相位机
@@ -629,52 +592,52 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(h.latest.current?.strokeSteps, 0)
 
     // 标行程：A 到 B 两点距离
-    h.firmware.pos = 500
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 500 })
+    h.firmware.pos = 0
+    XCTAssertTrue(waitUntil { h.latest.current?.pos == 0 })
     h.session.recordStrokeA()
-    h.firmware.pos = 6900
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 6900 })
+    h.firmware.pos = 4096
+    XCTAssertTrue(waitUntil { h.latest.current?.pos == 4096 })
     h.session.finishStroke()
     XCTAssertTrue(waitUntil { h.latest.current?.phase == .align })
-    XCTAssertEqual(h.latest.current?.strokeSteps, 6400)
+    XCTAssertEqual(h.latest.current?.strokeSteps, 4096)
 
     // 对齐：确认最近点 + 选方向 → 跟焦
-    h.firmware.pos = 1000
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 1000 })
+    h.firmware.pos = 0
+    XCTAssertTrue(waitUntil { h.latest.current?.pos == 0 })
     h.session.confirmNear()
     h.session.setDir(1)
     h.session.startFollow()
     XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
-    XCTAssertEqual(h.latest.current?.nearSteps, 1000)
+    XCTAssertEqual(h.latest.current?.nearSteps, 0)
     XCTAssertEqual(h.latest.current?.dir, 1)
 
     // 对齐后软限位只覆盖“最近点 → 远端”，绝不越过标定行程。
     XCTAssertTrue(
       waitUntil {
-        h.firmware.last(kFfSetLimits)?.a == 1000
-          && h.firmware.last(kFfSetLimits)?.b == 7400
+        h.firmware.last(kFfSetLimits)?.a == 0
+          && h.firmware.last(kFfSetLimits)?.b == 4096
       },
-      "对齐后限位应当是 1000..7400，而不是默认的 ±128000")
+      "对齐后限位应当是 0..4096，而不是默认的 ±4096")
   }
 
   func testReverseDirectionFlipsTheAlignedRange() throws {
     let h = try Harness()
     defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 6400, strokeMicrosteps: 16))
+    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 1000, strokeMicrosteps: 1))
     h.session.selectLens(id: "L")
     h.session.connect()
 
-    h.firmware.pos = 5000
-    XCTAssertTrue(waitUntil { h.latest.current?.pos == 5000 })
+    h.firmware.pos = 3000
+    XCTAssertTrue(waitUntil { h.latest.current?.pos == 3000 })
     h.session.confirmNear()
     h.session.setDir(-1)
     h.session.startFollow()
 
     XCTAssertTrue(
       waitUntil {
-        h.firmware.last(kFfSetLimits)?.a == -1400
-          && h.firmware.last(kFfSetLimits)?.b == 5000
-      }, "选反方向时限位应当是 -1400..5000")
+        h.firmware.last(kFfSetLimits)?.a == 2000
+          && h.firmware.last(kFfSetLimits)?.b == 3000
+      }, "选反方向时限位应当是 2000..3000")
   }
 
   // MARK: - 防误触 / 对齐失效
@@ -682,7 +645,7 @@ final class SessionTests: XCTestCase {
   func testUnalignRestoresFirmwareDefaultLimits() throws {
     let h = try Harness()
     defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 6400, strokeMicrosteps: 16))
+    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 4096, strokeMicrosteps: 1))
     h.session.selectLens(id: "L")
     h.session.connect()
     h.firmware.pos = 1000
@@ -697,8 +660,8 @@ final class SessionTests: XCTestCase {
     h.session.unalign()
     XCTAssertTrue(
       waitUntil {
-        h.firmware.last(kFfSetLimits)?.a == -128000
-          && h.firmware.last(kFfSetLimits)?.b == 128000
+        h.firmware.last(kFfSetLimits)?.a == -4096
+          && h.firmware.last(kFfSetLimits)?.b == 4096
       }, "作废对齐要下发默认限位")
     XCTAssertNil(h.latest.current?.nearSteps)
     XCTAssertEqual(h.latest.current?.phase, .align)
@@ -707,7 +670,7 @@ final class SessionTests: XCTestCase {
   func testHomeInvalidatesAlignment() throws {
     let h = try Harness()
     defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 6400, strokeMicrosteps: 16))
+    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 4096, strokeMicrosteps: 1))
     h.session.selectLens(id: "L")
     h.session.connect()
     h.firmware.pos = 1000
@@ -727,7 +690,7 @@ final class SessionTests: XCTestCase {
   func testRecalibrateStrokeOnlyClearsTheStroke() throws {
     let h = try Harness()
     defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 6400, strokeMicrosteps: 16, dir: -1))
+    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 4096, strokeMicrosteps: 1, dir: -1))
     h.session.selectLens(id: "L")
     h.session.connect()
     XCTAssertTrue(waitUntil { h.latest.current?.phase == .align })
@@ -744,7 +707,7 @@ final class SessionTests: XCTestCase {
   func testJogBeyondTheAlignedRangeIsRefused() throws {
     let h = try Harness()
     defer { h.stop() }
-    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 6400, strokeMicrosteps: 16))
+    h.store.upsert(Lens(id: "L", name: "50mm", strokeSteps: 4096, strokeMicrosteps: 1))
     h.session.selectLens(id: "L")
     h.session.connect()
     XCTAssertTrue(waitUntil { h.firmware.enabled })
@@ -798,9 +761,9 @@ final class SessionTests: XCTestCase {
         LutPoint(meters: 1.0, steps: 0),
         LutPoint(meters: 2.0, steps: 3200),
         LutPoint(meters: 4.0, steps: 4800),
-      ], microsteps: 16)
+      ], microsteps: 1)
     h.store.upsert(
-      Lens(id: "L", name: "50mm", lut: lut, strokeSteps: 6400, strokeMicrosteps: 16))
+      Lens(id: "L", name: "50mm", lut: lut, strokeSteps: 4096, strokeMicrosteps: 1))
     try h.store.save()
     h.session.selectLens(id: "L")
     h.session.connect()

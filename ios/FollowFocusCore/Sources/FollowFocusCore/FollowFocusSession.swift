@@ -1,6 +1,6 @@
 import Foundation
 
-/// 跟焦前的三步：新镜头标定行程 → 单侧对齐 → 跟焦。
+/// 跟焦前的三坐标：新镜头标定行程 → 单侧对齐 → 跟焦。
 public enum SetupPhase: String {
   case stroke
   case align
@@ -17,7 +17,7 @@ public struct FollowFocusState {
   /// 链路**真的通**：socket 开着，并且最近收到过状态回包。
   ///
   /// `connected` 只说明本地 socket bind 成功，电话掉出板子热点、或者 App 刚从
-  /// 后台醒来还没发包时它照样是 true；`enabled/standby/uartOk` 也是"收到过就
+  /// 后台醒来还没发包时它照样是 true；`enabled/standby/canOk` 也是"收到过就
   /// 不再失效"的字段。所以界面要判"现在通不通"必须用这个，不要再自己看
   /// `connected` —— 否则顶栏会显示 `EN SLP UART` 而实际一个包都没通，
   /// 让人去查错的方向。
@@ -35,16 +35,16 @@ public struct FollowFocusState {
   public var target: Int32 = 0
   public var enabled = false
   public var moving = false
-  public var uartOk = false
+  public var canOk = false
   public var standby = false
   public var limitHit = false
   public var result = kResultIdle
   public var positionTrusted = false
 
   // 单位换算
-  public var microsteps = 16
-  public var stepsPerRev = 6400
-  /// 当前细分下的速度上限（圈/秒）。UI 用它提示“1/256 只有 0.39 圈/秒”。
+  public var microsteps = 1
+  public var stepsPerRev = 4096
+  /// 当前细分下的速度上限（圈/秒）。UI 用它提示“1/256 只有 0.39 行程/秒”。
   public var maxRevsPerSec = 0.0
   /// 当前位置换算成圈，给界面显示用，省得 UI 再自己算一遍。
   public var posRevs = 0.0
@@ -54,9 +54,9 @@ public struct FollowFocusState {
   public var auto = false
   public var stopLatched = false
   public var slider = 0.5
-  public var speedRevS = 1.2
+  public var speedRevS = 64.0 / 4096
   public var accelRevS2 = 30.0
-  public var standbyFeature = true
+  public var standbyFeature = false
   public var faces = false
 
   // 镜头与流程
@@ -84,8 +84,8 @@ public struct FollowFocusState {
   public var rxPackets = 0
   public var probeTx = 0
   public var socketError: String?
-  public var tmc: TmcDump?
-  public var tmcLog: [String] = []
+  public var fm03: Fm03Dump?
+  public var fm03Log: [String] = []
   public var msg = ""
   public var calSupported = false
   public var calStage = "idle"
@@ -152,7 +152,7 @@ public final class FollowFocusSession {
   private var stopLatched = false
   private var lastQuery = Date.distantPast
   private var lastProbe = Date.distantPast
-  private var lastTmc = Date.distantPast
+  private var lastFm03 = Date.distantPast
   private var lastStatusAt: Date?
   private var filter = DistFilter()
   private var distance: Double?
@@ -173,8 +173,7 @@ public final class FollowFocusSession {
   private var calQueries = Set<UInt8>()
   private var calPositionValid = false
   private var calPendingLensId: String?
-  private var calCapturedRms: Int?
-  private var lastTmcAt = Date.distantPast
+  private var lastFm03At = Date.distantPast
   private var calHighestState: UInt8 = 0
   private var calRecoveryRequired = false
 
@@ -185,7 +184,7 @@ public final class FollowFocusSession {
     self.link = MotorLink()
     link.onStatus = { [weak self] s in self?.queue.async { self?.applyStatus(s) } }
     link.onStatusV2 = { [weak self] s in self?.queue.async { self?.applyStatusV2(s) } }
-    link.onTmc = { [weak self] t in self?.queue.async { self?.applyTmc(t) } }
+    link.onFm03 = { [weak self] t in self?.queue.async { self?.applyFm03(t) } }
     link.onCalStatus = { [weak self] c in self?.queue.async { self?.applyCalStatus(c) } }
     link.onSent = { [weak self] seq in
       self?.queue.async {
@@ -210,7 +209,7 @@ public final class FollowFocusSession {
 
   public func start() {
     queue.async {
-      // 冷启动先认回上次那台板子，省掉"重新扫描 + 选用"两步。
+      // 冷启动先认回上次那台板子，省掉"重新扫描 + 选用"两坐标。
       // 放在 timer 守卫之前：重复调用 start() 时也要能补上这次恢复。
       self.restoreDeviceOnQueue()
       guard self.timer == nil else { return }
@@ -232,7 +231,7 @@ public final class FollowFocusSession {
     guard device == nil, let saved = memo.load() else { return }
     device = saved
     state.deviceId = saved.deviceId
-    state.calSupported = saved.fwMajor > 1 || (saved.fwMajor == 1 && saved.fwMinor >= 1)
+    state.calSupported = saved.fwMajor >= 2
     link.useDevice(saved)
     openLinkOnQueue()
     setMsg("已恢复上次的板子 \(saved.deviceId)：\(saved.host):\(saved.udpPort)")
@@ -275,7 +274,7 @@ public final class FollowFocusSession {
       self.cancelCalibrationOnQueue("已切换设备")
       self.invalidatePosition("已切换设备，请重新对齐")
       self.device = d
-      self.state.calSupported = d.fwMajor > 1 || (d.fwMajor == 1 && d.fwMinor >= 1)
+      self.state.calSupported = d.fwMajor >= 2
       self.link.useDevice(d)
       self.memo.save(d)
       self.state.deviceId = d.deviceId
@@ -336,7 +335,7 @@ public final class FollowFocusSession {
             self.setMsg("扫描失败：\(failure)")
           } else if found.count == 1 {
             self.device = found[0]
-            self.state.calSupported = found[0].fwMajor > 1 || (found[0].fwMajor == 1 && found[0].fwMinor >= 1)
+            self.state.calSupported = found[0].fwMajor >= 2
             self.link.useDevice(found[0])
             self.state.deviceId = found[0].deviceId
             self.openLinkOnQueue()
@@ -367,19 +366,22 @@ public final class FollowFocusSession {
       setMsg("还没选设备：先扫描并选用")
       return
     }
+    guard let device, device.fwMajor >= 2, device.protocolVersion == 2 else {
+      setMsg("请先升级 ESP32 至 FM03 2.0 固件并重新扫描设备")
+      return
+    }
     do {
       invalidatePosition("连接后请重新对齐")
       try link.open()
       appliedStepsPerRev = 0
       applySpeed()
       applyLimits()
-      link.setTmc(kTmcStandby, state.standbyFeature ? 1 : 0)
       // 板子重启后固件 enabled 会归零，这里补一次使能，让状态自愈。
       wantEnabled = true
       lastEnableAttempt = Date()
       link.enable(true)
       link.query()
-      link.queryTmc()
+      link.queryFm03()
       state.localAddrs = Self.localIPv4Addrs()
       setMsg("已连接 \(host):\(link.port)")
     } catch {
@@ -457,43 +459,25 @@ public final class FollowFocusSession {
   public func setSpeed(revsPerSec: Double, accelRevsPerSec2: Double) {
     queue.async {
       guard self.calPhase == .idle else { return }
-      self.state.speedRevS = max(revsPerSec, 0)
+      guard revsPerSec.isFinite else { return }
+      self.state.speedRevS = min(max(revsPerSec, 1.0/4096), 256.0/4096)
       self.state.accelRevS2 = max(accelRevsPerSec2, 0)
       self.applySpeed()
       self.markDirty()
     }
   }
 
-  public func setMicrosteps(_ ms: Int32) {
+  public func setFm03(_ key: Int32, _ value: Int32) {
     queue.async {
       guard self.calPhase == .idle else { return }
-      self.invalidatePosition("细分改变，请重新定位")
-      self.link.setTmc(kTmcMicrosteps, ms)
+      let valid = key == kFm03MaxSpeed ? (1...256).contains(value) :
+        ((key == kFm03Tolerance || key == kFm03Gain) && (1...64).contains(value))
+      guard valid else { self.setMsg("FM03 参数超出范围"); return }
+      self.link.setFm03(key, value)
       self.markDirty()
     }
   }
-
-  public func setTmc(_ key: Int32, _ value: Int32) {
-    queue.async {
-      guard self.calPhase == .idle else { return }
-      if key == kTmcMicrosteps { self.invalidatePosition("细分改变，请重新定位") }
-      self.link.setTmc(key, value)
-      self.markDirty()
-    }
-  }
-
-  public func queryTmc() {
-    queue.async { if self.calPhase == .idle { self.link.queryTmc() } }
-  }
-
-  public func setStandbyFeature(_ on: Bool) {
-    queue.async {
-      guard self.calPhase == .idle else { return }
-      self.state.standbyFeature = on
-      self.link.setTmc(kTmcStandby, on ? 1 : 0)
-      self.markDirty()
-    }
-  }
+  public func queryFm03() { queue.async { self.link.queryFm03() } }
 
   // MARK: - 镜头
 
@@ -556,20 +540,29 @@ public final class FollowFocusSession {
     }
   }
 
+  private func requireFreshPosition() -> Bool {
+    guard state.positionTrusted, let at=lastStatusAt,
+      Date().timeIntervalSince(at)<0.5, state.canOk else {
+      setMsg("请先完成 FM03 内部校准，等待新鲜阶段3坐标")
+      return false
+    }
+    return true
+  }
+
   // MARK: - 行程标定（①）
 
   /// 行程标定：先记一端，再记另一端，两点距离就是行程长度。
   public func recordStrokeA() {
     queue.async {
-      guard self.calPhase == .idle else { return }
+      guard self.calPhase == .idle, self.requireFreshPosition() else { return }
       self.strokeA = Int(self.state.pos)
-      self.setMsg("已记录端点 A = \(self.state.pos) 步，请转到行程另一端再记录")
+      self.setMsg("已记录端点 A = \(self.state.pos) 坐标，请转到行程另一端再记录")
     }
   }
 
   public func finishStroke() {
     queue.async {
-      guard self.calPhase == .idle else { return }
+      guard self.calPhase == .idle, self.requireFreshPosition() else { return }
       guard let lens = self.lens, let a = self.strokeA else { return }
       let stroke = abs(Int(self.state.pos) - a)
       guard stroke >= 1 else {
@@ -581,16 +574,13 @@ public final class FollowFocusSession {
       next.strokeMicrosteps = self.microsteps
       next.autoTravel = nil
       next.autoSafeSpan = nil
-      next.autoRmsMa = nil
-      next.autoThreshold = nil
-      next.autoMaxSteps = nil
       next.autoFirmware = nil
       self.calRecoveryRequired = false
       self.updateLensOnQueue(next)
       self.strokeA = nil
       self.setMsg(
-        "行程已标定：\(stroke) 步"
-          + "（\(self.fmt(self.cal.stepsToRevs(stroke, self.microsteps))) 圈），接下来对齐最近点")
+        "行程已标定：\(stroke) 坐标"
+          + "（\(self.fmt(self.cal.stepsToRevs(stroke, self.microsteps))) 行程），接下来对齐最近点")
     }
   }
 
@@ -608,9 +598,6 @@ public final class FollowFocusSession {
       next.strokeSteps = nil
       next.autoTravel = nil
       next.autoSafeSpan = nil
-      next.autoRmsMa = nil
-      next.autoThreshold = nil
-      next.autoMaxSteps = nil
       next.autoFirmware = nil
       self.updateLensOnQueue(next)
       self.strokeA = nil
@@ -624,22 +611,17 @@ public final class FollowFocusSession {
     queue.async {
       guard self.calPhase == .idle, self.state.calSupported, self.link.isOpen,
         let lens = self.lens else {
-        self.setMsg("需连接 1.1.0 或更新固件并选择镜头")
+        self.setMsg("需连接 FM03 2.0 固件并选择镜头")
         return
       }
-      guard (1...255).contains(threshold), maxRevs >= 0.5, maxRevs <= 10 else {
-        self.setMsg("阈值需为 1–255，每段最多 0.5–10 电机圈")
+      guard let t = self.state.fm03, t.online, t.feedbackAge <= 300,
+        Date().timeIntervalSince(self.lastFm03At) < 1.5 else {
+        self.link.queryFm03()
+        self.setMsg("等待 FM03 的新鲜 CAN 反馈，请稍后重试")
         return
       }
-      guard let t = self.state.tmc, t.uartOk, t.rmsMa > 0,
-        t.microsteps == self.microsteps, Date().timeIntervalSince(self.lastTmcAt) < 3 else {
-        self.link.queryTmc()
-        self.setMsg("正在读取驱动参数，请稍后重试")
-        return
-      }
-      self.calThreshold = Int32(threshold)
-      self.calMaxSteps = Int32((maxRevs * Double(self.stepsPerRev)).rounded())
-      self.calCapturedRms = t.rmsMa
+      self.calThreshold = 0
+      self.calMaxSteps = 0
       self.calQueries.removeAll()
       self.calHighestState = 0
       self.calLastQuery = .distantPast
@@ -666,7 +648,7 @@ public final class FollowFocusSession {
   }
 
   public func cancelAutoCalibration() {
-    queue.async { self.cancelCalibrationOnQueue("已取消自动标定") }
+    queue.async { self.cancelCalibrationOnQueue("停止观察；FM03 内部标定仍会继续，请等待完成或断开电机电源") }
   }
 
   public func leaveLens() {
@@ -758,8 +740,8 @@ public final class FollowFocusSession {
     state.calError = Int(c.error)
     if c.state == 5 {
       guard c.error == 0, c.valid, c.safeMin == 0,
-        c.safeMax > 0, c.travel > c.safeMax,
-        c.microsteps == UInt16(microsteps), c.pos == c.safeMax,
+        c.safeMax == 4096, c.travel == 4096,
+        c.microsteps == 1, (0...4096).contains(c.pos),
         calPendingLensId == lens?.id else {
         failCalibration(error: c.error == 0 ? 9 : Int(c.error)); return
       }
@@ -768,9 +750,6 @@ public final class FollowFocusSession {
       next.strokeMicrosteps = Int(c.microsteps)
       next.autoTravel = Int(c.travel)
       next.autoSafeSpan = Int(c.safeMax)
-      next.autoRmsMa = calCapturedRms
-      next.autoThreshold = Int(c.threshold)
-      next.autoMaxSteps = Int(calMaxSteps)
       next.autoFirmware = device?.firmware
       next.lut = LensLut([]) // 新原点和行程不能沿用旧距离表。
       updateLensOnQueue(next)
@@ -785,7 +764,7 @@ public final class FollowFocusSession {
       state.calDirectionPending = true
       calQueries.removeAll()
       calPhase = .direction
-      setMsg("行程已识别，请确认正步数使对焦距离变远还是变近；距离标定需重做")
+      setMsg("行程已识别，请确认正坐标数使对焦距离变远还是变近；距离标定需重做")
     } else if c.state == 6 || c.state == 7 || c.error != 0 {
       failCalibration(error: Int(c.error))
     }
@@ -806,11 +785,11 @@ public final class FollowFocusSession {
     link.enable(false)
     let reasons = [
       "未知原因", "参数无效，请调整阈值和最大圈数", "电机未使能、运动中或忙，请停机后重试",
-      "驱动 UART、型号或配置异常，请检查接线", "驱动故障，请检查供电和电机",
+      "CAN 通信异常，请检查收发器和供电", "驱动故障，请检查供电和电机",
       "寻端超过最大距离，请检查挡块或增大最大圈数", "阶段超时，请检查齿轮啮合",
       "标定保活超时，请检查连接", "采样中断超时，请重试",
       "行程过短或空载读数无效，请调整阈值并检查机械行程", "用户取消",
-      "DIAG 未接通：请连接驱动器 DIAG 到 ESP32 GPIO11",
+      "FM03 内部标定无法软件取消，请等待完成或切断电机电源",
     ]
     let reason: String
     let appIndex = error - kAppCalErrorBase
@@ -829,10 +808,10 @@ public final class FollowFocusSession {
   /// 确认焦距最近点。方向默认用距离标定表推断，没有表就用上次选过的方向。
   public func confirmNear() {
     queue.async {
-      guard self.calPhase == .idle else { return }
+      guard self.calPhase == .idle, self.requireFreshPosition() else { return }
       self.state.nearSteps = Int(self.state.pos)
       self.state.dir = inferDir(self.lens?.lut ?? LensLut([])) ?? (self.lens?.dir ?? 1)
-      self.setMsg("最近点 = \(self.state.pos) 步，选好变远方向后开始")
+      self.setMsg("最近点 = \(self.state.pos) 坐标，选好变远方向后开始")
     }
   }
 
@@ -886,7 +865,7 @@ public final class FollowFocusSession {
 
   public func addLutPoint() {
     queue.async {
-      guard self.calPhase == .idle else { return }
+      guard self.calPhase == .idle, self.requireFreshPosition() else { return }
       guard let lens = self.lens, let d = self.distance else { return }
       var next = lens
       next.lut = lens.lut.adding(
@@ -942,11 +921,11 @@ public final class FollowFocusSession {
         lastProbe = now
         link.probe()
       }
-      if now.timeIntervalSince(lastTmc) > 1.0 {
-        lastTmc = now
-        link.queryTmc()
+      if now.timeIntervalSince(lastFm03) > 1.0 {
+        lastFm03 = now
+        link.queryFm03()
       }
-      // 细分变化会改变“步”的尺度：重算速度，并把软限位按新细分重新下发。
+      // 细分变化会改变“坐标”的尺度：重算速度，并把软限位按新细分重新下发。
       if stepsPerRev != appliedStepsPerRev {
         appliedStepsPerRev = stepsPerRev
         applySpeed()
@@ -967,7 +946,7 @@ public final class FollowFocusSession {
         }
         if let candidate = want {
           if state.auto {
-            // 死区和最小间隔：距离微抖会让目标每 tick 变几步，每段都是三角形微动，
+            // 死区和最小间隔：距离微抖会让目标每 tick 变几坐标，每段都是三角形微动，
             // 表现就是“一直缓慢转动、永远停不下来”。
             //
             // 注意：只在**已经发过目标**时才比死区。忘了这一层就会写成
@@ -1065,7 +1044,7 @@ public final class FollowFocusSession {
   }
 
   /// 软限位：对齐后只有“最近点 → 远端”这一侧，绝不超过标定行程；
-  /// 未对齐（标定/对齐阶段）用和固件默认一致的 ±20 圈，好让跟焦器自由微调。
+  /// 未对齐（标定/对齐阶段）用和固件默认一致的 ±20 行程，好让跟焦器自由微调。
   private func limitsFor(_ ms: Int) -> (lo: Int, hi: Int) {
     if calPositionValid { return (lo: 0, hi: state.calSafeSpan) }
     if aligned, let near = state.nearSteps {
@@ -1082,12 +1061,11 @@ public final class FollowFocusSession {
     link.setLimits(Int32(r.lo), Int32(r.hi))
   }
 
-  /// 把物理单位换算成固件要的步/秒、步/秒²。
+  /// 把物理单位换算成固件要的坐标/秒、坐标/秒²。
   private func applySpeed() {
     guard link.isOpen, calPhase == .idle else { return }
     let spd = Int32((state.speedRevS * Double(stepsPerRev)).rounded())
-    let acc = Int32((state.accelRevS2 * Double(stepsPerRev)).rounded())
-    link.setSpeed(min(max(spd, 100), 40000), min(max(acc, 100), 1_000_000))
+    link.setSpeed(min(max(spd, 1), 256), 0)
   }
 
   // MARK: - 内部：命令
@@ -1098,8 +1076,8 @@ public final class FollowFocusSession {
     let want = Int(state.pos) + Int(delta)
     guard want >= r.lo, want <= r.hi else {
       setMsg(
-        "超出软限位 \(r.lo)..\(r.hi) 步（当前 \(state.pos)，请求 \(want)）。"
-          + "换细分会改变步数尺度；可先重新对齐。")
+        "超出软限位 \(r.lo)..\(r.hi) 坐标（当前 \(state.pos)，请求 \(want)）。"
+          + "请先完成 FM03 内部校准并重新对齐。")
       return
     }
     guard state.enabled else {
@@ -1108,10 +1086,10 @@ public final class FollowFocusSession {
       wantEnabled = true
       lastEnableAttempt = Date()
       link.enable(true)
-      setMsg("正在使能，已暂存 \(pendingJog > 0 ? "+" : "")\(pendingJog) 步")
+      setMsg("正在使能，已暂存 \(pendingJog > 0 ? "+" : "")\(pendingJog) 坐标")
       return
     }
-    takeManual("走步")
+    takeManual("走坐标")
     stopLatched = false
     lastSent = nil
     lastControlSent = Date()
@@ -1119,7 +1097,7 @@ public final class FollowFocusSession {
     sliderDirty = false
   }
 
-  /// 用户手动介入（走步/拖滑条/停机）时退出自动跟焦。
+  /// 用户手动介入（走坐标/拖滑条/停机）时退出自动跟焦。
   /// 不这样做的话自动逻辑会在下一个 tick 把手工动作拉回去，
   /// 看起来就像“操作完还在自己转”。
   private func takeManual(_ why: String) {
@@ -1131,7 +1109,7 @@ public final class FollowFocusSession {
   }
 
   private func startFollowOnQueue() {
-    guard let lens = self.lens, let near = state.nearSteps else { return }
+    guard requireFreshPosition(), let lens = self.lens, let near = state.nearSteps else { return }
     if lens.autoTravel != nil && !calPositionValid {
       setMsg("自动行程坐标已失效，请重新定位")
       return
@@ -1199,25 +1177,25 @@ public final class FollowFocusSession {
     state.target = s.target
     state.enabled = s.enabled
     state.moving = s.moving
-    state.uartOk = s.uartOk
+    state.canOk = s.canOk
     state.standby = s.standby
     state.limitHit = s.limited
     if calPhase == .idle, s.enabled, pendingJog != 0 {
       let delta = pendingJog
       pendingJog = 0
-      takeManual("走步")
+      takeManual("走坐标")
       stopLatched = false
       lastSent = nil
       sliderDirty = false
       link.jog(delta)
     }
-    if s.limited { setMsg("已到软限位：\(s.pos) 步") }
+    if s.limited { setMsg("已到软限位：\(s.pos) 坐标") }
     markDirty()
     emit()
   }
 
   private func applyStatusV2(_ s: MotorStatusV2) {
-    if !s.positionTrusted && calPositionValid {
+    if !s.positionTrusted && (calPositionValid || aligned) {
       if calPhase == .direction { cancelCalibrationOnQueue("设备坐标已失效，请重新标定") }
       else { invalidatePosition("设备坐标已失效，请重新定位") }
     }
@@ -1227,16 +1205,13 @@ public final class FollowFocusSession {
     markDirty()
   }
 
-  private func applyTmc(_ t: TmcDump) {
-    lastTmcAt = Date()
-    if calPositionValid && t.microsteps != state.microsteps {
-      invalidatePosition("细分已变化，请重新定位")
-    }
-    state.tmc = t
-    state.microsteps = t.microsteps
+  private func applyFm03(_ t: Fm03Dump) {
+    lastFm03At = Date()
+    state.fm03 = t
+    state.speedRevS = Double(t.maxSpeed) / 4096
     let ts = Self.clockLabel()
-    state.tmcLog.insert("\(ts)  \(t.logLine())", at: 0)
-    if state.tmcLog.count > 40 { state.tmcLog.removeLast(state.tmcLog.count - 40) }
+    state.fm03Log.insert("\(ts)  \(t.logLine())", at: 0)
+    if state.fm03Log.count > 40 { state.fm03Log.removeLast(state.fm03Log.count - 40) }
     markDirty()
   }
 

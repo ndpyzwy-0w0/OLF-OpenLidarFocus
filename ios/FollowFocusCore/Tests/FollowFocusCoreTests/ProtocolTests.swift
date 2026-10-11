@@ -77,7 +77,7 @@ final class ProtocolTests: XCTestCase {
     let s = MotorStatus(packet: p)
     XCTAssertTrue(s.enabled)
     XCTAssertTrue(s.moving)
-    XCTAssertFalse(s.uartOk)
+    XCTAssertFalse(s.canOk)
     XCTAssertFalse(s.standby)
     XCTAssertEqual(s.pos, -99)
     XCTAssertEqual(s.target, 100)
@@ -101,7 +101,7 @@ final class ProtocolTests: XCTestCase {
   func testStandbyFlagIsIndependentOfEnabled() {
     let raw = FfPacket(
       cmd: kFfStatus,
-      flags: kFlagEnabled | kFlagUartOk | kFlagStandby,
+      flags: kFlagEnabled | kFlagCanOk | kFlagStandby,
       a: 5,
       b: 5
     ).encode()
@@ -112,41 +112,18 @@ final class ProtocolTests: XCTestCase {
     XCTAssertFalse(s.moving)
   }
 
-  func testTmcDump22ByteLayout() {
-    var raw = [UInt8](repeating: 0, count: 22)
-    raw[0] = kFfMagic
-    raw[1] = kFfTmcDump
-    raw[2] = 1
-    raw[3] = 1
-    writeUInt16LE(&raw, 4, 800)
-    writeUInt16LE(&raw, 6, 16)
-    raw[8] = 5
-    raw[9] = 8
-    raw[10] = 16
-    raw[11] = 0x21
-    raw[12] = 12
-    raw[13] = 64
-    writeInt32LE(&raw, 14, Int32(bitPattern: 0xABC))
-    writeUInt16LE(&raw, 18, 7)
-    writeUInt16LE(&raw, 20, 100)
-
-    guard let t = TmcDump.decode(raw) else { return XCTFail("decode failed") }
-    XCTAssertTrue(t.uartOk)
-    XCTAssertTrue(t.stealth)
-    XCTAssertEqual(t.rmsMa, 800)
-    XCTAssertEqual(t.microsteps, 16)
-    XCTAssertEqual(t.toff, 5)
-    XCTAssertTrue(t.standstill)
-    XCTAssertEqual(t.sg, 7)
-    XCTAssertTrue(t.logLine().contains("800"))
-  }
-
-  func testTmcDumpRejectsShortOrWrongCommand() {
-    XCTAssertNil(TmcDump.decode([UInt8](repeating: 0, count: 21)))
-    var raw = [UInt8](repeating: 0, count: 22)
-    raw[0] = kFfMagic
-    raw[1] = kFfStatus
-    XCTAssertNil(TmcDump.decode(raw))
+  func testFm03DumpWireLayoutAndMalformedInput() {
+    var raw = [UInt8](repeating: 0, count: 26)
+    raw[0]=kFfMagic; raw[1]=kFfFm03Dump; raw[2]=1; raw[3]=3
+    writeUInt16LE(&raw,4,UInt16(bitPattern: -16)); writeUInt16LE(&raw,6,64)
+    writeUInt16LE(&raw,8,4); writeUInt16LE(&raw,10,4)
+    writeInt32LE(&raw,12,2187); writeInt32LE(&raw,16,2)
+    writeInt32LE(&raw,20,1); writeUInt16LE(&raw,24,100)
+    let t = Fm03Dump.decode(raw)
+    XCTAssertEqual(t?.value,-16); XCTAssertEqual(t?.rawPosition,2187)
+    XCTAssertEqual(t?.maxSpeed,64); XCTAssertEqual(t?.txFailures,2)
+    XCTAssertNil(Fm03Dump.decode(Array(raw.dropLast())))
+    raw[1]=0x82; XCTAssertNil(Fm03Dump.decode(raw))
   }
 
   func testStatusV2DecodesTrustedPosition() {

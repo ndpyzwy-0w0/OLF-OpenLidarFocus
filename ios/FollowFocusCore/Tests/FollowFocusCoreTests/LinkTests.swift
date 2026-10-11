@@ -195,7 +195,7 @@ final class LinkTests: XCTestCase {
       let status = FfPacket(
         cmd: kFfStatus,
         sequence: bytes[3],
-        flags: kFlagEnabled | kFlagUartOk
+        flags: kFlagEnabled | kFlagCanOk
           | (UInt8(kResultCompleted) << kFlagResultShift),
         a: 1234,
         b: 1234
@@ -287,19 +287,19 @@ final class LinkTests: XCTestCase {
     XCTAssertNotNil(error.current, "非法地址要报出来，而不是静默丢弃")
   }
 
-  func testTmcDumpIsReported() throws {
+  func testFm03DumpIsReported() throws {
     let board = try FakeBoard()
     defer { board.stop() }
 
     board.onCommand = { bytes, host, port in
-      guard bytes.count >= 12, bytes[1] == kFfTmcQuery else { return }
-      var raw = [UInt8](repeating: 0, count: 22)
+      guard bytes.count >= 12, bytes[1] == kFfFm03Query else { return }
+      var raw = [UInt8](repeating: 0, count: 26)
       raw[0] = kFfMagic
-      raw[1] = kFfTmcDump
+      raw[1] = kFfFm03Dump
       raw[2] = 1
-      raw[3] = 1
+      raw[3] = 3
       writeUInt16LE(&raw, 4, 900)
-      writeUInt16LE(&raw, 6, 16)
+      writeUInt16LE(&raw, 6, 64)
       board.reply(raw, to: host, port: port)
     }
     board.startPumping()
@@ -307,13 +307,13 @@ final class LinkTests: XCTestCase {
     let link = MotorLink()
     try link.open()
     defer { link.close() }
-    let dump = Locked<TmcDump?>(nil)
-    link.onTmc = { dump.set($0) }
+    let dump = Locked<Fm03Dump?>(nil)
+    link.onFm03 = { dump.set($0) }
     link.useDevice(discovery(id: "FF-TEST01", port: board.port))
 
-    link.queryTmc()
+    link.queryFm03()
     XCTAssertTrue(waitUntil { dump.current != nil }, "应当收到 TMC_DUMP")
-    XCTAssertEqual(dump.current?.rmsMa, 900)
-    XCTAssertEqual(dump.current?.microsteps, 16)
+    XCTAssertEqual(dump.current?.online, true)
+    XCTAssertEqual(dump.current?.maxSpeed, 64)
   }
 }

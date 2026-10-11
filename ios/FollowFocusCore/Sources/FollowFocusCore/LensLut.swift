@@ -21,7 +21,7 @@ public struct LensLut: Equatable {
   /// 步数与细分成正比，所以不记录细分，改细分后整套标定会静默错位。
   public let microsteps: Int
 
-  public init(_ raw: [LutPoint], microsteps: Int = 16) {
+  public init(_ raw: [LutPoint], microsteps: Int = 1) {
     self.points = raw.sorted { $0.meters < $1.meters }
     self.microsteps = microsteps
   }

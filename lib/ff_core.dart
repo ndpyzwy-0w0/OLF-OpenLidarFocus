@@ -15,14 +15,9 @@ import 'package:flutter/services.dart';
 //
 // 这些是线协议里的取值，不是逻辑。改它们要同时改固件和 Swift 侧。
 
-/// TMC2209 可写参数 key。
-const int kTmcRms = 1;
-const int kTmcMicrosteps = 2;
-const int kTmcStealth = 3;
-const int kTmcToff = 4;
-const int kTmcIhold = 5;
-const int kTmcIrun = 6;
-const int kTmcStandby = 7;
+const int kFm03MaxSpeed = 1;
+const int kFm03Tolerance = 2;
+const int kFm03Gain = 3;
 
 /// 命令结果（STATUS.flags 高 3 位）。
 const int kResultIdle = 0;
@@ -72,7 +67,7 @@ class FfDevice {
   );
 }
 
-/// 距离标定点。`steps` 是**当前细分下**的步数（核心已换算好）。
+/// 距离标定点。`steps` 是FM03 坐标（软件置零后的坐标系）。
 class FfLutPoint {
   final double meters;
   final int steps;
@@ -95,14 +90,11 @@ class FfLens {
   final bool calibrated;
   final int strokeSteps;
 
-  /// 行程圈数。圈数与细分无关，列表页直接显示它。
+  /// 行程比例。1.0 对应完整4096坐标行程。
   final double strokeRevs;
   final int lutCount;
   final int? autoTravel;
   final int? autoSafeSpan;
-  final int? autoRmsMa;
-  final int? autoThreshold;
-  final int? autoMaxSteps;
   final String? autoFirmware;
 
   const FfLens({
@@ -116,9 +108,6 @@ class FfLens {
     required this.lutCount,
     this.autoTravel,
     this.autoSafeSpan,
-    this.autoRmsMa,
-    this.autoThreshold,
-    this.autoMaxSteps,
     this.autoFirmware,
   });
 
@@ -133,75 +122,39 @@ class FfLens {
     lutCount: (m['lut_count'] as num?)?.toInt() ?? 0,
     autoTravel: (m['auto_travel'] as num?)?.toInt(),
     autoSafeSpan: (m['auto_safe_span'] as num?)?.toInt(),
-    autoRmsMa: (m['auto_rms_ma'] as num?)?.toInt(),
-    autoThreshold: (m['auto_threshold'] as num?)?.toInt(),
-    autoMaxSteps: (m['auto_max_steps'] as num?)?.toInt(),
     autoFirmware: m['auto_firmware'] as String?,
   );
 }
 
-class FfTmc {
-  final bool uartOk;
-  final bool stealth;
-  final int rmsMa;
-  final int microsteps;
-  final int toff;
-  final int ihold;
-  final int irun;
-  final int version;
-  final int csActual;
-  final int sg;
-  final int tstep;
-  final bool ot;
-  final bool otpw;
-  final bool ola;
-  final bool olb;
-  final bool shorted;
-  final bool standstill;
-
-  /// 已经排好版的一行日志，由核心生成（`TmcDump.logLine()`），
-  /// UI 不再自己拼这些诊断文字。
+class FfFm03 {
+  final bool online;
+  final int stage, value, maxSpeed, tolerance, gain, rawPosition;
+  final int txFailures, rxMissed, feedbackAge;
   final String logLine;
-
-  const FfTmc({
-    required this.uartOk,
-    required this.stealth,
-    required this.rmsMa,
-    required this.microsteps,
-    required this.toff,
-    required this.ihold,
-    required this.irun,
-    required this.version,
-    required this.csActual,
-    required this.sg,
-    required this.tstep,
-    required this.ot,
-    required this.otpw,
-    required this.ola,
-    required this.olb,
-    required this.shorted,
-    required this.standstill,
+  const FfFm03({
+    required this.online,
+    required this.stage,
+    required this.value,
+    required this.maxSpeed,
+    required this.tolerance,
+    required this.gain,
+    required this.rawPosition,
+    required this.txFailures,
+    required this.rxMissed,
+    required this.feedbackAge,
     required this.logLine,
   });
-
-  factory FfTmc.fromMap(Map<dynamic, dynamic> m) => FfTmc(
-    uartOk: (m['uart_ok'] as bool?) ?? false,
-    stealth: (m['stealth'] as bool?) ?? true,
-    rmsMa: (m['rms_ma'] as num?)?.toInt() ?? 0,
-    microsteps: (m['microsteps'] as num?)?.toInt() ?? 16,
-    toff: (m['toff'] as num?)?.toInt() ?? 0,
-    ihold: (m['ihold'] as num?)?.toInt() ?? 0,
-    irun: (m['irun'] as num?)?.toInt() ?? 0,
-    version: (m['version'] as num?)?.toInt() ?? 0,
-    csActual: (m['cs_actual'] as num?)?.toInt() ?? 0,
-    sg: (m['sg'] as num?)?.toInt() ?? 0,
-    tstep: (m['tstep'] as num?)?.toInt() ?? 0,
-    ot: (m['ot'] as bool?) ?? false,
-    otpw: (m['otpw'] as bool?) ?? false,
-    ola: (m['ola'] as bool?) ?? false,
-    olb: (m['olb'] as bool?) ?? false,
-    shorted: (m['shorted'] as bool?) ?? false,
-    standstill: (m['standstill'] as bool?) ?? false,
+  factory FfFm03.fromMap(Map<dynamic, dynamic> m) => FfFm03(
+    online: m['online'] == true,
+    stage: (m['stage'] as num?)?.toInt() ?? 255,
+    value: (m['value'] as num?)?.toInt() ?? 0,
+    maxSpeed: (m['max_speed'] as num?)?.toInt() ?? 64,
+    tolerance: (m['tolerance'] as num?)?.toInt() ?? 4,
+    gain: (m['gain'] as num?)?.toInt() ?? 4,
+    rawPosition: (m['raw_position'] as num?)?.toInt() ?? 0,
+    txFailures: (m['tx_failures'] as num?)?.toInt() ?? 0,
+    rxMissed: (m['rx_missed'] as num?)?.toInt() ?? 0,
+    feedbackAge: (m['feedback_age'] as num?)?.toInt() ?? 65535,
     logLine: (m['log_line'] as String?) ?? '',
   );
 }
@@ -221,10 +174,11 @@ class FfState {
   final bool calDirectionPending;
   // 链路
   final bool connected;
+
   /// 链路**真的通**：socket 开着且最近收到过状态回包。
   ///
   /// `connected` 只表示 socket bind 成功；手机掉出板子热点、App 刚回前台还没发包时
-  /// 它照样是 true，而 `enabled/standby/uartOk` 是"收到过就不再失效"的字段。
+  /// 它照样是 true，而 `enabled/standby/canOk` 是"收到过就不再失效"的字段。
   /// 判断"现在通不通"只能用这个，见 [FollowFocusState.linkAlive]。
   final bool linkAlive;
   final String? deviceId;
@@ -241,7 +195,7 @@ class FfState {
   final int target;
   final bool enabled;
   final bool moving;
-  final bool uartOk;
+  final bool canOk;
   final bool standby;
   final bool limitHit;
   final int result;
@@ -285,8 +239,8 @@ class FfState {
   final int? statusAgeMs;
   final int? echoAgeMs;
   final String? socketError;
-  final FfTmc? tmc;
-  final List<String> tmcLog;
+  final FfFm03? fm03;
+  final List<String> fm03Log;
   final String msg;
 
   const FfState({
@@ -311,20 +265,20 @@ class FfState {
     this.target = 0,
     this.enabled = false,
     this.moving = false,
-    this.uartOk = false,
+    this.canOk = false,
     this.standby = false,
     this.limitHit = false,
     this.result = kResultIdle,
     this.positionTrusted = false,
-    this.microsteps = 16,
-    this.stepsPerRev = 6400,
+    this.microsteps = 1,
+    this.stepsPerRev = 4096,
     this.maxRevsPerSec = 6.25,
     this.posRevs = 0,
     this.strokeRevs = 0,
     this.auto = false,
     this.stopLatched = false,
     this.slider = 0.5,
-    this.speedRevS = 1.2,
+    this.speedRevS = 64 / 4096,
     this.accelRevS2 = 30,
     this.standbyFeature = true,
     this.faces = false,
@@ -345,13 +299,13 @@ class FfState {
     this.statusAgeMs,
     this.echoAgeMs,
     this.socketError,
-    this.tmc,
-    this.tmcLog = const [],
+    this.fm03,
+    this.fm03Log = const [],
     this.msg = '',
   });
 
   factory FfState.fromMap(Map<dynamic, dynamic> m) {
-    final tmc = m['tmc'];
+    final fm03 = m['fm03'];
     return FfState(
       appVersion: (m['app_version'] as String?) ?? '',
       calSupported: (m['cal_supported'] as bool?) ?? false,
@@ -374,13 +328,13 @@ class FfState {
       target: (m['target'] as num?)?.toInt() ?? 0,
       enabled: (m['enabled'] as bool?) ?? false,
       moving: (m['moving'] as bool?) ?? false,
-      uartOk: (m['uart_ok'] as bool?) ?? false,
+      canOk: (m['can_ok'] as bool?) ?? false,
       standby: (m['standby'] as bool?) ?? false,
       limitHit: (m['limit_hit'] as bool?) ?? false,
       result: (m['result'] as num?)?.toInt() ?? kResultIdle,
       positionTrusted: (m['position_trusted'] as bool?) ?? false,
       microsteps: (m['microsteps'] as num?)?.toInt() ?? 16,
-      stepsPerRev: (m['steps_per_rev'] as num?)?.toInt() ?? 6400,
+      stepsPerRev: (m['steps_per_rev'] as num?)?.toInt() ?? 4096,
       maxRevsPerSec: (m['max_revs_per_sec'] as num?)?.toDouble() ?? 6.25,
       posRevs: (m['pos_revs'] as num?)?.toDouble() ?? 0,
       strokeRevs: (m['stroke_revs'] as num?)?.toDouble() ?? 0,
@@ -408,8 +362,8 @@ class FfState {
       statusAgeMs: (m['status_age_ms'] as num?)?.toInt(),
       echoAgeMs: (m['echo_age_ms'] as num?)?.toInt(),
       socketError: m['socket_error'] as String?,
-      tmc: tmc is Map ? FfTmc.fromMap(tmc) : null,
-      tmcLog: _strings(m['tmc_log']),
+      fm03: fm03 is Map ? FfFm03.fromMap(fm03) : null,
+      fm03Log: _strings(m['fm03_log']),
       msg: (m['msg'] as String?) ?? '',
     );
   }
@@ -437,7 +391,10 @@ class FfState {
 }
 
 List<Map<dynamic, dynamic>> _maps(Object? v) =>
-    (v as List?)?.whereType<Map>().map((e) => e.cast<dynamic, dynamic>()).toList() ??
+    (v as List?)
+        ?.whereType<Map>()
+        .map((e) => e.cast<dynamic, dynamic>())
+        .toList() ??
     const [];
 
 List<String> _strings(Object? v) =>
@@ -450,9 +407,9 @@ class FfCore {
   static const _events = EventChannel('ff.core/events');
 
   /// 约 20Hz 的状态快照流。UI 只渲染最新一条。
-  Stream<FfState> states() => _events
-      .receiveBroadcastStream()
-      .map((e) => FfState.fromMap(e as Map<dynamic, dynamic>));
+  Stream<FfState> states() => _events.receiveBroadcastStream().map(
+    (e) => FfState.fromMap(e as Map<dynamic, dynamic>),
+  );
 
   /// 取一次当前快照，用于首帧绘制。
   Future<FfState> snapshot() async {
@@ -496,13 +453,9 @@ class FfCore {
   });
 
   // 驱动参数
-  Future<void> setMicrosteps(int value) =>
-      invoke('setMicrosteps', {'value': value});
-  Future<void> setTmc(int key, int value) =>
-      invoke('setTmc', {'key': key, 'value': value});
-  Future<void> queryTmc() => invoke('queryTmc');
-  Future<void> setStandbyFeature(bool on) =>
-      invoke('setStandbyFeature', {'on': on});
+  Future<void> setFm03(int key, int value) =>
+      invoke('setFm03', {'key': key, 'value': value});
+  Future<void> queryFm03() => invoke('queryFm03');
 
   // 镜头
   Future<void> selectLens(String id) => invoke('selectLens', {'id': id});
@@ -514,8 +467,13 @@ class FfCore {
   Future<void> recordStrokeA() => invoke('recordStrokeA');
   Future<void> finishStroke() => invoke('finishStroke');
   Future<void> recalibrateStroke() => invoke('recalibrateStroke');
-  Future<void> startAutoCalibration({required int threshold, required double maxRevs}) =>
-      invoke('startAutoCalibration', {'threshold': threshold, 'maxRevs': maxRevs});
+  Future<void> startAutoCalibration({
+    required int threshold,
+    required double maxRevs,
+  }) => invoke('startAutoCalibration', {
+    'threshold': threshold,
+    'maxRevs': maxRevs,
+  });
   Future<void> cancelAutoCalibration() => invoke('cancelAutoCalibration');
   Future<void> leaveLens() => invoke('leaveLens');
 

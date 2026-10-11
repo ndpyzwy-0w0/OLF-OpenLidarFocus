@@ -1,4 +1,4 @@
-"""StallGuard calibration client. Default is read-only; --smoke never enables motion."""
+"""FM03 internal calibration client. No verified software cancellation; power off to abort."""
 import argparse
 import json
 import random
@@ -55,32 +55,26 @@ def smoke(c):
     show(old)
     assert old['state'] not in (1, 2, 3, 4)
     fw = c.request(0x0B, expected=0x84)
-    assert len(fw) == 32 and tuple(fw[6:9]) >= (1, 1, 0)
+    assert len(fw) == 32 and tuple(fw[6:9]) >= (2, 0, 0)
     print('firmware:', '.'.join(str(n) for n in fw[6:9]))
-    invalid = c.request(0x0C, 60, 0, sequence=0)
-    assert invalid['error'] == 1
     token = old['run_id'] % 255 + 1
-    disabled = c.request(0x0C, 60, 0, sequence=token)
-    assert disabled['error'] == 2 and disabled['run_id'] == old['run_id']
-    c.request(0x0E)
-    end = c.request(0x0D)
-    assert end['pos'] == old['pos'] and end['state'] == old['state']
-    tmc = c.request(0x08, expected=0x82)
-    assert len(tmc) == 22
-    print('TMC UART:', tmc[2], 'chip:', hex(tmc[11]))
-    assert tmc[2] == 1 and tmc[11] == 0x21, 'TMC2209 UART unavailable'
-    print('PASS: version, 32-byte status, sequence, invalid/disabled start, cancel; no movement')
+    disabled = c.request(0x0C, 0, 0, sequence=token)
+    assert disabled['error'] == 2
+    fm03 = c.request(0x10, expected=0x86)
+    assert len(fm03) == 26
+    print('FM03 online:', fm03[2], 'stage:', fm03[3])
+    print('PASS: firmware v2, status layout, disabled calibration; no movement')
 
 
-def run(c, threshold, max_steps):
+def run(c):
     before = c.request(0x0D)
     if before['state'] in (1, 2, 3, 4):
-        raise RuntimeError('Calibration already active; query or cancel it first')
+        raise RuntimeError('Internal calibration active; wait for stage 3 or power off motor')
     token = random.choice([n for n in range(1, 256) if n != before['run_id']])
     completed = False
     try:
         c.request(0x04, 1, expected=0x81)
-        s = c.request(0x0C, threshold, max_steps, sequence=token)
+        s = c.request(0x0C, 0, 0, sequence=token)
         deadline = time.monotonic() + 180
         while True:
             show(s)
@@ -95,7 +89,7 @@ def run(c, threshold, max_steps):
             s = c.request(0x0D, token)
     finally:
         if not completed:
-            # Firmware also stops autonomously if these packets cannot arrive.
+            # Normal zero is not cancellation of autonomous internal calibration.
             try:
                 c.request(0x0E)
                 c.request(0x04, 0, expected=0x81)
@@ -111,15 +105,13 @@ def main():
     group.add_argument('--smoke', action='store_true', help='Non-moving hardware checks; disables motor')
     group.add_argument('--start', action='store_true', help='MOVES MOTOR: requires a lens with mechanical stops')
     group.add_argument('--cancel', action='store_true')
-    p.add_argument('--threshold', type=int, default=60)
-    p.add_argument('--max-steps', type=int, default=0)
     args = p.parse_args()
     c = Client(args.host, args.port)
     try:
         if args.smoke:
             smoke(c)
         elif args.start:
-            run(c, args.threshold, args.max_steps)
+            run(c)
         else:
             show(c.request(0x0E if args.cancel else 0x0D))
     finally:

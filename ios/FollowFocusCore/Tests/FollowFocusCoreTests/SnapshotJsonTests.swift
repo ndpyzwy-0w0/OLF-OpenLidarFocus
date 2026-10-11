@@ -22,7 +22,7 @@ final class SnapshotJsonTests: XCTestCase {
     s.target = 3200
     s.enabled = true
     s.moving = false
-    s.uartOk = true
+    s.canOk = true
     s.standby = false
     s.limitHit = false
     s.result = kResultCompleted
@@ -55,15 +55,11 @@ final class SnapshotJsonTests: XCTestCase {
     s.socketError = "errno 13"
     s.lastSentSequence = 7
     s.lastEchoedSequence = 7
-    s.tmcLog = ["12:00:00  rms=800mA"]
+    s.fm03Log = ["12:00:00  rms=800mA"]
     s.msg = "就绪"
-    s.tmc = TmcDump(
-      uartOk: true, stealth: true, rmsMa: 800, microsteps: 16, toff: 5, ihold: 8,
-      irun: 16, version: 0x21, csActual: 12,
-      // flags 是诊断位的位集合；bit6(64) = STST（静止）。ot/otpw/开路/短路都不置位。
-      flags: 64, drvStatus: 0, sg: 7, tstep: 100)
+    s.fm03 = Fm03Dump(online: true, stage: 3, value: 0, maxSpeed: 64, tolerance: 4, gain: 4, rawPosition: 1000, txFailures: 0, rxMissed: 0, feedbackAge: 12)
     s.lenses = [
-      Lens(id: "L1", name: "50mm F1.4", params: "F1.4", strokeSteps: 6400),
+      Lens(id: "L1", name: "50mm F1.4", params: "F1.4", strokeSteps: 4096),
       Lens(id: "L2", name: "85mm", params: ""),
     ]
     return s
@@ -76,7 +72,7 @@ final class SnapshotJsonTests: XCTestCase {
       "connected", "link_alive", "port", "local_addrs", "devices", "rx_packets",
       "probe_tx", "device_id", "host", "local_port",
       // 电机
-      "pos", "target", "enabled", "moving", "uart_ok", "standby", "limit_hit",
+      "pos", "target", "enabled", "moving", "can_ok", "standby", "limit_hit",
       "result", "position_trusted",
       // 单位换算
       "microsteps", "steps_per_rev", "max_revs_per_sec", "pos_revs", "stroke_revs",
@@ -87,8 +83,8 @@ final class SnapshotJsonTests: XCTestCase {
       "lens_id", "lens_name", "lenses", "phase", "near_steps", "dir",
       "stroke_steps", "lut_points", "limit_lo", "limit_hi", "stroke_a",
       // 距离与诊断
-      "distance_m", "status_age_ms", "echo_age_ms", "socket_error", "tmc",
-      "last_sent_sequence", "last_echoed_sequence", "tmc_log", "msg",
+      "distance_m", "status_age_ms", "echo_age_ms", "socket_error", "fm03",
+      "last_sent_sequence", "last_echoed_sequence", "fm03_log", "msg",
     ]
     for key in expected {
       XCTAssertNotNil(m[key], "UI 要读的键 \(key) 丢了")
@@ -99,12 +95,12 @@ final class SnapshotJsonTests: XCTestCase {
     var s = FollowFocusState()
     s.lensId = nil
     s.distanceM = nil
-    s.tmc = nil
+    s.fm03 = nil
     let m = s.channelObject(cal: cal)
     // 省略键而不是放 NSNull：Dart 侧按可空读，NSNull 会在 `as num?` 上抛异常。
     XCTAssertNil(m["lens_id"])
     XCTAssertNil(m["distance_m"])
-    XCTAssertNil(m["tmc"])
+    XCTAssertNil(m["fm03"])
     XCTAssertFalse(m.values.contains { $0 is NSNull }, "不要放 NSNull")
   }
 
@@ -116,7 +112,7 @@ final class SnapshotJsonTests: XCTestCase {
     XCTAssertTrue(m["connected"] is Bool)
     XCTAssertTrue(m["msg"] is String)
     XCTAssertTrue(m["local_addrs"] is [String])
-    XCTAssertTrue(m["tmc"] is [String: Any])
+    XCTAssertTrue(m["fm03"] is [String: Any])
     XCTAssertTrue(m["lenses"] is [[String: Any]])
 
     let lens = (m["lenses"] as! [[String: Any]])[0]
@@ -132,9 +128,9 @@ final class SnapshotJsonTests: XCTestCase {
     XCTAssertEqual(point["meters"] as? Double, 1.0)
     XCTAssertEqual(point["steps"] as? Int, 1000)
 
-    let tmc = m["tmc"] as! [String: Any]
-    XCTAssertEqual(tmc["rms_ma"] as? Int, 800)
-    XCTAssertEqual(tmc["log_line"] as? String, state().tmc?.logLine())
+    let fm03 = m["fm03"] as! [String: Any]
+    XCTAssertEqual(fm03["max_speed"] as? Int, 64)
+    XCTAssertEqual(fm03["log_line"] as? String, state().fm03?.logLine())
   }
 
   func testPhaseUsesTheStringsTheUIParses() {
@@ -158,16 +154,11 @@ final class SnapshotJsonTests: XCTestCase {
   }
 
   /// 行程按镜头自己的细分记录，所以圈数换算必须用镜头的细分，不能用当前细分。
-  func testLensStrokeRevsUseTheLensOwnMicrosteps() {
-    var s = FollowFocusState()
-    s.microsteps = 256  // 当前细分故意和镜头记录时不同
-    s.lenses = [
-      Lens(id: "L", name: "50mm", strokeSteps: 6400, strokeMicrosteps: 16)
-    ]
-    let lens = (s.channelObject(cal: cal)["lenses"] as! [[String: Any]])[0]
-    XCTAssertEqual(
-      lens["stroke_revs"] as? Double ?? -1, 1.0, accuracy: 1e-9,
-      "行程 6400 步是在 1/16 下量的，就是 1 圈；用 1/256 换算会变成 1/16 圈")
+  func testLensStrokeFractionUsesFm03Coordinates() {
+    var s=FollowFocusState()
+    s.lenses=[Lens(id: "L",name: "50mm",strokeSteps: 4096,strokeMicrosteps: 1)]
+    let lenses=s.channelObject(cal: MotorCal())["lenses"] as! [[String: Any]]
+    XCTAssertEqual(lenses[0]["stroke_revs"] as? Double,1)
   }
 
   func testDiscoveryObjectCarriesWhatTheDevicePageShows() {

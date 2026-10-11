@@ -16,15 +16,15 @@ public let kFfEnable: UInt8 = 0x04
 public let kFfSetLimits: UInt8 = 0x05
 public let kFfQuery: UInt8 = 0x06
 public let kFfSetSpeed: UInt8 = 0x07
-public let kFfTmcQuery: UInt8 = 0x08
-public let kFfTmcSet: UInt8 = 0x09
+public let kFfFm03Query: UInt8 = 0x10
+public let kFfFm03Set: UInt8 = 0x11
 public let kFfHome: UInt8 = 0x0A
 public let kFfDiscover: UInt8 = 0x0B
 public let kFfCalStart: UInt8 = 0x0C
 public let kFfCalQuery: UInt8 = 0x0D
 public let kFfCalCancel: UInt8 = 0x0E
 public let kFfStatus: UInt8 = 0x81
-public let kFfTmcDump: UInt8 = 0x82
+public let kFfFm03Dump: UInt8 = 0x86
 public let kFfStatusV2: UInt8 = 0x83
 public let kFfDiscoverReply: UInt8 = 0x84
 public let kFfCalStatus: UInt8 = 0x85
@@ -64,19 +64,15 @@ public struct CalStatus: Equatable {
 public let kFfSoftApHost = "192.168.4.1"
 public let kFfDefaultPort: UInt16 = 4210
 
-// TMC2209 可写参数 key。
-public let kTmcRms: Int32 = 1
-public let kTmcMicrosteps: Int32 = 2
-public let kTmcStealth: Int32 = 3
-public let kTmcToff: Int32 = 4
-public let kTmcIhold: Int32 = 5
-public let kTmcIrun: Int32 = 6
-public let kTmcStandby: Int32 = 7
+// FM03 控制器参数，非角速度/编码器分辨率。
+public let kFm03MaxSpeed: Int32 = 1
+public let kFm03Tolerance: Int32 = 2
+public let kFm03Gain: Int32 = 3
 
 // STATUS.flags 位定义。
 public let kFlagEnabled: UInt8 = 1
 public let kFlagMoving: UInt8 = 2
-public let kFlagUartOk: UInt8 = 4
+public let kFlagCanOk: UInt8 = 4
 public let kFlagStandby: UInt8 = 8
 public let kFlagLimited: UInt8 = 16
 public let kFlagResultShift: UInt8 = 5
@@ -184,7 +180,7 @@ public struct MotorStatus: Equatable {
   public var target: Int32
   public var enabled: Bool
   public var moving: Bool
-  public var uartOk: Bool
+  public var canOk: Bool
   public var limited: Bool
   /// 处于待机断电：用户仍使能，但驱动已释放（不发热、不震动）。
   public var standby: Bool
@@ -198,7 +194,7 @@ public struct MotorStatus: Equatable {
     target: Int32,
     enabled: Bool,
     moving: Bool,
-    uartOk: Bool,
+    canOk: Bool,
     limited: Bool = false,
     standby: Bool = false,
     result: Int = kResultIdle,
@@ -209,7 +205,7 @@ public struct MotorStatus: Equatable {
     self.target = target
     self.enabled = enabled
     self.moving = moving
-    self.uartOk = uartOk
+    self.canOk = canOk
     self.limited = limited
     self.standby = standby
     self.result = result
@@ -223,7 +219,7 @@ public struct MotorStatus: Equatable {
       target: p.b,
       enabled: p.flags & kFlagEnabled != 0,
       moving: p.flags & kFlagMoving != 0,
-      uartOk: p.flags & kFlagUartOk != 0,
+      canOk: p.flags & kFlagCanOk != 0,
       limited: p.flags & kFlagLimited != 0,
       standby: p.flags & kFlagStandby != 0,
       result: Int((p.flags & kFlagResultMask) >> kFlagResultShift)
@@ -241,7 +237,7 @@ public struct MotorStatusV2: Equatable {
   public var target: Int32 { status.target }
   public var enabled: Bool { status.enabled }
   public var moving: Bool { status.moving }
-  public var uartOk: Bool { status.uartOk }
+  public var canOk: Bool { status.canOk }
   public var limited: Bool { status.limited }
   public var standby: Bool { status.standby }
   public var result: Int { status.result }
@@ -262,7 +258,7 @@ public struct MotorStatusV2: Equatable {
         target: readInt32LE(bytes, 8),
         enabled: flags & kFlagEnabled != 0,
         moving: flags & kFlagMoving != 0,
-        uartOk: flags & kFlagUartOk != 0,
+        canOk: flags & kFlagCanOk != 0,
         limited: flags & kFlagLimited != 0,
         standby: flags & kFlagStandby != 0,
         result: Int((flags & kFlagResultMask) >> kFlagResultShift),
@@ -276,104 +272,31 @@ public struct MotorStatusV2: Equatable {
   }
 }
 
-// MARK: - TMC_DUMP（0x82，22 字节）
+// MARK: - FM03_DUMP（0x86，26 字节）
+public struct Fm03Dump: Equatable {
+  public var online: Bool
+  public var stage: Int
+  public var value: Int
+  public var maxSpeed: Int
+  public var tolerance: Int
+  public var gain: Int
+  public var rawPosition: Int32
+  public var txFailures: UInt32
+  public var rxMissed: UInt32
+  public var feedbackAge: Int
 
-public struct TmcDump: Equatable {
-  public var uartOk: Bool
-  public var limited: Bool
-  public var stealth: Bool
-  public var rmsMa: Int
-  public var microsteps: Int
-  public var toff: Int
-  public var ihold: Int
-  public var irun: Int
-  public var version: Int
-  public var csActual: Int
-  public var flags: Int
-  public var drvStatus: UInt32
-  public var sg: Int
-  public var tstep: Int
-
-  public init(
-    uartOk: Bool,
-    limited: Bool = false,
-    stealth: Bool,
-    rmsMa: Int,
-    microsteps: Int,
-    toff: Int,
-    ihold: Int,
-    irun: Int,
-    version: Int,
-    csActual: Int,
-    flags: Int,
-    drvStatus: UInt32,
-    sg: Int,
-    tstep: Int
-  ) {
-    self.uartOk = uartOk
-    self.limited = limited
-    self.stealth = stealth
-    self.rmsMa = rmsMa
-    self.microsteps = microsteps
-    self.toff = toff
-    self.ihold = ihold
-    self.irun = irun
-    self.version = version
-    self.csActual = csActual
-    self.flags = flags
-    self.drvStatus = drvStatus
-    self.sg = sg
-    self.tstep = tstep
+  public static func decode(_ b: [UInt8]) -> Fm03Dump? {
+    guard b.count == 26, b[0] == kFfMagic, b[1] == kFfFm03Dump,
+      b[2] <= 1, b[3] <= 3 || b[3] == 255 else { return nil }
+    return Fm03Dump(online: b[2] == 1, stage: Int(b[3]),
+      value: Int(Int16(bitPattern: readUInt16LE(b,4))),
+      maxSpeed: Int(readUInt16LE(b,6)), tolerance: Int(readUInt16LE(b,8)),
+      gain: Int(readUInt16LE(b,10)), rawPosition: readInt32LE(b,12),
+      txFailures: readUInt32LE(b,16), rxMissed: readUInt32LE(b,20),
+      feedbackAge: Int(readUInt16LE(b,24)))
   }
-
-  public var ot: Bool { flags & 1 != 0 }
-  public var otpw: Bool { flags & 2 != 0 }
-  public var ola: Bool { flags & 4 != 0 }
-  public var olb: Bool { flags & 8 != 0 }
-  public var shorted: Bool { flags & 48 != 0 }
-  public var standstill: Bool { flags & 64 != 0 }
-  public var stealthNow: Bool { flags & 128 != 0 }
-
-  public static func decode(_ bytes: [UInt8]) -> TmcDump? {
-    guard bytes.count >= 22, bytes[0] == kFfMagic, bytes[1] == kFfTmcDump
-    else { return nil }
-    return TmcDump(
-      uartOk: bytes[2] != 0,
-      stealth: bytes[3] != 0,
-      rmsMa: Int(readUInt16LE(bytes, 4)),
-      microsteps: Int(readUInt16LE(bytes, 6)),
-      toff: Int(bytes[8]),
-      ihold: Int(bytes[9]),
-      irun: Int(bytes[10]),
-      version: Int(bytes[11]),
-      csActual: Int(bytes[12]),
-      flags: Int(bytes[13]),
-      drvStatus: readUInt32LE(bytes, 14),
-      sg: Int(readUInt16LE(bytes, 18)),
-      tstep: Int(readUInt16LE(bytes, 20))
-    )
-  }
-
-  public static func decode(_ data: Data) -> TmcDump? {
-    decode([UInt8](data))
-  }
-
   public func logLine() -> String {
-    guard uartOk else {
-      return "UART 不通。单线：GPIO12 → TMC 模块 RX 脚（不是 TX），VDD=3.3V，VM 先上电"
-    }
-    var warn: [String] = []
-    if ot { warn.append("OT") }
-    if otpw { warn.append("OTPW") }
-    if ola { warn.append("OLA") }
-    if olb { warn.append("OLB") }
-    if shorted { warn.append("S2G") }
-    if standstill { warn.append("STST") }
-    return "rms=\(rmsMa)mA ms=\(microsteps) stealth=\(stealth ? 1 : 0) "
-      + "toff=\(toff) ihold=\(ihold) irun=\(irun) cs=\(csActual) sg=\(sg) "
-      + "tstep=\(tstep) ver=0x\(String(version, radix: 16)) "
-      + "drv=0x\(String(drvStatus, radix: 16)) "
-      + (warn.isEmpty ? "ok" : warn.joined(separator: ","))
+    "CAN \(online ? "在线" : "离线") stage=\(stage) raw=\(rawPosition) value=\(value) age=\(feedbackAge)ms tx_fail=\(txFailures) rx_missed=\(rxMissed)"
   }
 }
 

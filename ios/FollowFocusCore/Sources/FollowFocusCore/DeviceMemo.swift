@@ -18,7 +18,7 @@ public struct DeviceMemo {
 
   public init(namespace: String = "ff.core") {
     defaults = .standard
-    key = "\(namespace).lastDevice"
+    key = "\(namespace).lastDeviceFM03"
   }
 
   public func save(_ d: FfDiscovery) {
@@ -42,7 +42,7 @@ public struct DeviceMemo {
       deviceId: m["device_id"] as? String ?? "",
       mac: "",
       kind: 1,
-      protocolVersion: 1,
+      protocolVersion: 2,
       udpPort: port,
       fwMajor: m["fw_major"] as? Int ?? 0,
       fwMinor: m["fw_minor"] as? Int ?? 0,

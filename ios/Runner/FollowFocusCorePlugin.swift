@@ -89,7 +89,7 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
           deviceId: string(a, "device_id") ?? "",
           mac: "",
           kind: 1,
-          protocolVersion: 1,
+          protocolVersion: 2,
           udpPort: port,
           fwMajor: version.count > 0 ? version[0] : 0,
           fwMinor: version.count > 1 ? version[1] : 0,
@@ -132,17 +132,11 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       result(nil)
 
     // 驱动参数（调试面板）
-    case "setMicrosteps":
-      session.setMicrosteps(Int32(int(a, "value") ?? 16))
+    case "setFm03":
+      session.setFm03(Int32(int(a, "key") ?? 0), Int32(int(a, "value") ?? 0))
       result(nil)
-    case "setTmc":
-      session.setTmc(Int32(int(a, "key") ?? 0), Int32(int(a, "value") ?? 0))
-      result(nil)
-    case "queryTmc":
-      session.queryTmc()
-      result(nil)
-    case "setStandbyFeature":
-      session.setStandbyFeature(bool(a, "on") ?? true)
+    case "queryFm03":
+      session.queryFm03()
       result(nil)
 
     // 镜头

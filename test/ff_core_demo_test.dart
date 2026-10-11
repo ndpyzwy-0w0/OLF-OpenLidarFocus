@@ -2,30 +2,35 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iphone_follow_focus/ff_core.dart';
 import 'package:iphone_follow_focus/ff_core_demo.dart';
 
-/// `FfCoreDemo` 是 web 预览用的假核心，但它有真分支：相位推进、软限位、细分换算。
+/// `FfCoreDemo` 是 web 预览用的假核心，但它有真分支：相位推进、软限位和 FM03 参数。
 /// 这里钉住这几条，免得改坏之后 web 预览悄悄变成“点了没反应”。
 void main() {
-  test('auto calibration channel fields parse without control logic in Dart', () {
-    final state = FfState.fromMap({
-      'cal_supported': true,
-      'cal_stage': 'seek_positive',
-      'cal_error': 5,
-      'cal_safe_span': 8000,
-      'cal_travel': 8512,
-      'cal_direction_pending': true,
-      'lenses': [
-        {'id': 'L', 'name': '50mm', 'auto_travel': 8512,
-          'auto_safe_span': 8000, 'auto_rms_ma': 800,
-          'auto_threshold': 60, 'auto_max_steps': 12800,
-          'auto_firmware': '1.1.0'}
-      ],
-    });
-    expect(state.calSupported, isTrue);
-    expect(state.calStage, 'seek_positive');
-    expect(state.calDirectionPending, isTrue);
-    expect(state.lenses.single.autoThreshold, 60);
-    expect(state.lenses.single.autoFirmware, '1.1.0');
-  });
+  test(
+    'auto calibration channel fields parse without control logic in Dart',
+    () {
+      final state = FfState.fromMap({
+        'cal_supported': true,
+        'cal_stage': 'seek_positive',
+        'cal_error': 5,
+        'cal_safe_span': 8000,
+        'cal_travel': 8512,
+        'cal_direction_pending': true,
+        'lenses': [
+          {
+            'id': 'L',
+            'name': '50mm',
+            'auto_travel': 4096,
+            'auto_safe_span': 4096,
+            'auto_firmware': '2.0.0',
+          },
+        ],
+      });
+      expect(state.calSupported, isTrue);
+      expect(state.calStage, 'seek_positive');
+      expect(state.calDirectionPending, isTrue);
+      expect(state.lenses.single.autoFirmware, '2.0.0');
+    },
+  );
   test('web demo exposes auto stroke and direction confirmation', () async {
     final core = FfCoreDemo();
     await core.createLens(name: '35mm', params: '');
@@ -75,7 +80,7 @@ void main() {
     await core.confirmNear();
     await core.startFollow();
     final s = await core.snapshot();
-    expect((s.limitLo, s.limitHi), (1000, 7400));
+    expect((s.limitLo, s.limitHi), (1000, 5096));
 
     await core.invoke('jog', {'delta': 99999});
     expect((await core.snapshot()).pos, s.limitHi);
@@ -83,15 +88,14 @@ void main() {
     expect((await core.snapshot()).pos, s.limitLo);
   });
 
-  test('换细分保持物理位置（圈数不变）', () async {
+  test('FM03 控制参数不改变坐标尺度', () async {
     final core = FfCoreDemo();
     final before = await core.snapshot();
-
-    await core.setMicrosteps(256);
+    await core.setFm03(kFm03Tolerance, 8);
     final after = await core.snapshot();
-
-    expect(after.stepsPerRev, 400 * 256);
-    expect(after.posRevs, closeTo(before.posRevs, 1e-9));
+    expect(after.stepsPerRev, 4096);
+    expect(after.pos, before.pos);
+    expect(after.fm03Log.last, contains('key=2 value=8'));
   });
 
   test('把镜头删光不崩，回到空列表', () async {

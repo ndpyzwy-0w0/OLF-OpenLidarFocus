@@ -29,7 +29,7 @@ extension FollowFocusState {
       "target": Int(target),
       "enabled": enabled,
       "moving": moving,
-      "uart_ok": uartOk,
+      "can_ok": canOk,
       "standby": standby,
       "limit_hit": limitHit,
       "result": result,
@@ -64,7 +64,7 @@ extension FollowFocusState {
       // 诊断
       "last_sent_sequence": Int(lastSentSequence),
       "last_echoed_sequence": Int(lastEchoedSequence),
-      "tmc_log": tmcLog,
+      "fm03_log": fm03Log,
       "msg": msg,
       "cal_supported": calSupported,
       "cal_stage": calStage,
@@ -84,7 +84,7 @@ extension FollowFocusState {
     if let v = statusAgeMs { m["status_age_ms"] = v }
     if let v = echoAgeMs { m["echo_age_ms"] = v }
     if let v = socketError { m["socket_error"] = v }
-    if let v = tmc { m["tmc"] = v.channelObject }
+    if let v = fm03 { m["fm03"] = v.channelObject }
     return m
   }
 }
@@ -120,9 +120,6 @@ extension Lens {
     ]
     if let autoTravel { m["auto_travel"] = autoTravel }
     if let autoSafeSpan { m["auto_safe_span"] = autoSafeSpan }
-    if let autoRmsMa { m["auto_rms_ma"] = autoRmsMa }
-    if let autoThreshold { m["auto_threshold"] = autoThreshold }
-    if let autoMaxSteps { m["auto_max_steps"] = autoMaxSteps }
     if let autoFirmware { m["auto_firmware"] = autoFirmware }
     return m
   }
@@ -132,29 +129,11 @@ extension LutPoint {
   public var channelObject: [String: Any] { ["meters": meters, "steps": steps] }
 }
 
-extension TmcDump {
+extension Fm03Dump {
   public var channelObject: [String: Any] {
-    [
-      "uart_ok": uartOk,
-      "stealth": stealth,
-      "rms_ma": rmsMa,
-      "microsteps": microsteps,
-      "toff": toff,
-      "ihold": ihold,
-      "irun": irun,
-      "version": version,
-      "cs_actual": csActual,
-      "sg": sg,
-      "tstep": tstep,
-      "drv_status": Int(drvStatus),
-      "ot": ot,
-      "otpw": otpw,
-      "ola": ola,
-      "olb": olb,
-      "shorted": shorted,
-      "standstill": standstill,
-      // 日志那一行由核心排版好，UI 不再自己拼诊断文字。
-      "log_line": logLine(),
-    ]
+    ["online": online, "stage": stage, "value": value, "max_speed": maxSpeed,
+     "tolerance": tolerance, "gain": gain, "raw_position": Int(rawPosition),
+     "tx_failures": Int(txFailures), "rx_missed": Int(rxMissed),
+     "feedback_age": feedbackAge, "log_line": logLine()]
   }
 }

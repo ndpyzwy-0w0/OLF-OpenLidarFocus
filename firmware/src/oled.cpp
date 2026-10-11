@@ -43,7 +43,7 @@ void oledBegin() {
 void oledPoll() {
   if (!present) return;
   uint32_t now = millis();
-  uint8_t bits = (motorEnabled() ? 1 : 0) | (motorMoving() ? 2 : 0) | (motorUartOk() ? 4 : 0);
+  uint8_t bits = (motorEnabled() ? 1 : 0) | (motorMoving() ? 2 : 0) | (motorCanOk() ? 4 : 0);
   int32_t pos = motorPos();
   int32_t tgt = motorTarget();
   if (bits == lastBits && pos == lastPos && tgt == lastTarget && now - lastMs < 250) return;
@@ -52,12 +52,12 @@ void oledPoll() {
   lastTarget = tgt;
   lastMs = now;
 
-  const char *st = !motorEnabled() ? "OFF" : (motorStandbyOff() ? "SLP" : (motorMoving() ? "RUN" : "EN"));
+  const char *st = !motorEnabled() ? "OFF" : (motorMoving() ? "RUN" : "EN");
   u8g2.clearBuffer();
   u8g2.setCursor(0, 7);
   u8g2.print("FF ");
   u8g2.print(st);
-  if (motorUartOk()) u8g2.print(" U");
+  if (motorCanOk()) u8g2.print(" C");
   u8g2.setCursor(0, 18);
   u8g2.print("P ");
   u8g2.print(pos);
@@ -65,6 +65,6 @@ void oledPoll() {
   u8g2.print("T ");
   u8g2.print(tgt);
   u8g2.setCursor(0, 40);
-  u8g2.print(motorUartHint());
+  u8g2.print("CAN 1M 4/5");
   u8g2.sendBuffer();
 }

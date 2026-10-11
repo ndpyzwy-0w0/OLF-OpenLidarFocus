@@ -141,9 +141,18 @@ final class LensTests: XCTestCase {
   func testCorruptStoreDoesNotCrash() throws {
     let dir = try makeTempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
-    try Data("{{{ not json".utf8).write(to: dir.appendingPathComponent("lenses.json"))
+    try Data("{{{ not json".utf8).write(to: dir.appendingPathComponent("lenses-fm03.json"))
     // 存档损坏应当当空列表处理，而不是把 App 弄崩。
     XCTAssertTrue(LensStore.load(directory: dir).lenses.isEmpty)
+  }
+
+  func testFm03StorePreservesButDoesNotImportOldStepCalibration() throws {
+    let dir=try makeTempDir();defer { try? FileManager.default.removeItem(at:dir) }
+    let old=dir.appendingPathComponent("lenses.json")
+    let data=try JSONSerialization.data(withJSONObject:["lenses":[Lens(id:"old",name:"50mm",strokeSteps:6400).jsonObject]])
+    try data.write(to:old)
+    XCTAssertTrue(LensStore.load(directory:dir).lenses.isEmpty)
+    XCTAssertEqual(try Data(contentsOf:old),data)
   }
 
   private func makeTempDir() throws -> URL {

@@ -147,10 +147,7 @@ class _LensPageState extends State<LensPage> {
   Widget _row(FfLens l) {
     final parts = <String>[
       if (l.params.isNotEmpty) l.params,
-      if (l.calibrated)
-        '行程 ${l.strokeRevs.toStringAsFixed(2)} 圈'
-      else
-        '未标定行程',
+      if (l.calibrated) '行程 ${l.strokeRevs.toStringAsFixed(2)} 行程' else '未标定行程',
       if (l.lutCount >= 2) '距离标定 ${l.lutCount} 点',
       '焦距变远：${l.dir > 0 ? "+" : "-"} 方向',
     ];

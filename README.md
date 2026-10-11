@@ -1,62 +1,35 @@
-# 跟焦器（iphone-follow-focus）
+# OpenLidarFocus · DJI FM03
 
-苹果手机自动对焦跟焦器。Swift 功能层 + Flutter UI。
-Dart 包名 `iphone_follow_focus`，iOS bundle id `com.ndpyz.iphoneFollowFocus`。
+iPhone LiDAR 自动跟焦：Swift 功能层 + Flutter UI + ESP32-S3，经 CAN 收发器控制 DJI RS 跟焦电机（2022，FM03）。ESP32-S3 Super Mini 开发板和 72×40 OLED 保留。
 
-## 结构
+原 TMC2209 / STEP / DIR / EN / UART / DIAG 控制已弃用。App 2.0.0+4 配合固件 2.0.0，UDP 协议版本 2；请两端一起升级。
 
-```text
-ios/FollowFocusCore/   功能层（本地 Swift Package，只依赖 Foundation）
-                       协议、UDP 链路、设备发现、镜头/对齐、会话编排
-ios/Runner/            iOS 壳：LiDAR 采集 + `ff.core` 通道（把功能层接到 UI）
-lib/                   Flutter UI，只通过 `ff.core` 读写功能层
-firmware/              ESP32-S3 固件
-```
+## 接线与使用
 
-自动识别镜头行程需要 TMC2209 的 DIAG 接到 ESP32 GPIO11；原 UART 仍接 GPIO12，
-用于运动前设置驱动。未接 DIAG 时可继续手动标定，接线见 [HANDOFF.md](HANDOFF.md) §3。
+接线、编译、刷写和验收见 [HANDOFF.md](HANDOFF.md)。CAN TX=GPIO4、RX=GPIO5，1 Mbps；OLED SDA=GPIO8、SCL=GPIO9 不变。
 
-功能层**不能** import Flutter/UIKit，由编译器强制；UI 里不写控制逻辑。
-契约与边界见 [HANDOFF.md](HANDOFF.md) §12/§13。
+1. 给 FM03 独立供电，接好 3.3V CAN 收发器，与 ESP32 共地，断开 RS3。
+2. 连接 ESP32 热点 `FF-XXXXXX`（密码 `change-me`），App 扫描、选用设备并连接。
+3. 创建镜头，运行 FM03 内部行程校准，等待阶段 1/2 → 3，获得 0～4096 坐标。
+4. 确认坐标增大对应焦距变远还是变近；手动调整焦点，记录至少两个距离标定点，再开启自动跟焦。
 
-## 本机运行
+坐标代表已校准镜头的归一化行程，不代表电机角度或 STEP 脉冲。新版使用 `lenses-fm03.json`；旧 `lenses.json` 原样保留，不能沿用其标定数据。
 
-本仓库只在 macOS 上开发。
+FM03 参数：最大拨轮速度 1～256（默认 64）、到位容差 1～64（默认 4）、接近减速系数 1～64（默认 4）。这些是控制器参数，不是驱动电流或实际角速度。
 
-```bash
+内部校准暂无已验证的软件取消指令。“停止观察”只退出 App 观察流程；要立即中止内部校准须切断 FM03 电源。
+
+## 开发与测试
+
+```sh
 flutter pub get
-flutter run -d <device>            # 模拟器没有 LiDAR，距离显示 --，其余可测
+flutter analyze
+flutter test
+cd ios/FollowFocusCore && swift test
 ```
 
-真机 iOS 需要 Xcode 签名后部署，见 HANDOFF.md §8.1。
+固件：`pio run -d firmware`。主机模拟：见 [test/firmware_host/README.md](test/firmware_host/README.md)。无硬件 UI 演示：`tool/ui_preview.sh`。
 
-**只改 UI、不接硬件**时不需要 Xcode 和 iPhone，用 web 预览：
+协议契约见 [PROTOCOL.md](PROTOCOL.md)，控制设计见 [CONTROL_ARCHITECTURE.md](CONTROL_ARCHITECTURE.md)。历史步进方案仅存放于 `docs/legacy/`。
 
-```bash
-tool/ui_preview.sh                 # 构建 + 起本地服务 + 打开浏览器
-```
-
-细节、边界和注意事项见 [UI_DEV.md](UI_DEV.md)。
-
-## 测试
-
-```bash
-cd ios/FollowFocusCore && swift test    # 功能层逻辑测试，约 6 秒，不需要模拟器
-flutter test                            # UI 测试，用伪造核心驱动，不碰平台通道
-```
-
-`swift test` 在 macOS 原生跑，比 `xcodebuild test` 快几十倍；链路和会话测试在
-loopback 上起一个假板子走**真实** UDP，不需要接硬件。
-
-## 文档
-
-| 文档 | 内容 |
-| --- | --- |
-| [HANDOFF.md](HANDOFF.md) | 交付入口：硬件接线、现状、看门狗/锁存语义、测试与验收、下一步 |
-| [UI_DEV.md](UI_DEV.md) | **UI 开发入口**：UI/功能层边界、web 本地预览（`tool/ui_preview.sh`）、UI 测试写法 |
-| [PROTOCOL.md](PROTOCOL.md) | **固件 ↔ 上位机的 wire 契约（唯一权威来源）**：包布局、命令表、flags 位、回包数量、hex 样例、上位机检查清单 |
-| [CONTROL_ARCHITECTURE.md](CONTROL_ARCHITECTURE.md) | 控制架构与运动规划设计 |
-
-固件目录 `firmware/`，验收脚本 `test/udp_motion_acceptance.py`，截断复现工具
-`test/repro_jog_truncation.py`，调试工具 `firmware/tools/{discover.py,jog.py}`。
-文件归属与多 agent 协同边界见 HANDOFF.md §12。
+FM03 报文及反馈解码来自 [DJI-FM03-can](https://github.com/ndpyzwy-0w0/DJI-FM03-can)，移植依据记录在 HANDOFF.md。软件测试与编译不能替代本项目的机械实机验收。

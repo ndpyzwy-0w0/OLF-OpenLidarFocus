@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <WiFiUdp.h>
 
-// 12-byte little-endian packet. Magic 0x46 ('F'). Unknown packets are echoed.
+// UDP v2: strict 12-byte request. Coordinates are FM03 feedback units.
 enum FfCmd : uint8_t {
   FF_SET_POS = 0x01,
   FF_JOG = 0x02,
@@ -12,35 +12,27 @@ enum FfCmd : uint8_t {
   FF_SET_LIMITS = 0x05,
   FF_QUERY = 0x06,
   FF_SET_SPEED = 0x07,
-  FF_TMC_QUERY = 0x08,
-  FF_TMC_SET = 0x09,
+  FF_FM03_QUERY = 0x10,
+  FF_FM03_SET = 0x11,
   FF_HOME = 0x0A,  // Establish the current stopped position as the trusted origin.
   FF_DISCOVER = 0x0B,  // Identify the board; answered with FF_DISCOVER_REPLY.
   FF_CAL_START = 0x0C,
   FF_CAL_QUERY = 0x0D,
   FF_CAL_CANCEL = 0x0E,
   FF_STATUS = 0x81,
-  FF_TMC_DUMP = 0x82,
+  FF_FM03_DUMP = 0x86,
   FF_STATUS_V2 = 0x83,
   FF_DISCOVER_REPLY = 0x84,
   FF_CAL_STATUS = 0x85,
 };
 
-enum FfTmcKey : int32_t {
-  TMC_RMS = 1,         // 运行电流 mA：转动时的电流，越大越有力也越热。建议 300–1200，默认 800
-  TMC_MICROSTEPS = 2,  // 细分：每整步细分数，越高越平滑，同样转速需要更多脉冲。8/16/…/256
-  TMC_STEALTH = 3,     // StealthChop：1=静音（静止可能有轻微嗡声），0=SpreadCycle（更响、力矩更硬）
-  TMC_TOFF = 4,        // toff 关断时间：1–15，影响电流纹波与噪声，一般 3–5
-  TMC_IHOLD = 5,       // 保持电流档：停止时维持的电流 0–31（相对 irun）。0=完全不锁轴、不发热
-  TMC_IRUN = 6,        // 运行电流档：直接写 IRUN 的 CS 值 0–31。一般不动，改用 TMC_RMS
-  TMC_STANDBY = 7,     // 待机断电：1=静止约 2.5 s 后断使能（不发热不震），0=一直保持电流
-};
+enum FfFm03Key : int32_t { FM03_MAX_SPEED=1, FM03_TOLERANCE=2, FM03_GAIN=3 };
 
 enum FfFlag : uint8_t {
   FF_FLAG_ENABLED = 1,
   FF_FLAG_MOVING = 2,
-  FF_FLAG_UART_OK = 4,
-  FF_FLAG_STANDBY = 8,  // 处于待机断电状态：用户仍使能，但驱动已被释放
+  FF_FLAG_CAN_OK = 4,
+  FF_FLAG_STANDBY = 8,  // v2 保留，始终为0
   FF_FLAG_LIMITED = 16, // 最近一次位置命令被软限位夹紧
 };
 
@@ -73,25 +65,15 @@ struct FfPacket {
 
 static_assert(sizeof(FfPacket) == 12, "FfPacket must be 12 bytes");
 
-struct FfTmcDump {
-  uint8_t magic;
-  uint8_t cmd;
-  uint8_t uart_ok;
-  uint8_t stealth;
-  uint16_t rms_ma;
-  uint16_t microsteps;
-  uint8_t toff;
-  uint8_t ihold;
-  uint8_t irun;
-  uint8_t version;
-  uint8_t cs_actual;
-  uint8_t drv_flags;
-  uint32_t drv_status;
-  uint16_t sg;
-  uint16_t tstep;
+struct FfFm03Dump {
+  uint8_t magic, cmd, online, stage;
+  int16_t value;
+  uint16_t max_speed, tolerance, gain;
+  int32_t raw_position;
+  uint32_t tx_failures, rx_missed;
+  uint16_t feedback_age;
 } __attribute__((packed));
-
-static_assert(sizeof(FfTmcDump) == 22, "FfTmcDump must be 22 bytes");
+static_assert(sizeof(FfFm03Dump)==26, "FfFm03Dump must be 26 bytes");
 
 struct FfStatusV2 {
   uint8_t magic;
@@ -121,7 +103,7 @@ static_assert(sizeof(FfCalibrationStatus) == 32, "FfCalibrationStatus must be 32
 // the BSSID a scan reports and `device_id` matches the SSID, so a scan result,
 // a device id and a control connection can all be tied to the same board.
 static const uint8_t kFfKindFollowFocus = 1;
-static const uint8_t kFfProtocolVersion = 1;
+static const uint8_t kFfProtocolVersion = 2;
 
 struct FfDiscovery {
   uint8_t magic;

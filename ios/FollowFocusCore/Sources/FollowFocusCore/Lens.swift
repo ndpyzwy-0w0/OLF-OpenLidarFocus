@@ -20,9 +20,6 @@ public struct Lens: Equatable {
   public var dir: Int
   public var autoTravel: Int?
   public var autoSafeSpan: Int?
-  public var autoRmsMa: Int?
-  public var autoThreshold: Int?
-  public var autoMaxSteps: Int?
   public var autoFirmware: String?
 
   public init(
@@ -31,13 +28,10 @@ public struct Lens: Equatable {
     params: String = "",
     lut: LensLut = LensLut([]),
     strokeSteps: Int? = nil,
-    strokeMicrosteps: Int = 16,
+    strokeMicrosteps: Int = 1,
     dir: Int = 1,
     autoTravel: Int? = nil,
     autoSafeSpan: Int? = nil,
-    autoRmsMa: Int? = nil,
-    autoThreshold: Int? = nil,
-    autoMaxSteps: Int? = nil,
     autoFirmware: String? = nil
   ) {
     self.id = id
@@ -49,9 +43,6 @@ public struct Lens: Equatable {
     self.dir = dir >= 0 ? 1 : -1
     self.autoTravel = autoTravel
     self.autoSafeSpan = autoSafeSpan
-    self.autoRmsMa = autoRmsMa
-    self.autoThreshold = autoThreshold
-    self.autoMaxSteps = autoMaxSteps
     self.autoFirmware = autoFirmware
   }
 
@@ -127,7 +118,7 @@ public extension LensLut {
       guard let m = number(p["m"]), let s = number(p["s"]) else { return nil }
       return LutPoint(meters: m.doubleValue, steps: s.intValue)
     }
-    self.init(raw, microsteps: number(o["microsteps"])?.intValue ?? 16)
+    self.init(raw, microsteps: number(o["microsteps"])?.intValue ?? 1)
   }
 }
 
@@ -144,9 +135,6 @@ public extension Lens {
     if let strokeSteps { o["stroke"] = strokeSteps }
     if let autoTravel { o["autoTravel"] = autoTravel }
     if let autoSafeSpan { o["autoSafeSpan"] = autoSafeSpan }
-    if let autoRmsMa { o["autoRmsMa"] = autoRmsMa }
-    if let autoThreshold { o["autoThreshold"] = autoThreshold }
-    if let autoMaxSteps { o["autoMaxSteps"] = autoMaxSteps }
     if let autoFirmware { o["autoFirmware"] = autoFirmware }
     return o
   }
@@ -159,13 +147,10 @@ public extension Lens {
       params: (o["params"] as? String) ?? "",
       lut: LensLut(jsonObject: (o["lut"] as? [String: Any]) ?? [:]),
       strokeSteps: number(o["stroke"])?.intValue,
-      strokeMicrosteps: number(o["strokeMs"])?.intValue ?? 16,
+      strokeMicrosteps: number(o["strokeMs"])?.intValue ?? 1,
       dir: (number(o["dir"])?.intValue ?? 1) >= 0 ? 1 : -1,
       autoTravel: number(o["autoTravel"])?.intValue,
       autoSafeSpan: number(o["autoSafeSpan"])?.intValue,
-      autoRmsMa: number(o["autoRmsMa"])?.intValue,
-      autoThreshold: number(o["autoThreshold"])?.intValue,
-      autoMaxSteps: number(o["autoMaxSteps"])?.intValue,
       autoFirmware: o["autoFirmware"] as? String
     )
   }
@@ -190,7 +175,7 @@ public final class LensStore {
   public private(set) var lenses: [Lens]
   private let directory: URL
 
-  public var fileURL: URL { directory.appendingPathComponent("lenses.json") }
+  public var fileURL: URL { directory.appendingPathComponent("lenses-fm03.json") }
 
   public init(lenses: [Lens] = [], directory: URL? = nil) {
     self.lenses = lenses
@@ -204,16 +189,6 @@ public final class LensStore {
     return base.appendingPathComponent("iphone_follow_focus", isDirectory: true)
   }
 
-  /// 旧版（Dart）写的存档位置，只在迁移时读。
-  private static func legacyFiles() -> [URL] {
-    let legacyDir = URL(fileURLWithPath: NSHomeDirectory())
-      .appendingPathComponent("iphone_follow_focus", isDirectory: true)
-    return [
-      legacyDir.appendingPathComponent("lenses.json"),
-      legacyDir.appendingPathComponent("lens_lut.json"),
-    ]
-  }
-
   public static func load(directory: URL? = nil) -> LensStore {
     let dir = directory ?? defaultDirectory()
     let store = LensStore(directory: dir)
@@ -223,12 +198,6 @@ public final class LensStore {
       store.lenses = lenses
       return store
     }
-    let migrated = migrateLegacy()
-    if !migrated.isEmpty {
-      store.lenses = migrated
-      // 迁移结果立刻落盘一次；写失败不阻塞启动，下次保存还会再试。
-      try? store.save()
-    }
     return store
   }
 
@@ -237,25 +206,6 @@ public final class LensStore {
     let raw: Any? = (root as? [String: Any])?["lenses"] ?? root
     guard let list = raw as? [[String: Any]] else { return nil }
     return list.compactMap { Lens(jsonObject: $0) }
-  }
-
-  /// 旧版只有一张全局标定表，迁移成第一个镜头。
-  private static func migrateLegacy() -> [Lens] {
-    for url in legacyFiles() {
-      guard let data = try? Data(contentsOf: url), !data.isEmpty else { continue }
-      // 新格式（lenses.json）
-      if let lenses = decode(data), !lenses.isEmpty { return lenses }
-      // 旧格式（lens_lut.json）：就是一张 LensLut
-      if let root = try? JSONSerialization.jsonObject(with: data),
-        let obj = root as? [String: Any]
-      {
-        let lut = LensLut(jsonObject: obj)
-        if !lut.points.isEmpty {
-          return [Lens(id: "legacy", name: "默认镜头", lut: lut)]
-        }
-      }
-    }
-    return []
   }
 
   @discardableResult

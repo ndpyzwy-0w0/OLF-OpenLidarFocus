@@ -26,8 +26,7 @@ static void fillStatus(FfPacket *p, uint8_t sequence = 0) {
   p->flags = 0;
   if (motorEnabled()) p->flags |= FF_FLAG_ENABLED;
   if (motorMoving()) p->flags |= FF_FLAG_MOVING;
-  if (motorUartOk()) p->flags |= FF_FLAG_UART_OK;
-  if (motorStandbyOff()) p->flags |= FF_FLAG_STANDBY;
+  if (motorCanOk()) p->flags |= FF_FLAG_CAN_OK;
   if (motorLimitHit()) p->flags |= FF_FLAG_LIMITED;
   p->flags |= (static_cast<uint8_t>(effectiveResult()) << FF_RESULT_SHIFT) &
               FF_RESULT_MASK;
@@ -45,15 +44,14 @@ void protocolSendStatusV2(const IPAddress &ip, uint16_t port, uint8_t sequence) 
   p.flags = 0;
   if (motorEnabled()) p.flags |= FF_FLAG_ENABLED;
   if (motorMoving()) p.flags |= FF_FLAG_MOVING;
-  if (motorUartOk()) p.flags |= FF_FLAG_UART_OK;
-  if (motorStandbyOff()) p.flags |= FF_FLAG_STANDBY;
+  if (motorCanOk()) p.flags |= FF_FLAG_CAN_OK;
   if (motorLimitHit()) p.flags |= FF_FLAG_LIMITED;
   p.flags |= (static_cast<uint8_t>(effectiveResult()) << FF_RESULT_SHIFT) &
              FF_RESULT_MASK;
   p.pos = motorPos();
   p.target = motorTarget();
   p.position_trusted = motorPositionTrusted() ? 1 : 0;
-  p.fault = 0;
+  p.fault = motorFault();
   p.reserved = motorWatchdogArmed() ? FF_V2_WATCHDOG_ARMED : 0;
   udp->beginPacket(ip, port);
   udp->write(reinterpret_cast<uint8_t *>(&p), sizeof(p));
@@ -89,36 +87,11 @@ void protocolSendDiscovery(const IPAddress &ip, uint16_t port) {
                 port);
 }
 
-static void protocolSendTmc(const IPAddress &ip, uint16_t port) {
-  if (!udp) return;
-  TmcSnap s;
-  motorTmcSnap(&s);
-  FfTmcDump d{};
-  d.magic = kFfMagic;
-  d.cmd = FF_TMC_DUMP;
-  d.uart_ok = s.uartOk ? 1 : 0;
-  d.stealth = s.stealth ? 1 : 0;
-  d.rms_ma = s.rmsMa;
-  d.microsteps = s.microsteps;
-  d.toff = s.toff;
-  d.ihold = s.ihold;
-  d.irun = s.irun;
-  d.version = s.version;
-  d.cs_actual = s.csActual;
-  d.drv_flags = s.flags;
-  d.drv_status = s.drvStatus;
-  d.sg = s.sg;
-  d.tstep = s.tstep;
-  udp->beginPacket(ip, port);
-  udp->write(reinterpret_cast<uint8_t *>(&d), sizeof(d));
-  udp->endPacket();
-  Serial.printf(
-      "tmc uart=%u stealth=%u rms=%u ms=%u toff=%u ihold=%u irun=%u ver=%u cs=%u "
-      "sg=%u tstep=%u drv=0x%08lx flags=0x%02x drv_valid=%u readfail=%lu diag=%lu/%u\n",
-      d.uart_ok, d.stealth, d.rms_ma, d.microsteps, d.toff, d.ihold, d.irun,
-      d.version, d.cs_actual, d.sg, d.tstep, (unsigned long)d.drv_status, d.drv_flags,
-      s.drvStatusValid ? 1 : 0, (unsigned long)motorTmcReadFails(),
-      (unsigned long)s.diagEdges, s.diagLevel ? 1 : 0);
+static void protocolSendFm03(const IPAddress &ip, uint16_t port) {
+  const auto s=motorFm03Snapshot();
+  FfFm03Dump d{kFfMagic,FF_FM03_DUMP,(uint8_t)s.online,s.stage,s.value,
+    s.maxSpeed,s.tolerance,s.gain,s.rawPosition,s.txFailures,s.rxMissed,s.feedbackAge};
+  udp->beginPacket(ip,port); udp->write(reinterpret_cast<uint8_t *>(&d),sizeof(d)); udp->endPacket();
 }
 
 static void sendCalibration(const IPAddress &ip, uint16_t port, uint8_t sequence,
@@ -179,14 +152,10 @@ static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
     case FF_SET_SPEED:
       motorSetSpeed(in.a, in.b);
       break;
-    case FF_TMC_QUERY:
-      protocolSendTmc(ip, port);
-      return;
-    case FF_TMC_SET:
-      Serial.printf("tmc set key=%ld val=%ld\n", (long)in.a, (long)in.b);
-      motorTmcSet(in.a, in.b);
-      protocolSendTmc(ip, port);
-      return;
+    case FF_FM03_QUERY:
+      protocolSendFm03(ip,port); return;
+    case FF_FM03_SET:
+      motorFm03Set(in.a,in.b); protocolSendFm03(ip,port); return;
     case FF_DISCOVER:
       protocolSendDiscovery(ip, port);
       return;  // Motion state is irrelevant here; skip the status replies.
@@ -213,7 +182,7 @@ void protocolPoll() {
   n = udp->read(buf, n);
   IPAddress ip = udp->remoteIP();
   uint16_t port = udp->remotePort();
-  if (n >= (int)sizeof(FfPacket) && buf[0] == kFfMagic) {
+  if (n == (int)sizeof(FfPacket) && buf[0] == kFfMagic) {
     FfPacket pkt;
     memcpy(&pkt, buf, sizeof(pkt));
     handle(pkt, ip, port);

@@ -9,13 +9,13 @@ import 'ff_core.dart';
 /// `MissingPluginException`，界面只能停在「选择镜头」的空列表上。
 ///
 /// 这个类预置一个已标定镜头，并把按钮接到一个**够看**的状态机上：三个相位
-/// （标定行程 / 单侧对齐 / 跟焦）、滑条、诊断面板、TMC 面板都能点开。
+/// （标定行程 / 单侧对齐 / 跟焦）、滑条、诊断面板、FM03 CAN 面板都能点开。
 ///
 /// 它**不是**第二份控制逻辑：没有软限位夹紧、没有自动跟焦死区、没有看门狗保活、
 /// 也没有运动规划 —— 只有单位换算和相位推进。真机永远走 [FfCore]。
 class FfCoreDemo extends FfCore {
-  /// 0.9° 电机：400 整步/圈。
-  static const _stepsPerRevBase = 400;
+  /// 完整标定行程：4096 坐标。
+  static const _stepsPerRevBase = 4096;
 
   final _events = StreamController<FfState>.broadcast();
 
@@ -31,7 +31,7 @@ class FfCoreDemo extends FfCore {
   ];
   String _currentId = 'demo';
 
-  // 会话级状态。位置存步；行程和标定点存圈，换细分时圈不变形。
+  // 会话级状态。位置存坐标；行程和标定点使用归一化行程比例。
   bool _connected = true;
   bool _enabled = true;
   bool _auto = false;
@@ -43,19 +43,22 @@ class FfCoreDemo extends FfCore {
   int _calSafeSpan = 0;
   int _calTravel = 0;
   int _pos = 1000;
-  int _microsteps = 16;
+  final int _microsteps = 1;
   double _slider = 0.5;
-  double _speedRevS = 1.2;
+  double _speedRevS = 64 / 4096;
   double _accelRevS2 = 30;
   double? _distanceM = 1.80;
-  final _tmcLog = <String>[];
+  final _fm03Log = <String>[];
 
   /// 镜头被全部删掉时的占位，只为让下面的取值有东西可读；不进 lenses 列表。
   final _none = _DemoLens('', '');
 
   _DemoLens get _cur => _lenses.isEmpty
       ? _none
-      : _lenses.firstWhere((l) => l.id == _currentId, orElse: () => _lenses.first);
+      : _lenses.firstWhere(
+          (l) => l.id == _currentId,
+          orElse: () => _lenses.first,
+        );
 
   int get _stepsPerRev => _stepsPerRevBase * _microsteps;
   int _toSteps(double revs) => (revs * _stepsPerRev).round();
@@ -146,15 +149,10 @@ class FfCoreDemo extends FfCore {
       case 'setSpeed':
         _speedRevS = a?['revsPerSec'] as double? ?? _speedRevS;
         _accelRevS2 = a?['accelRevsPerSec2'] as double? ?? _accelRevS2;
-      case 'setMicrosteps':
-        final next = a?['value'] as int? ?? _microsteps;
-        // 保持物理位置：步数按细分比例换算。行程/标定点存的是圈，不用动。
-        _pos = (_pos / _stepsPerRev * (_stepsPerRevBase * next)).round();
-        _microsteps = next;
-      case 'setTmc':
-        _tmcLog.add('demo  写入 TMC key=${a?['key']} value=${a?['value']}');
-      case 'queryTmc':
-        _tmcLog.add('demo  TMC 查询（演示数据，没有真实 UART）');
+      case 'setFm03':
+        _fm03Log.add('demo FM03 key=${a?['key']} value=${a?['value']}');
+      case 'queryFm03':
+        _fm03Log.add('demo CAN 反馈刷新');
       case 'setTrackFaces':
         _faces = a?['on'] == true;
       case 'ingestDistance':
@@ -202,11 +200,11 @@ class FfCoreDemo extends FfCore {
       case 'startAutoCalibration':
         _calStage = 'completed';
         _calDirectionPending = true;
-        _calSafeSpan = _toSteps(1.5);
-        _calTravel = _calSafeSpan + 32 * _microsteps;
+        _calSafeSpan = 4096;
+        _calTravel = 4096;
         _cur
           ..calibrated = true
-          ..strokeRevs = 1.5
+          ..strokeRevs = 1
           ..nearSteps = null;
         _cur.lut.clear();
         _pos = _calSafeSpan;
@@ -283,7 +281,7 @@ class FfCoreDemo extends FfCore {
       pos: _pos,
       target: _pos,
       enabled: _enabled,
-      uartOk: true,
+      canOk: true,
       result: kResultIdle,
       positionTrusted: true,
       microsteps: _microsteps,
@@ -317,27 +315,20 @@ class FfCoreDemo extends FfCore {
       echoAgeMs: 12,
       lastSentSequence: 7,
       lastEchoedSequence: 7,
-      tmc: const FfTmc(
-        uartOk: true,
-        stealth: true,
-        rmsMa: 800,
-        microsteps: 16,
-        toff: 5,
-        ihold: 8,
-        irun: 16,
-        version: 33,
-        csActual: 12,
-        sg: 7,
-        tstep: 100,
-        ot: false,
-        otpw: false,
-        ola: false,
-        olb: false,
-        shorted: false,
-        standstill: true,
-        logLine: 'rms=800mA  ihold=8  irun=16  toff=5  cs=12  sg=7',
+      fm03: const FfFm03(
+        online: true,
+        stage: 3,
+        value: 0,
+        maxSpeed: 64,
+        tolerance: 4,
+        gain: 4,
+        rawPosition: 1000,
+        txFailures: 0,
+        rxMissed: 0,
+        feedbackAge: 12,
+        logLine: 'CAN 在线 stage=3 raw=1000',
       ),
-      tmcLog: List.unmodifiable(_tmcLog),
+      fm03Log: List.unmodifiable(_fm03Log),
       msg: 'web 演示核心（没有真实硬件）',
     );
   }
