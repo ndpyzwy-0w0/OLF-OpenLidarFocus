@@ -12,8 +12,8 @@ static void advance(int ms,int state,int32_t pos) {
 }
 static void reset() {
   enabled=moving=watchdog=calibrating=calPending=calSeen=false;
-  origin=0; minLim=0;maxLim=4096;target=0;cal={};fault=0;
-  fakeBus={};failTx=false;rxMissed=0;lastTx=0;transmitted.clear();
+  origin=0; minLim=0;maxLim=4096;target=0;cal={};fault=0;txFailures=0;
+  fakeBus={};failTx=false;txDelayUs=0;duringTxWait=nullptr;rxMissed=0;lastTx=0;txUrgent=false;transmitted.clear();
   feedback(3,2000); motorSetEnabled(true);
 }
 int main() {
@@ -29,7 +29,7 @@ int main() {
   assert(crc(packet,17,0x3692,0x8408)==(packet[17]|(packet[18]<<8)));
   advance(500,3,2200);assert(!motorMoving() && applied==0 && result==MOTOR_RESULT_COMPLETED);
   reset();motorNoteControlPacket(true);motorSetPos(1800);advance(50,3,2000);assert(applied<0);
-  motorStop();assert(applied==0 && !moving);
+  motorStop();motorPoll();assert(applied==0 && !moving);
   reset();motorSetPos(INT32_MAX);assert(target==4096 && limited);
   motorStop();motorSetLimits(100,300);motorSetPos(800);assert(target==300);
   reset();motorNoteControlPacket(false);motorSetPos(2500);advance(1050,3,2000);assert(!moving && applied==0);
@@ -49,6 +49,33 @@ int main() {
   advance(50,1,INT32_MAX);motorCalibrationCancel();assert(calibrating && cal.error==CAL_CANCEL_UNSUPPORTED);
   advance(50,2,INT32_MAX);advance(50,3,3789);assert(!calibrating && cal.valid && cal.travel==4096);
   assert(motorCalibrationSnapshot().state==CAL_COMPLETED);
+  // 慢 CAN 发送不持有状态锁；期间 UDP QUERY 仍能立即回包。
+  reset();txDelayUs=1000;
+  WiFiUDP waitingUdp;protocolBegin(&waitingUdp);
+  duringTxWait=[] {
+    FfPacket q{kFfMagic,FF_QUERY,0,42,0,0};handle(q,{},4210);
+  };
+  advance(50,3,2000);
+  assert(!waitingUdp.sent.empty() && enabled && txFailures==0);
+  // STOP 在请求发完前到达，后面的速度帧必须归零，不能再发旧的非零速度。
+  reset();motorSetPos(2500);txDelayUs=1000;
+  duringTxWait=[] { motorStop(); };
+  advance(50,3,2000);assert(applied==0 && !moving);
+  // 校准请求在非零速度报文发送中到达，也必须先发完零速度再启动校准。
+  reset();transmitted.clear();motorSetPos(2500);txDelayUs=1000;
+  duringTxWait=[] {
+    if (transmitted.size()==3) {
+      duringTxWait=nullptr;motorStop();
+      assert(motorCalibrationStart(9,0,0)==CAL_OK);
+    }
+  };
+  advance(50,3,2000);assert(calibrating && !calPending && applied==0);
+  auto calEnd=transmitted.end();
+  assert((calEnd-1)->data[10-8]==0x2f); // 最后的 16 字节包是内部校准命令。
+  reset();txDelayUs=30000;
+  uint32_t begin=millis();assert(!sendPacket(dial,sizeof(dial)));
+  assert(millis()-begin==50); // 整包截止时间，而不是每个分片重新等 50ms。
+  reset();
   // CAN 解码：分片、坏 CRC、哨兵、其他 CAN ID。
   MotorStatusDecoder d;uint8_t state[28]={0x55,28,4,0,0xbf,0xe5,0,0,0,4,0x2f,9,0,3};
   state[3]=crc(state,3,0x77,0x8c);int32_t coord=2187;memcpy(state+14,&coord,4);

@@ -177,6 +177,40 @@ Future<void> tapVisible(WidgetTester tester, Finder f) async {
 }
 
 void main() {
+  testWidgets('keyboard can be dismissed in a dialog without losing input', (
+    tester,
+  ) async {
+    final core = FakeCore();
+    await tester.pumpWidget(FollowApp(core: core));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('新建镜头'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, '35mm');
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    addTearDown(tester.view.resetViewInsets);
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isTrue);
+    await tester.tap(find.text('收起键盘'));
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isFalse);
+    expect(find.text('新建镜头'), findsWidgets);
+    expect(
+      tester.widget<TextField>(find.byType(TextField).first).controller!.text,
+      '35mm',
+    );
+    expect(core.called('createLens'), isFalse);
+    // 输入框也支持键盘完成键收起，保持已经输入的内容。
+    tester.view.resetViewInsets();
+    await tester.enterText(find.byType(TextField).last, 'F2');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isFalse);
+    expect(
+      tester.widget<TextField>(find.byType(TextField).last).controller!.text,
+      'F2',
+    );
+  });
+
   testWidgets('app bar shows the version the core reported', (tester) async {
     final core = FakeCore(
       stateFor(

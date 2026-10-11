@@ -154,6 +154,7 @@ public final class FollowFocusSession {
   private var lastProbe = Date.distantPast
   private var lastFm03 = Date.distantPast
   private var lastStatusAt: Date?
+  private var positionQueries = Set<UInt8>()
   private var filter = DistFilter()
   private var distance: Double?
   private var distanceAt = Date.distantPast
@@ -379,6 +380,7 @@ public final class FollowFocusSession {
     do {
       invalidatePosition("连接后请重新寻限位")
       try link.open()
+      positionQueries.removeAll()
       appliedStepsPerRev = 0
       applySpeed()
       // 板子重启后固件 enabled 会归零，这里补一次使能，让状态自愈。
@@ -691,6 +693,7 @@ public final class FollowFocusSession {
       updateCalibration(c)
     default: return
     }
+    lastStatusAt = now
     markDirty()
   }
 
@@ -721,7 +724,8 @@ public final class FollowFocusSession {
       wantEnabled = true
       calQueries.removeAll()
       calPhase = .idle
-      link.query()
+      positionQueries.removeAll()
+      positionQueries.insert(link.query())
       setMsg(state.calDirectionPending ? "寻限位完成，请选择物距变近的旋转方向" : "寻限位完成，距离表已保留；可继续标定或开始跟焦")
     } else if c.state == 6 || c.state == 7 || c.error != 0 {
       failCalibration(error: Int(c.error))
@@ -855,27 +859,15 @@ public final class FollowFocusSession {
 
   private func tick() {
     let now = Date()
-    if calPhase != .idle {
-      tickCalibration(now)
-      emit()
-      return
-    }
-    if distance != nil && now.timeIntervalSince(distanceAt) >= 0.5 { distance = nil; filter.reset() }
-    if state.auto && distance == nil {
-      link.stop(); takeManual("测距已失效"); lastSent = nil; sliderDirty = false
-    }
-    if calPositionValid && (lastStatusAt == nil || now.timeIntervalSince(lastStatusAt!) > 0.5) {
-      link.stop()
-      link.enable(false)
-      invalidatePosition("状态回包超时，已释放电机；请重新定位")
-    }
     if link.isOpen {
       // 200ms 轮询状态：位置反馈用。**注意它喂不了固件看门狗** ——
       // 固件只把 SET_POS/JOG 当控制包（`motorNoteControlPacket`），
       // QUERY 不计入 `lastControlPacketMs`。保活见下面 `lastControlSent`。
       if now.timeIntervalSince(lastQuery) > 0.2 {
         lastQuery = now
-        link.query()
+        let seq = link.query()
+        if positionQueries.count >= 32 { positionQueries.removeAll() }
+        positionQueries.insert(seq)
       }
       if now.timeIntervalSince(lastProbe) > 1.0 {
         lastProbe = now
@@ -885,6 +877,22 @@ public final class FollowFocusSession {
         lastFm03 = now
         link.queryFm03()
       }
+    }
+    if calPhase != .idle {
+      tickCalibration(now)
+      emit()
+      return
+    }
+    if distance != nil && now.timeIntervalSince(distanceAt) >= 0.5 { distance = nil; filter.reset() }
+    if state.auto && distance == nil {
+      link.stop(); takeManual("测距已失效"); lastSent = nil; sliderDirty = false
+    }
+    if calPositionValid && (lastStatusAt == nil || now.timeIntervalSince(lastStatusAt!) > kLinkAliveWindow) {
+      link.stop()
+      link.enable(false)
+      invalidatePosition("状态回包超时，已释放电机；请重新定位")
+    }
+    if link.isOpen {
       // FM03 坐标尺度固定；连接后恢复控制速度。
       if stepsPerRev != appliedStepsPerRev {
         appliedStepsPerRev = stepsPerRev
@@ -895,7 +903,8 @@ public final class FollowFocusSession {
         lastEnableAttempt = now
         link.enable(true)
       }
-      if state.enabled, !stopLatched, calPositionValid, state.positionTrusted {
+      if state.enabled, !stopLatched, calPositionValid, state.positionTrusted,
+        let at = lastStatusAt, now.timeIntervalSince(at) < 0.5 {
         var want: Int32?
         if state.auto {
           if let d = distance { want = autoSteps(d) }
@@ -951,8 +960,18 @@ public final class FollowFocusSession {
     // 还没发出 CAL_START 就超时：连 STOP/QUERY/ENABLE 的回包都没到，
     // 这不是“保活”，而是链路或固件版本问题，必须分开报。
     case .stopping, .checking, .enabling, .reading:
-      if now.timeIntervalSince(calSentAt) > 1.2 {
+      if now.timeIntervalSince(calSentAt) > 3.0 {
         failCalibration(error: kAppCalErrorBase + 0)
+      } else if now.timeIntervalSince(calLastQuery) >= 0.2 {
+        // STOP/QUERY/ENABLE/首读都是幂等操作；丢一次 UDP 不能直接终止寻限位。
+        calLastQuery = now
+        switch calPhase {
+        case .stopping: calSeq = link.stop()
+        case .checking: calSeq = link.query()
+        case .enabling: calSeq = link.enable(true)
+        case .reading: calSeq = link.calQuery(runId: 0)
+        default: break
+        }
       }
     case .starting:
       if now.timeIntervalSince(calLastQuery) >= 0.2 {
@@ -976,7 +995,7 @@ public final class FollowFocusSession {
         if calQueries.count > 32 { calQueries.removeAll(); calQueries.insert(seq) }
       }
       // 观察回包断链不会取消电机内部校准；退出后明确报告这一限制。
-      if now.timeIntervalSince(calLastReply) > 1.2 { failCalibration(error: 7) }
+      if now.timeIntervalSince(calLastReply) > 3.0 { failCalibration(error: 7) }
     case .idle: break
     }
   }
@@ -1125,6 +1144,7 @@ public final class FollowFocusSession {
   }
 
   private func applyStatusV2(_ s: MotorStatusV2) {
+    guard calPhase == .idle, positionQueries.remove(s.sequence) != nil else { return }
     if !s.positionTrusted && (calPositionValid || following) {
       invalidatePosition("设备坐标已失效，请重新寻限位")
     }

@@ -36,6 +36,30 @@ class FollowApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
+      builder: (context, child) {
+        final keyboardHeight = MediaQuery.viewInsetsOf(context).bottom;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            child!,
+            if (keyboardHeight > 0)
+              Positioned(
+                right: 12,
+                bottom: keyboardHeight + 8,
+                child: Material(
+                  color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(20),
+                  child: TextButton.icon(
+                    onPressed: () =>
+                        FocusManager.instance.primaryFocus?.unfocus(),
+                    icon: const Icon(Icons.keyboard_hide),
+                    label: const Text('收起键盘'),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
       home: LensPage(core: core),
     );
   }
@@ -247,6 +271,7 @@ class _FollowPageState extends State<FollowPage> {
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 340),
             child: SingleChildScrollView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -430,6 +455,11 @@ class _FollowPageState extends State<FollowPage> {
             SizedBox(
               width: 90,
               child: TextField(
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) =>
+                    FocusManager.instance.primaryFocus?.unfocus(),
+                onTapOutside: (_) =>
+                    FocusManager.instance.primaryFocus?.unfocus(),
                 controller: _stepsText,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
@@ -457,6 +487,11 @@ class _FollowPageState extends State<FollowPage> {
             SizedBox(
               width: 90,
               child: TextField(
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) =>
+                    FocusManager.instance.primaryFocus?.unfocus(),
+                onTapOutside: (_) =>
+                    FocusManager.instance.primaryFocus?.unfocus(),
                 controller: _revsText,
                 keyboardType: const TextInputType.numberWithOptions(
                   decimal: true,
@@ -635,6 +670,9 @@ class _FollowPageState extends State<FollowPage> {
           '按 1/物距分段插值，超出标定距离时保持表的端点位置。',
         ),
         TextField(
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+          onTapOutside: (_) => FocusManager.instance.primaryFocus?.unfocus(),
           controller: _distanceText,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           onChanged: (_) => setState(() {}),
@@ -837,6 +875,7 @@ class _FollowPageState extends State<FollowPage> {
         SizedBox(
           height: 140,
           child: ListView(
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             children: [
               for (final line in _s.fm03Log)
                 Text(line, style: const TextStyle(fontSize: 11)),
@@ -868,6 +907,9 @@ class _FollowPageState extends State<FollowPage> {
       builder: (ctx) => AlertDialog(
         title: Text('设置 $title'),
         content: TextField(
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+          onTapOutside: (_) => FocusManager.instance.primaryFocus?.unfocus(),
           controller: c,
           keyboardType: TextInputType.number,
           autofocus: true,

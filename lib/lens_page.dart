@@ -54,11 +54,19 @@ class _LensPageState extends State<LensPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+              onTapOutside: (_) =>
+                  FocusManager.instance.primaryFocus?.unfocus(),
               controller: name,
               autofocus: true,
               decoration: const InputDecoration(labelText: '名称（如 50mm F1.4）'),
             ),
             TextField(
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+              onTapOutside: (_) =>
+                  FocusManager.instance.primaryFocus?.unfocus(),
               controller: params,
               decoration: const InputDecoration(labelText: '参数备注（可选）'),
             ),
@@ -120,6 +128,7 @@ class _LensPageState extends State<LensPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('选择镜头')),
       body: ListView(
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
         padding: const EdgeInsets.all(12),
         children: [
           const Text(

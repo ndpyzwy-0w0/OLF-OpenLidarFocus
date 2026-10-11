@@ -24,6 +24,7 @@ static int64_t sampleUs = 0;
 static uint32_t feedbackEpoch = 0, moveEpoch = 0;
 static bool installed = false, enabled = false, moving = false, limited = false;
 static bool watchdog = false, calibrating = false, calSeen = false, calPending = false;
+static bool txUrgent = false;
 static int32_t origin = 0, target = 0, minLim = 0, maxLim = 4096;
 static int16_t applied = 0;
 static uint16_t speed = 64, tolerance = 4, gain = 4;
@@ -35,46 +36,48 @@ static int32_t progressPosition = 0;
 static uint16_t calSequence = 0xDB21;
 static CalibrationSnapshot cal{};
 static MotorCommandResult result = MOTOR_RESULT_IDLE;
-struct Guard { Guard() { xSemaphoreTakeRecursive(lock, portMAX_DELAY); }
-  ~Guard() { xSemaphoreGiveRecursive(lock); } };
+struct Guard {
+  bool held = true;
+  Guard() { xSemaphoreTakeRecursive(lock, portMAX_DELAY); }
+  void unlock() { if (held) { held = false; xSemaphoreGiveRecursive(lock); } }
+  ~Guard() { unlock(); }
+};
 
 static uint16_t crc(const uint8_t *p, unsigned n, uint16_t v, uint16_t poly) {
   while (n--) { v ^= *p++; for (int i=0;i<8;i++) v = v&1 ? (v>>1)^poly : v>>1; }
   return v;
 }
+// 整个 DUML 包共享 50ms 截止时间，不能每个 CAN 分片各等 50ms。
+static bool waitTxIdle(uint32_t startedAt) {
+  do {
+    twai_status_info_t s{};
+    if (twai_get_status_info(&s) != ESP_OK || s.state != TWAI_STATE_RUNNING) return false;
+    if (!s.msgs_to_tx) return true;
+    delay(1);
+  } while (millis() - startedAt < 50);
+  return false;
+}
 static bool sendPacket(const uint8_t *p, unsigned n) {
   if (!installed) return false;
+  const uint32_t startedAt = millis();
   while (n) {
-    // TX 队列关闭，逐帧等待前一帧完成，避免参考仓库发现的队列竞态。
-    bool idle = false;
-    for (unsigned i=0;i<50;i++) {
-      twai_status_info_t s{};
-      if (twai_get_status_info(&s) != ESP_OK || s.state != TWAI_STATE_RUNNING) break;
-      if (!s.msgs_to_tx) { idle = true; break; }
-      delay(1);
-    }
-    if (!idle) { ++txFailures; return false; }
+    // 只有 controlTask 发送 CAN；TX 队列关闭，逐帧等待实际完成。
+    if (!waitTxIdle(startedAt)) { Guard g; ++txFailures; return false; }
     twai_message_t m{}; m.identifier = 0x503;
     m.data_length_code = std::min(n, 8u);
     memcpy(m.data, p, m.data_length_code);
-    if (twai_transmit(&m, 0) != ESP_OK) { ++txFailures; return false; }
+    if (twai_transmit(&m, 0) != ESP_OK) { Guard g; ++txFailures; return false; }
     p += m.data_length_code; n -= m.data_length_code;
   }
-  // 最后一帧也必须实际完成，不能把“入队”当成已发送。
-  for (unsigned i=0;i<50;i++) {
-    twai_status_info_t s{};
-    if (twai_get_status_info(&s) != ESP_OK || s.state != TWAI_STATE_RUNNING) break;
-    if (!s.msgs_to_tx) return true;
-    delay(1);
-  }
-  ++txFailures; return false;
+  if (waitTxIdle(startedAt)) return true;
+  Guard g; ++txFailures; return false;
 }
 static bool sendDial(int16_t value) {
   uint8_t p[sizeof(dial)]; memcpy(p,dial,sizeof(p));
   p[15] = (uint8_t)value; p[16] = (uint8_t)((uint16_t)value>>8);
   uint16_t c = crc(p,17,0x3692,0x8408); p[17]=c; p[18]=c>>8;
   if (!sendPacket(p,sizeof(p))) return false;
-  applied=value; return true;
+  Guard g; applied=value; return true;
 }
 static bool fresh() {
   return installed && sampleUs > 0 && esp_timer_get_time()-sampleUs <= 300000;
@@ -82,6 +85,7 @@ static bool fresh() {
 static bool trusted() { return fresh() && stage==3 && rawPosition>=0 && rawPosition<=4096 && !calibrating; }
 static int32_t position() { return lastGoodRaw-origin; }
 static void stopLocal(MotorCommandResult r) {
+  txUrgent = txUrgent || moving;
   moving=false; watchdog=false; target=position(); settledAt=0; result=r;
 }
 static void save() {
@@ -162,8 +166,8 @@ void motorPoll() {
       fault=3; stopLocal(MOTOR_RESULT_REJECTED);
     }
   }
-  if (now-lastTx<50 || !bus) return;
-  lastTx=now;
+  if ((!txUrgent && now-lastTx<50) || !bus) return;
+  txUrgent=false; lastTx=now;
   int16_t value=0;
   if (enabled && moving && trusted()) {
     const int64_t error=(int64_t)target-position();
@@ -181,16 +185,33 @@ void motorPoll() {
       value=error<0 ? -v : v;
     }
   }
+  // CAN 等待不能持有状态锁：UDP/OLED 读取和 STOP/ENABLE 必须随时能处理。
+  g.unlock();
   // 归零流在禁用/失联时仍发送：DISARM 不能靠停止发送使电机停下。
-  if (!sendPacket(request,sizeof(request)) || !sendDial(value)) {
-    fault=1; enabled=false; stopLocal(MOTOR_RESULT_REJECTED); sendDial(0);
+  const bool requested = sendPacket(request,sizeof(request));
+  { Guard stateGuard; if (!enabled || !moving || !trusted()) value=0; }
+  if (!requested || !sendDial(value)) {
+    { Guard stateGuard; fault=1; enabled=false; stopLocal(MOTOR_RESULT_REJECTED); }
+    sendDial(0);
   }
-  if (calPending) {
-    calPending=false;
-    uint8_t p[sizeof(calibrate)]; memcpy(p,calibrate,sizeof(p));
-    uint16_t seq=calSequence++; p[6]=seq; p[7]=seq>>8;
-    uint16_t c=crc(p,14,0x3692,0x8408); p[14]=c; p[15]=c>>8;
-    if (!enabled || !sendPacket(p,sizeof(p))) { cal.error=CAL_CAN; enabled=false; }
+  uint8_t p[sizeof(calibrate)];
+  bool sendCal = false;
+  {
+    Guard stateGuard;
+    if (calPending) {
+      calPending=false;
+      if (!enabled) { cal.error=CAL_CAN; }
+      else {
+        memcpy(p,calibrate,sizeof(p));
+        uint16_t seq=calSequence++; p[6]=seq; p[7]=seq>>8;
+        uint16_t c=crc(p,14,0x3692,0x8408); p[14]=c; p[15]=c>>8;
+        sendCal=true;
+      }
+    }
+  }
+  // START 可能在上一条速度报文发送中到达，校准前必须实际发完零速度。
+  if (sendCal && (!sendDial(0) || !sendPacket(p,sizeof(p)))) {
+    Guard stateGuard; cal.error=CAL_CAN; enabled=false;
     // 部分发出也可能执行；不自动重发，不解除观察锁。
   }
 }
@@ -210,11 +231,11 @@ void motorJog(int32_t delta) {
   Guard g; int64_t v=(int64_t)position()+delta;
   motorSetPos((int32_t)std::max((int64_t)INT32_MIN,std::min((int64_t)INT32_MAX,v)));
 }
-void motorStop() { Guard g; stopLocal(MOTOR_RESULT_STOPPED); sendDial(0); }
+void motorStop() { Guard g; stopLocal(MOTOR_RESULT_STOPPED); txUrgent=true; }
 void motorSetEnabled(bool on) {
   Guard g;
   if (on && (!installed || calibrating || !fresh())) { result=MOTOR_RESULT_REJECTED; return; }
-  enabled=on; fault=0; stopLocal(MOTOR_RESULT_STOPPED); sendDial(0);
+  enabled=on; fault=0; stopLocal(MOTOR_RESULT_STOPPED); txUrgent=true;
 }
 bool motorSetHome() {
   Guard g; if (moving || !trusted()) { result=MOTOR_RESULT_REJECTED; return false; }
@@ -233,6 +254,8 @@ void motorFm03Set(int32_t key,int32_t v) {
       ((key==2 || key==3) && (v<1 || v>64)) || key<1 || key>3) {
     result=MOTOR_RESULT_REJECTED; return;
   }
+  // 连接时 App 会重发参数；相同数值不重复写 flash，避免打断 CAN 收包。
+  if ((key==1 && speed==v) || (key==2 && tolerance==v) || (key==3 && gain==v)) return;
   if (key==1) speed=v; if (key==2) tolerance=v; if (key==3) gain=v; save();
 }
 int32_t motorPos() { Guard g; return position(); }
@@ -261,7 +284,7 @@ uint8_t motorCalibrationStart(uint8_t runId,int32_t a,int32_t b) {
   if (cal.runId==runId && (calibrating || cal.state==CAL_COMPLETED)) return cal.error;
   if (!enabled || moving || calibrating) return CAL_BUSY;
   if (!fresh()) return CAL_CAN;
-  stopLocal(MOTOR_RESULT_STOPPED); sendDial(0);
+  stopLocal(MOTOR_RESULT_STOPPED); txUrgent=true;
   cal={}; cal.runId=runId; cal.microsteps=1; cal.state=CAL_SEEK_NEGATIVE;
   calStarted=millis(); calStartedUs=esp_timer_get_time();
   calSeen=false; calibrating=true; calPending=true; origin=0; minLim=0; maxLim=4096;
@@ -270,7 +293,7 @@ uint8_t motorCalibrationStart(uint8_t runId,int32_t a,int32_t b) {
 void motorCalibrationKeepalive(int32_t) {} // FM03 自主执行；App 查询不冒充可取消的租约。
 void motorCalibrationCancel() {
   Guard g;
-  if (calibrating) { cal.error=CAL_CANCEL_UNSUPPORTED; enabled=false; sendDial(0); return; }
+  if (calibrating) { cal.error=CAL_CANCEL_UNSUPPORTED; enabled=false; txUrgent=true; return; }
   cal.state=CAL_CANCELLED; cal.valid=false;
 }
 CalibrationSnapshot motorCalibrationSnapshot() { Guard g; return cal; }

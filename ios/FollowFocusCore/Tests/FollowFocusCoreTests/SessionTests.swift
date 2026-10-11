@@ -50,6 +50,9 @@ private final class FakeFirmware {
   var invalidateCalResult = false
   var wrongRunReplies = 0
   var dropStatusReplies = false
+  let holdCalibration = Locked(false)
+  var dropHandshakeReplies = Set<UInt8>()
+  var dropFirstRead = false
 
   /// 关掉时，即使收到 ENABLE 也继续回 enabled=0，用来模拟板子刚重启的固件状态。
   var acksEnable = true
@@ -121,8 +124,9 @@ private final class FakeFirmware {
       return
     case kFfCalQuery:
       if dropCalQueries { return }
+      if p.a == 0 && dropFirstRead { dropFirstRead = false; return }
       if dropRunQueries && p.a != 0 { return }
-      if p.a == Int32(_calRun.current) && p.a != 0 {
+      if p.a == Int32(_calRun.current) && p.a != 0 && !holdCalibration.current {
         _calStage.set(min(_calStage.current + 1, 5))
         if _calStage.current == 5 { _pos.set(3789); _target.set(3789) }
       }
@@ -155,7 +159,7 @@ private final class FakeFirmware {
     default:
       break
     }
-    if dropStatusReplies { return }
+    if dropStatusReplies || dropHandshakeReplies.remove(p.cmd) != nil { return }
     reply(status(sequence: p.sequence), to: host, port: port)
     if p.cmd==kFfQuery || p.cmd==kFfHome {
       var v=status(sequence:p.sequence);v[1]=kFfStatusV2
@@ -335,7 +339,7 @@ final class SessionTests: XCTestCase {
     prepareAuto(h)
     h.firmware.dropStatusReplies = true
     h.session.startAutoCalibration()
-    XCTAssertTrue(waitUntil(3) { h.latest.current?.calStage == "failed" })
+    XCTAssertTrue(waitUntil(5) { h.latest.current?.calStage == "failed" })
     XCTAssertEqual(h.latest.current?.calError, 20)
     XCTAssertTrue(
       h.latest.current?.msg.contains("握手") == true,
@@ -426,6 +430,72 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(waitUntil { h.latest.current?.calStage == "cancelled" })
     XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 0)
     XCTAssertEqual(h.firmware.count(kFfSetPos), 0)
+  }
+
+  func testLongCalibrationKeepsPollingAndCalRepliesKeepLinkAlive() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    h.firmware.holdCalibration.set(true)
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "seek_negative" })
+    let queries = h.firmware.count(kFfQuery)
+    h.firmware.dropStatusReplies = true
+    pump(1.8)
+    XCTAssertGreaterThan(h.firmware.count(kFfQuery), queries)
+    XCTAssertEqual(h.latest.current?.linkAlive, true)
+    XCTAssertEqual(h.latest.current?.calStage, "seek_negative")
+    h.firmware.dropStatusReplies = false
+    h.firmware.holdCalibration.set(false)
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+  }
+
+  func testLostHandshakeRepliesAreRetried() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    h.firmware.dropHandshakeReplies = [kFfStop, kFfQuery, kFfEnable]
+    h.firmware.dropFirstRead = true
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil(6) { h.latest.current?.calDirectionPending == true })
+    XCTAssertEqual(h.latest.current?.calError, 0)
+    XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 1)
+  }
+
+  func testBriefReplyLossPreservesCalibrationAndCompletedSetup() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    h.firmware.holdCalibration.set(true)
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "seek_negative" })
+    h.firmware.dropRunQueries = true
+    pump(1.4)
+    XCTAssertEqual(h.latest.current?.calStage, "seek_negative")
+    XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 1)
+    h.firmware.dropRunQueries = false
+    h.firmware.holdCalibration.set(false)
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+    h.firmware.dropStatusReplies = true
+    pump(0.8)
+    XCTAssertEqual(h.latest.current?.phase, .align)
+    XCTAssertEqual(h.firmware.last(kFfEnable)?.a, 1)
+    h.firmware.dropStatusReplies = false
+    XCTAssertTrue(waitUntil { (h.latest.current?.statusAgeMs ?? 9999) < 200 })
+    XCTAssertEqual(h.latest.current?.phase, .align)
+  }
+
+  func testDelayedUntrustedReplyFromScanCannotEraseCompletedResult() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareAuto(h)
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage == "seek_negative" })
+    let oldSequence = try XCTUnwrap(h.firmware.last(kFfQuery)?.sequence)
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
+    let stale = MotorStatusV2(status: MotorStatus(sequence: oldSequence, pos: 0,
+      target: 0, enabled: true, moving: false, canOk: true, limited: false,
+      result: kResultStopped, positionTrusted: false))
+    h.session.link.onStatusV2?(stale)
+    pump(0.1)
+    XCTAssertEqual(h.latest.current?.phase, .align)
+    XCTAssertEqual(h.latest.current?.positionTrusted, true)
   }
 
   func testResultLossInvalidatesPositionAndResetDoesNotChangeMotorLimits() throws {

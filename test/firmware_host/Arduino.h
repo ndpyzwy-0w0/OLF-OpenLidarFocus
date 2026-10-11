@@ -3,9 +3,11 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <cstring>
+#include <cassert>
+#include "freertos/semphr.h"
 inline uint64_t fakeUs=1000000;
 inline uint32_t millis() { return fakeUs/1000; }
-inline void delay(uint32_t ms) { fakeUs+=ms*1000; }
+inline void delay(uint32_t ms) { assert(stateLockDepth==0); fakeUs+=ms*1000; }
 struct FakeSerial {
   template<class... T> void printf(const char*, T...) {}
   template<class T> void println(T) {}

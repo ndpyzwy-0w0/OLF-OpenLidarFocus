@@ -2,7 +2,7 @@
 
 iPhone LiDAR 自动跟焦：Swift 功能层 + Flutter UI + ESP32-S3，经 CAN 收发器控制 DJI RS 跟焦电机（2022，FM03）。ESP32-S3 Super Mini 开发板和 72×40 OLED 保留。
 
-原 TMC2209 / STEP / DIR / EN / UART / DIAG 控制已弃用。App 2.0.1+5 配合固件 2.0.0，UDP 协议版本 2。本次仅修改 App，无需重烧已有 FM03 2.0 固件。
+原 TMC2209 / STEP / DIR / EN / UART / DIAG 控制已弃用。App 2.0.2+6 配合固件 2.0.1，UDP 协议版本 2。本次同时修复固件和 App，需更新两端：寻限位期间持续状态轮询、UDP 握手重试、忽略寻限位期间延迟到达的旧坐标回包；CAN 发送等待不持有电机状态锁，整包等待上限 50ms。所有输入框支持完成键、点外部和滚动收起键盘，键盘弹出时另有全局“收起键盘”按钮。
 
 ## 接线与使用
 
