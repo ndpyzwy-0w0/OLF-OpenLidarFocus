@@ -123,6 +123,14 @@ final class ProtocolTests: XCTestCase {
     XCTAssertEqual(t?.value,-16); XCTAssertEqual(t?.rawPosition,2187)
     XCTAssertEqual(t?.maxSpeed,64); XCTAssertEqual(t?.txFailures,2)
     XCTAssertNil(Fm03Dump.decode(Array(raw.dropLast())))
+    XCTAssertNil(t?.acceleration, "Legacy firmware cannot tune acceleration")
+    raw += [32, 0]
+    XCTAssertEqual(Fm03Dump.decode(raw)?.acceleration, 32)
+    XCTAssertEqual(Fm03Dump.decode(raw)?.rawPosition, 2187)
+    XCTAssertNil(Fm03Dump.decode(Array(raw.dropLast())))
+    raw[26] = 0; XCTAssertNil(Fm03Dump.decode(raw))
+    raw[26] = 65; XCTAssertNil(Fm03Dump.decode(raw))
+    raw[26] = 32
     raw[1]=0x82; XCTAssertNil(Fm03Dump.decode(raw))
   }
 

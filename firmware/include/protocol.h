@@ -26,7 +26,7 @@ enum FfCmd : uint8_t {
   FF_CAL_STATUS = 0x85,
 };
 
-enum FfFm03Key : int32_t { FM03_MAX_SPEED=1, FM03_TOLERANCE=2, FM03_GAIN=3 };
+enum FfFm03Key : int32_t { FM03_MAX_SPEED=1, FM03_TOLERANCE=2, FM03_GAIN=3, FM03_ACCELERATION=4 };
 
 enum FfFlag : uint8_t {
   FF_FLAG_ENABLED = 1,
@@ -74,8 +74,9 @@ struct FfFm03Dump {
   int32_t raw_position;
   uint32_t tx_failures, rx_missed;
   uint16_t feedback_age;
+  uint16_t acceleration;
 } __attribute__((packed));
-static_assert(sizeof(FfFm03Dump)==26, "FfFm03Dump must be 26 bytes");
+static_assert(sizeof(FfFm03Dump)==28, "FfFm03Dump must be 28 bytes");
 
 struct FfStatusV2 {
   uint8_t magic;

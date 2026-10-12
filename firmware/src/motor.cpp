@@ -28,7 +28,7 @@ static bool watchdog = false, calibrating = false, calSeen = false, calPending =
 static bool txUrgent = false;
 static int32_t origin = 0, target = 0, minLim = 0, maxLim = 4096;
 static int16_t applied = 0;
-static const int kDialAccelerationPerCycle = 8; // Dial units per 50ms, tune after mechanical testing.
+static uint16_t acceleration = 8; // Dial units per 50ms; persisted and adjustable.
 static uint16_t speed = 64, tolerance = 4, gain = 4;
 static uint8_t fault = 0;
 static uint32_t txFailures = 0, rxMissed = 0, lastControl = 0, lastTx = 0;
@@ -96,7 +96,9 @@ static bool sendDial(int16_t value) {
 // Only acceleration is limited. STOP/feedback loss/arrival still output zero immediately.
 static int16_t smoothDial(int16_t desired) {
   if (!desired || (desired>0 && applied<0) || (desired<0 && applied>0)) return 0;
-  const int step=std::min<uint32_t>(millis()-lastDialAt,50)*kDialAccelerationPerCycle/50;
+  // Round up so acceleration=1 still advances when CAN transmission leaves
+  // slightly less than 50ms since the previous completed dial packet.
+  const int step=(std::min<uint32_t>(millis()-lastDialAt,50)*acceleration+49)/50;
   const int magnitude=std::min(std::abs((int)desired),std::abs((int)applied)+step);
   return desired<0 ? -magnitude : magnitude;
 }
@@ -111,7 +113,7 @@ static void stopLocal(MotorCommandResult r) {
 }
 static void save() {
   Preferences p; if (!p.begin("fm03",false)) return;
-  p.putUShort("speed",speed); p.putUShort("tol",tolerance); p.putUShort("gain",gain); p.end();
+  p.putUShort("speed",speed); p.putUShort("tol",tolerance); p.putUShort("gain",gain); p.putUShort("accel",acceleration); p.end();
 }
 static void rxTask(void *) {
   unsigned count=0;
@@ -134,7 +136,8 @@ void motorBegin() {
   Preferences p; if (p.begin("fm03",true)) {
     speed=std::max(1,std::min(256,(int)p.getUShort("speed",64)));
     tolerance=std::max(1,std::min(64,(int)p.getUShort("tol",4)));
-    gain=std::max(1,std::min(64,(int)p.getUShort("gain",4))); p.end();
+    gain=std::max(1,std::min(64,(int)p.getUShort("gain",4)));
+    acceleration=std::max(1,std::min(64,(int)p.getUShort("accel",8))); p.end();
   }
   twai_general_config_t g=TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)PIN_CAN_TX,(gpio_num_t)PIN_CAN_RX,TWAI_MODE_NORMAL);
   g.tx_queue_len=0; g.rx_queue_len=128;
@@ -280,12 +283,12 @@ void motorSetSpeed(int32_t v,int32_t) { motorFm03Set(1,v); }
 void motorFm03Set(int32_t key,int32_t v) {
   Guard g;
   if (moving || calibrating || (key==1 && (v<1 || v>256)) ||
-      ((key==2 || key==3) && (v<1 || v>64)) || key<1 || key>3) {
+      ((key==2 || key==3 || key==4) && (v<1 || v>64)) || key<1 || key>4) {
     result=MOTOR_RESULT_REJECTED; return;
   }
-  // 连接时 App 会重发参数；相同数值不重复写 flash，避免打断 CAN 收包。
-  if ((key==1 && speed==v) || (key==2 && tolerance==v) || (key==3 && gain==v)) return;
-  if (key==1) speed=v; if (key==2) tolerance=v; if (key==3) gain=v; save();
+  // 相同参数不重复写 flash，避免重复命令打断 CAN 收包。
+  if ((key==1 && speed==v) || (key==2 && tolerance==v) || (key==3 && gain==v) || (key==4 && acceleration==v)) return;
+  if (key==1) speed=v; if (key==2) tolerance=v; if (key==3) gain=v; if (key==4) acceleration=v; save();
 }
 int32_t motorPos() { Guard g; return position(); }
 int32_t motorTarget() { Guard g; return target; }
@@ -304,7 +307,7 @@ Fm03Snapshot motorFm03Snapshot() {
   Guard g;
   int64_t age=sampleUs>0 ? (esp_timer_get_time()-sampleUs)/1000 : 65535;
   return {fresh(),enabled,moving,(uint8_t)(stage<0 ? 255 : stage),applied,speed,tolerance,gain,
-    rawPosition,txFailures,rxMissed,(uint16_t)std::min((int64_t)65535,age)};
+    rawPosition,txFailures,rxMissed,(uint16_t)std::min((int64_t)65535,age),acceleration};
 }
 bool motorCalibrationActive() { Guard g; return calibrating; }
 uint8_t motorCalibrationStart(uint8_t runId,int32_t a,int32_t b) {

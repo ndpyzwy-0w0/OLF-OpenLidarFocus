@@ -52,6 +52,7 @@ extension FollowFocusState {
       "wheel_sensitivity": wheelSensitivity,
       "wheel_reversed": wheelReversed,
       "wheel_pulling": wheelPulling,
+      "wheel_pull_curve": wheelPullCurve.rawValue,
       "wheel_arrival": wheelArrival,
       "wheel_arrival_sequence": wheelArrivalSequence,
       "slider": slider,
@@ -132,6 +133,7 @@ extension Fm03Dump {
     ["online": online, "stage": stage, "value": value, "max_speed": maxSpeed,
      "tolerance": tolerance, "gain": gain, "raw_position": Int(rawPosition),
      "tx_failures": Int(txFailures), "rx_missed": Int(rxMissed),
-     "feedback_age": feedbackAge, "log_line": logLine()]
+     "feedback_age": feedbackAge, "log_line": logLine(),
+     "acceleration": acceleration.map { $0 as Any } ?? NSNull()]
   }
 }

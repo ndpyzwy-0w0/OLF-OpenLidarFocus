@@ -577,6 +577,189 @@ void main() {
   );
 
   testWidgets(
+    'wheel owns vertical starts and the hub supports fine adjustment',
+    (tester) async {
+      final turns = <double>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ListView(
+              children: [
+                SizedBox(
+                  height: 300,
+                  child: WheelDial(
+                    enabled: true,
+                    haptics: false,
+                    actual: .5,
+                    target: .5,
+                    label: '50%',
+                    onTurn: turns.add,
+                  ),
+                ),
+                const SizedBox(height: 1000),
+              ],
+            ),
+          ),
+        ),
+      );
+      final scroll = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      final center = tester.getCenter(
+        find.byKey(const ValueKey('focus-wheel')),
+      );
+      final gesture = await tester.startGesture(center + const Offset(120, 0));
+      await gesture.moveBy(const Offset(0, 2));
+      expect(
+        turns,
+        hasLength(1),
+        reason: 'first movement must not wait for pan slop',
+      );
+      await gesture.moveBy(const Offset(0, 60));
+      await gesture.up();
+      expect(scroll.pixels, 0);
+      turns.clear();
+      final hub = await tester.startGesture(center);
+      await hub.moveBy(const Offset(0, -30));
+      expect(turns.single, closeTo(.025, 1e-6));
+      final second = await tester.startGesture(
+        center + const Offset(120, 0),
+        pointer: 9,
+      );
+      await second.moveBy(const Offset(0, 30));
+      await second.up();
+      expect(
+        turns,
+        hasLength(1),
+        reason: 'second finger must not move the wheel',
+      );
+      await hub.moveBy(const Offset(0, -30));
+      expect(turns, hasLength(2));
+      await hub.cancel();
+      expect(scroll.pixels, 0);
+    },
+  );
+
+  testWidgets(
+    'wheel stays fixed while controls scroll and stop stays visible',
+    (tester) async {
+      tester.view.physicalSize = const Size(375, 667);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final core = FakeCore(const FfState(connected: true, wheelReady: true));
+      await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
+      await tester.pumpAndSettle();
+      final wheel = find.byKey(const ValueKey('focus-wheel'));
+      final origin = tester.getTopLeft(wheel);
+      await tester.drag(
+        find.byKey(const ValueKey('wheel-controls-scroll')),
+        const Offset(0, -200),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(wheel), origin);
+      await tester.tap(find.text('停止并锁定'));
+      expect(core.called('stopPressed'), isTrue);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'wheel settings send speed, acceleration, gain and curve intents',
+    (tester) async {
+      const fm03 = FfFm03(
+        online: true,
+        stage: 3,
+        value: 0,
+        maxSpeed: 64,
+        tolerance: 4,
+        gain: 4,
+        acceleration: 8,
+        rawPosition: 1000,
+        txFailures: 0,
+        rxMissed: 0,
+        feedbackAge: 10,
+        logLine: '',
+      );
+      final core = FakeCore(
+        const FfState(connected: true, linkAlive: true, fm03: fm03),
+      );
+      await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
+      await tester.pumpAndSettle();
+      final speed = tester.widget<Slider>(
+        find.byKey(const ValueKey('wheel-parameter-1')),
+      );
+      speed.onChangeEnd!(128);
+      expect(core.args['setFm03'], {'key': kFm03MaxSpeed, 'value': 128});
+      await tapVisible(tester, find.text('手轮响应与设置'));
+      await tester.pumpAndSettle();
+      final acceleration = tester.widget<Slider>(
+        find.byKey(const ValueKey('wheel-parameter-4')),
+      );
+      acceleration.onChangeEnd!(32);
+      expect(core.args['setFm03'], {'key': kFm03Acceleration, 'value': 32});
+      final gain = tester.widget<Slider>(
+        find.byKey(const ValueKey('wheel-parameter-3')),
+      );
+      gain.onChangeEnd!(2);
+      expect(core.args['setFm03'], {'key': kFm03Gain, 'value': 2});
+      final curve = tester.widget<DropdownButton<String>>(
+        find.byKey(const ValueKey('wheel-pull-curve')),
+      );
+      curve.onChanged!('linear');
+      expect(core.args['setWheelPullCurve'], {'curve': 'linear'});
+      core.push(
+        const FfState(
+          connected: true,
+          linkAlive: true,
+          moving: true,
+          fm03: fm03,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Slider>(find.byKey(const ValueKey('wheel-parameter-1')))
+            .onChanged,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<Slider>(find.byKey(const ValueKey('wheel-parameter-4')))
+            .onChanged,
+        isNull,
+      );
+      core.push(
+        const FfState(
+          connected: true,
+          linkAlive: true,
+          fm03: FfFm03(
+            online: true,
+            stage: 3,
+            value: 0,
+            maxSpeed: 64,
+            tolerance: 4,
+            gain: 4,
+            rawPosition: 1000,
+            txFailures: 0,
+            rxMissed: 0,
+            feedbackAge: 10,
+            logLine: '',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Slider>(find.byKey(const ValueKey('wheel-parameter-4')))
+            .onChanged,
+        isNull,
+      );
+      expect(find.text('需要固件 2.1.0 或更新版本。'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
     'handwheel endpoint haptic follows a new actual-arrival event once',
     (tester) async {
       final haptics = <Object?>[];

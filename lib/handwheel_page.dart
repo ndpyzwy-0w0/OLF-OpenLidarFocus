@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 
 import 'device_page.dart';
@@ -22,7 +23,13 @@ class _HandwheelPageState extends State<HandwheelPage>
   bool _haptics = true;
   int? _arrivalSequence;
   double _duration = 2;
-  double? _speedDrag;
+  final _parameterDrag = <int, double>{};
+  bool get _canTune =>
+      _s.linkAlive &&
+      _s.fm03?.online == true &&
+      !_s.moving &&
+      !_s.wheelPulling &&
+      !_calRunning;
   bool get _calRunning =>
       !['idle', 'completed', 'cancelled', 'failed'].contains(_s.calStage);
   bool get _paused => _s.stopLatched && _s.strokeSteps > 0;
@@ -133,24 +140,45 @@ class _HandwheelPageState extends State<HandwheelPage>
                     ),
                   ),
                   const SizedBox(width: 20),
-                  Expanded(child: SingleChildScrollView(child: _controls())),
+                  Expanded(
+                    child: Column(
+                      children: [
+                        Expanded(
+                          child: SingleChildScrollView(child: _controls()),
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(width: double.infinity, child: _stopButton()),
+                      ],
+                    ),
+                  ),
                 ],
               );
             }
             return Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 620),
-                child: ListView(
+                child: Column(
                   children: [
                     _status(),
                     const SizedBox(height: 8),
                     Center(
                       child: SizedBox.square(
-                        dimension: math.min(box.maxWidth, 350),
+                        dimension: math.min(
+                          box.maxWidth,
+                          math.min(350, box.maxHeight * .52),
+                        ),
                         child: _dial(),
                       ),
                     ),
-                    _controls(showStatus: false),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        key: const ValueKey('wheel-controls-scroll'),
+                        child: _controls(showStatus: false),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(width: double.infinity, child: _stopButton()),
                   ],
                 ),
               ),
@@ -221,6 +249,13 @@ class _HandwheelPageState extends State<HandwheelPage>
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       if (showStatus) ...[_status(), const SizedBox(height: 12)],
+      _motorParameter(
+        '电机速度上限',
+        kFm03MaxSpeed,
+        _s.fm03?.maxSpeed ?? (_s.speedRevS * 4096).round(),
+        256,
+        '1～256 拨轮协议值；越大追赶越快，不是 RPM。停稳后可调。',
+      ),
       Row(
         children: [
           Expanded(child: _point('A', _s.wheelA)),
@@ -241,10 +276,11 @@ class _HandwheelPageState extends State<HandwheelPage>
             ? widget.core.setWheelRange
             : null,
       ),
-      Row(
+      Wrap(
+        spacing: 12,
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          const Text('过渡时长'),
-          const SizedBox(width: 12),
+          const Text('A/B 拉焦时长'),
           DropdownButton<double>(
             value: _duration,
             items: [
@@ -258,7 +294,6 @@ class _HandwheelPageState extends State<HandwheelPage>
               if (v != null) setState(() => _duration = v);
             },
           ),
-          const Spacer(),
           TextButton(
             onPressed:
                 !_s.moving &&
@@ -269,6 +304,28 @@ class _HandwheelPageState extends State<HandwheelPage>
             child: const Text('清除 A/B'),
           ),
         ],
+      ),
+      Row(
+        children: [
+          const Expanded(child: Text('A/B 拉焦曲线')),
+          DropdownButton<String>(
+            key: const ValueKey('wheel-pull-curve'),
+            value: _s.wheelPullCurve,
+            items: const [
+              DropdownMenuItem(value: 'smooth', child: Text('缓入缓出')),
+              DropdownMenuItem(value: 'linear', child: Text('匀速目标')),
+            ],
+            onChanged: _s.wheelPulling
+                ? null
+                : (v) {
+                    if (v != null) widget.core.setWheelPullCurve(v);
+                  },
+          ),
+        ],
+      ),
+      const Text(
+        '仅控制下方“拉到 A/B”的目标节奏；“到 A/B 点”直接发送终点。转手轮实时跟随，不受时长与曲线影响。实际到位受速度与负载限制。',
+        style: TextStyle(fontSize: 12, color: Colors.white60),
       ),
       Row(
         children: [
@@ -296,25 +353,6 @@ class _HandwheelPageState extends State<HandwheelPage>
           child: LinearProgressIndicator(),
         ),
       const SizedBox(height: 16),
-      FilledButton.icon(
-        style: FilledButton.styleFrom(
-          backgroundColor: _paused
-              ? const Color(0xFF16745E)
-              : const Color(0xFFAB4249),
-          padding: const EdgeInsets.all(16),
-        ),
-        onPressed: _s.connected && (!_paused || _s.canResume)
-            ? (_paused ? widget.core.resumeControl : widget.core.stopPressed)
-            : null,
-        icon: Icon(_paused ? Icons.restart_alt : Icons.stop_circle_outlined),
-        label: Text(
-          _paused
-              ? '复位并继续手轮'
-              : _calRunning
-              ? '停止观察'
-              : '停止并锁定',
-        ),
-      ),
       const SizedBox(height: 8),
       Text(_s.msg, style: const TextStyle(fontSize: 12, color: Colors.white70)),
       if (!_s.wheelReady && !_paused && !_calRunning) ...[
@@ -341,7 +379,7 @@ class _HandwheelPageState extends State<HandwheelPage>
       const SizedBox(height: 16),
       Card(
         child: ExpansionTile(
-          title: const Text('手轮设置'),
+          title: const Text('手轮响应与设置'),
           leading: const Icon(Icons.tune),
           childrenPadding: const EdgeInsets.all(16),
           children: [
@@ -380,24 +418,25 @@ class _HandwheelPageState extends State<HandwheelPage>
               value: _haptics,
               onChanged: (v) => setState(() => _haptics = v),
             ),
-            Text('最大拨轮速度 ${(_speedDrag ?? _s.speedRevS * 4096).round()}'),
-            Slider(
-              min: 1,
-              max: 256,
-              divisions: 255,
-              value: (_speedDrag ?? _s.speedRevS * 4096).clamp(1, 256),
-              onChanged: _s.moving || _calRunning
-                  ? null
-                  : (v) => setState(() => _speedDrag = v),
-              onChangeEnd: _s.moving || _calRunning
-                  ? null
-                  : (v) {
-                      widget.core.setFm03(kFm03MaxSpeed, v.round());
-                      setState(() => _speedDrag = null);
-                    },
+            _motorParameter(
+              '启动加速',
+              kFm03Acceleration,
+              _s.fm03?.acceleration ?? 8,
+              64,
+              _s.fm03 != null && _s.fm03!.acceleration == null
+                  ? '需要固件 2.1.0 或更新版本。'
+                  : '每 50 毫秒增加的速度值。默认 8；响应慢可先试 16，再试 32。越大启动越快。',
+              supported: _s.fm03?.acceleration != null,
+            ),
+            _motorParameter(
+              '接近目标减速',
+              kFm03Gain,
+              _s.fm03?.gain ?? 4,
+              64,
+              '默认 4；越小，小幅转动越跟手；越大，接近目标越柔和。响应慢可先试 2。',
             ),
             const Text(
-              '过渡时长控制目标变化节奏；实际到位时间受电机速度限制。A/B 点在重连、离开模式或重新寻限位后清除。',
+              '电机参数保存在设备上，自动模式也会使用。A/B 点在重连、离开模式或重新寻限位后清除。',
               style: TextStyle(fontSize: 12, color: Colors.white60),
             ),
             const SizedBox(height: 12),
@@ -413,6 +452,66 @@ class _HandwheelPageState extends State<HandwheelPage>
       ),
     ],
   );
+
+  Widget _stopButton() => FilledButton.icon(
+    style: FilledButton.styleFrom(
+      backgroundColor: _paused
+          ? const Color(0xFF16745E)
+          : const Color(0xFFAB4249),
+      padding: const EdgeInsets.all(16),
+    ),
+    onPressed: _s.connected && (!_paused || _s.canResume)
+        ? (_paused ? widget.core.resumeControl : widget.core.stopPressed)
+        : null,
+    icon: Icon(_paused ? Icons.restart_alt : Icons.stop_circle_outlined),
+    label: Text(
+      _paused
+          ? '复位并继续手轮'
+          : _calRunning
+          ? '停止观察'
+          : '停止并锁定',
+    ),
+  );
+
+  Widget _motorParameter(
+    String label,
+    int key,
+    int value,
+    int max,
+    String hint, {
+    bool supported = true,
+  }) {
+    final current = (_parameterDrag[key] ?? value.toDouble()).clamp(
+      1.0,
+      max.toDouble(),
+    );
+    final enabled = _canTune && supported;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('$label ${current.round()} / $max'),
+        Slider(
+          key: ValueKey('wheel-parameter-$key'),
+          min: 1,
+          max: max.toDouble(),
+          divisions: max - 1,
+          value: current,
+          label: '${current.round()}',
+          onChanged: enabled
+              ? (v) => setState(() => _parameterDrag[key] = v)
+              : null,
+          onChangeEnd: enabled
+              ? (v) {
+                  widget.core.setFm03(key, v.round());
+                  setState(() => _parameterDrag.remove(key));
+                }
+              : null,
+        ),
+        Text(hint, style: const TextStyle(fontSize: 12, color: Colors.white60)),
+        const SizedBox(height: 12),
+      ],
+    );
+  }
 
   Widget _point(String name, int? coordinate) => Card(
     child: Padding(
@@ -472,6 +571,8 @@ class WheelDial extends StatefulWidget {
 }
 
 class _WheelDialState extends State<WheelDial> {
+  int? _pointer;
+  bool _centerDrag = false;
   double? _angle;
   double _detent = 0;
   DateTime _lastHaptic = DateTime.fromMillisecondsSinceEpoch(0);
@@ -481,10 +582,17 @@ class _WheelDialState extends State<WheelDial> {
     return math.atan2(delta.dy, delta.dx);
   }
 
+  void _endTouch(int pointer) {
+    if (pointer != _pointer) return;
+    _pointer = null;
+    _angle = null;
+  }
+
   @override
   void didUpdateWidget(covariant WheelDial oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!widget.enabled) {
+      _pointer = null;
       _angle = null;
       _detent = 0;
     }
@@ -502,77 +610,97 @@ class _WheelDialState extends State<WheelDial> {
         enabled: widget.enabled,
         onIncrease: widget.enabled ? () => widget.onTurn(1 / 120) : null,
         onDecrease: widget.enabled ? () => widget.onTurn(-1 / 120) : null,
-        child: GestureDetector(
-          key: const ValueKey('focus-wheel'),
-          behavior: HitTestBehavior.opaque,
-          onPanStart: widget.enabled
-              ? (d) {
-                  _angle = _touchAngle(d.localPosition, size);
-                  _detent = 0;
+        child: RawGestureDetector(
+          // Own touches from pointer-down, including vertical starts, before a
+          // containing scrollable can win the gesture arena.
+          gestures: {
+            EagerGestureRecognizer:
+                GestureRecognizerFactoryWithHandlers<EagerGestureRecognizer>(
+                  EagerGestureRecognizer.new,
+                  (_) {},
+                ),
+          },
+          child: Listener(
+            key: const ValueKey('focus-wheel'),
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (e) {
+              if (!widget.enabled || _pointer != null) return;
+              _pointer = e.pointer;
+              _angle = _touchAngle(e.localPosition, size);
+              _centerDrag = _angle == null;
+              _detent = 0;
+            },
+            onPointerMove: (e) {
+              if (!widget.enabled || e.pointer != _pointer) return;
+              double turns = 0;
+              if (_centerDrag) {
+                // Starting in the hub gives a fine vertical adjustment; keep
+                // that mode until release so crossing the hub cannot jump.
+                turns = -e.delta.dy / size.height / 4;
+              } else {
+                final next = _touchAngle(e.localPosition, size);
+                if (next != null && _angle != null) {
+                  turns =
+                      math.atan2(
+                        math.sin(next - _angle!),
+                        math.cos(next - _angle!),
+                      ) /
+                      (2 * math.pi);
                 }
-              : null,
-          onPanUpdate: widget.enabled
-              ? (d) {
-                  final next = _touchAngle(d.localPosition, size);
-                  if (next == null) {
-                    _angle = null;
-                    return;
-                  }
-                  if (_angle != null) {
-                    final delta = math.atan2(
-                      math.sin(next - _angle!),
-                      math.cos(next - _angle!),
-                    );
-                    widget.onTurn(delta / (2 * math.pi));
-                    _detent += delta.abs();
-                    final now = DateTime.now();
-                    if (widget.haptics &&
-                        _detent >= math.pi / 30 &&
-                        now.difference(_lastHaptic).inMilliseconds >= 80) {
-                      unawaited(HapticFeedback.selectionClick());
-                      _lastHaptic = now;
-                      _detent = 0;
-                    }
-                  }
-                  _angle = next;
-                }
-              : null,
-          onPanEnd: (_) => _angle = null,
-          onPanCancel: () => _angle = null,
-          child: CustomPaint(
-            painter: _WheelPainter(
-              widget.actual,
-              widget.target,
-              widget.a,
-              widget.b,
-              widget.enabled,
-            ),
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'FOCUS',
-                    style: TextStyle(
-                      fontSize: 12,
-                      letterSpacing: 4,
-                      color: Colors.white54,
+                _angle = next;
+              }
+              if (turns == 0) return;
+              widget.onTurn(turns);
+              _detent += turns.abs() * 2 * math.pi;
+              final now = DateTime.now();
+              if (widget.haptics &&
+                  _detent >= math.pi / 30 &&
+                  now.difference(_lastHaptic).inMilliseconds >= 80) {
+                unawaited(HapticFeedback.selectionClick());
+                _lastHaptic = now;
+                _detent = 0;
+              }
+            },
+            onPointerUp: (e) => _endTouch(e.pointer),
+            onPointerCancel: (e) => _endTouch(e.pointer),
+            child: CustomPaint(
+              painter: _WheelPainter(
+                widget.actual,
+                widget.target,
+                widget.a,
+                widget.b,
+                widget.enabled,
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'FOCUS',
+                      style: TextStyle(
+                        fontSize: 12,
+                        letterSpacing: 4,
+                        color: Colors.white54,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    widget.label,
-                    style: const TextStyle(
-                      fontSize: 36,
-                      fontWeight: FontWeight.w300,
+                    const SizedBox(height: 12),
+                    Text(
+                      widget.label,
+                      style: const TextStyle(
+                        fontSize: 36,
+                        fontWeight: FontWeight.w300,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    widget.enabled ? '沿轮缘转动手指' : '等待解锁与电机就绪',
-                    style: const TextStyle(fontSize: 11, color: Colors.white54),
-                  ),
-                ],
+                    const SizedBox(height: 12),
+                    Text(
+                      widget.enabled ? '轮缘旋转 · 中心上下微调' : '等待解锁与电机就绪',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white54,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

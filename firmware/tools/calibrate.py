@@ -61,7 +61,7 @@ def smoke(c):
     disabled = c.request(0x0C, 0, 0, sequence=token)
     assert disabled['error'] == 2
     fm03 = c.request(0x10, expected=0x86)
-    assert len(fm03) == 26
+    assert len(fm03) in (26, 28)
     print('FM03 online:', fm03[2], 'stage:', fm03[3])
     print('PASS: firmware v2, status layout, disabled calibration; no movement')
 

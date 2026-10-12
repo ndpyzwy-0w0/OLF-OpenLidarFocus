@@ -30,6 +30,8 @@ class FfCoreDemo extends FfCore {
   int _arrivalSequence = 0;
   String _arrival = '';
   String _stage = 'idle';
+  String _pullCurve = 'smooth';
+  int _gain = 4, _acceleration = 8;
   int _pos = 1000;
   double _speed = 64 / 4096;
   double? _distance = 1.8;
@@ -117,6 +119,8 @@ class FfCoreDemo extends FfCore {
         _sensitivity = a?['value'] as double? ?? 1;
       case 'setWheelReversed':
         _wheelReversed = a?['on'] == true;
+      case 'setWheelPullCurve':
+        _pullCurve = a?['curve'] as String? ?? 'smooth';
       case 'pullWheelTo':
         final target = a?['point'] == 'A' ? _a : _b;
         if (target != null && _valid && !_stopLatched) _wheelPosition(target);
@@ -144,6 +148,8 @@ class FfCoreDemo extends FfCore {
         _speed = a?['revsPerSec'] as double? ?? _speed;
       case 'setFm03':
         if (a?['key'] == kFm03MaxSpeed) _speed = (a?['value'] as int) / 4096;
+        if (a?['key'] == kFm03Gain) _gain = a?['value'] as int;
+        if (a?['key'] == kFm03Acceleration) _acceleration = a?['value'] as int;
         _log.add('demo FM03 key=${a?['key']} value=${a?['value']}');
       case 'queryFm03':
         _log.add('demo CAN 反馈刷新');
@@ -225,7 +231,7 @@ class FfCoreDemo extends FfCore {
   }
 
   FfState _build() => FfState(
-    appVersion: '2.2.0+demo',
+    appVersion: '2.3.0+demo',
     calSupported: true,
     calStage: _stage,
     calSafeSpan: _valid ? 4096 : 0,
@@ -257,6 +263,7 @@ class FfCoreDemo extends FfCore {
     wheelB: _b,
     wheelRangeEnabled: _wheelRange,
     wheelSensitivity: _sensitivity,
+    wheelPullCurve: _pullCurve,
     wheelReversed: _wheelReversed,
     wheelArrival: _arrival,
     wheelArrivalSequence: _arrivalSequence,
@@ -303,7 +310,8 @@ class FfCoreDemo extends FfCore {
       value: 0,
       maxSpeed: (_speed * 4096).round(),
       tolerance: 4,
-      gain: 4,
+      gain: _gain,
+      acceleration: _acceleration,
       rawPosition: _pos,
       txFailures: 0,
       rxMissed: 0,

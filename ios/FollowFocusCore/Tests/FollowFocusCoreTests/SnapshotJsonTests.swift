@@ -78,7 +78,7 @@ final class SnapshotJsonTests: XCTestCase {
       // 会话
       "auto", "stop_latched", "slider", "speed_rev_s", "accel_rev_s2",
       "can_resume", "control_mode", "wheel_ready", "wheel_range_enabled",
-      "wheel_sensitivity", "wheel_reversed", "wheel_pulling", "wheel_arrival", "wheel_arrival_sequence",
+      "wheel_pull_curve", "wheel_sensitivity", "wheel_reversed", "wheel_pulling", "wheel_arrival", "wheel_arrival_sequence",
       "standby_feature", "faces",
       // 镜头与流程
       "lens_id", "lens_name", "lenses", "phase", "near_steps", "dir",
@@ -133,6 +133,7 @@ final class SnapshotJsonTests: XCTestCase {
 
     let fm03 = m["fm03"] as! [String: Any]
     XCTAssertEqual(fm03["max_speed"] as? Int, 64)
+    XCTAssertTrue(fm03["acceleration"] is NSNull)
     XCTAssertEqual(fm03["log_line"] as? String, state().fm03?.logLine())
   }
 

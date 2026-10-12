@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 const int kFm03MaxSpeed = 1;
 const int kFm03Tolerance = 2;
 const int kFm03Gain = 3;
+const int kFm03Acceleration = 4;
 
 /// 命令结果（STATUS.flags 高 3 位）。
 const int kResultIdle = 0;
@@ -118,6 +119,7 @@ class FfFm03 {
   final bool online;
   final int stage, value, maxSpeed, tolerance, gain, rawPosition;
   final int txFailures, rxMissed, feedbackAge;
+  final int? acceleration;
   final String logLine;
   const FfFm03({
     required this.online,
@@ -130,6 +132,7 @@ class FfFm03 {
     required this.txFailures,
     required this.rxMissed,
     required this.feedbackAge,
+    this.acceleration,
     required this.logLine,
   });
   factory FfFm03.fromMap(Map<dynamic, dynamic> m) => FfFm03(
@@ -143,6 +146,7 @@ class FfFm03 {
     txFailures: (m['tx_failures'] as num?)?.toInt() ?? 0,
     rxMissed: (m['rx_missed'] as num?)?.toInt() ?? 0,
     feedbackAge: (m['feedback_age'] as num?)?.toInt() ?? 65535,
+    acceleration: (m['acceleration'] as num?)?.toInt(),
     logLine: (m['log_line'] as String?) ?? '',
   );
 }
@@ -205,6 +209,7 @@ class FfState {
   final int? wheelA, wheelB;
   final double wheelSensitivity;
   final String wheelArrival;
+  final String wheelPullCurve;
   final int wheelArrivalSequence;
   final double slider;
   final double speedRevS;
@@ -283,6 +288,7 @@ class FfState {
     this.wheelB,
     this.wheelSensitivity = 1,
     this.wheelArrival = '',
+    this.wheelPullCurve = 'smooth',
     this.wheelArrivalSequence = 0,
     this.slider = 0.5,
     this.speedRevS = 64 / 4096,
@@ -358,6 +364,7 @@ class FfState {
       wheelB: (m['wheel_b'] as num?)?.toInt(),
       wheelSensitivity: (m['wheel_sensitivity'] as num?)?.toDouble() ?? 1,
       wheelArrival: (m['wheel_arrival'] as String?) ?? '',
+      wheelPullCurve: (m['wheel_pull_curve'] as String?) ?? 'smooth',
       wheelArrivalSequence: (m['wheel_arrival_sequence'] as num?)?.toInt() ?? 0,
       slider: (m['slider'] as num?)?.toDouble() ?? 0.5,
       speedRevS: (m['speed_rev_s'] as num?)?.toDouble() ?? 1.2,
@@ -469,6 +476,8 @@ class FfCore {
       invoke('setWheelSensitivity', {'value': value});
   Future<void> setWheelReversed(bool on) =>
       invoke('setWheelReversed', {'on': on});
+  Future<void> setWheelPullCurve(String curve) =>
+      invoke('setWheelPullCurve', {'curve': curve});
   Future<void> pullWheelTo(String point, {double duration = 0}) =>
       invoke('pullWheelTo', {'point': point, 'duration': duration});
   Future<void> jog(int delta) => invoke('jog', {'delta': delta});

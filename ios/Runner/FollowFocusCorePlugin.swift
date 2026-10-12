@@ -121,6 +121,12 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       }
       session.setControlMode(mode)
       result(nil)
+    case "setWheelPullCurve":
+      guard let curve = WheelPullCurve(rawValue: string(a, "curve") ?? "") else {
+        result(FlutterError(code: "bad_args", message: "未知拉焦曲线", details: nil)); return
+      }
+      session.setWheelPullCurve(curve)
+      result(nil)
     case "turnWheel":
       session.turnWheel(double(a,"turns") ?? 0)
       result(nil)

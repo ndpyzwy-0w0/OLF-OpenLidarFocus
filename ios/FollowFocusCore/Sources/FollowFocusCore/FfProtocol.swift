@@ -68,6 +68,7 @@ public let kFfDefaultPort: UInt16 = 4210
 public let kFm03MaxSpeed: Int32 = 1
 public let kFm03Tolerance: Int32 = 2
 public let kFm03Gain: Int32 = 3
+public let kFm03Acceleration: Int32 = 4
 
 // STATUS.flags 位定义。
 public let kFlagEnabled: UInt8 = 1
@@ -272,7 +273,7 @@ public struct MotorStatusV2: Equatable {
   }
 }
 
-// MARK: - FM03_DUMP（0x86，26 字节）
+// MARK: - FM03_DUMP（0x86，旧固件26 / 新固件28 字节）
 public struct Fm03Dump: Equatable {
   public var online: Bool
   public var stage: Int
@@ -284,16 +285,19 @@ public struct Fm03Dump: Equatable {
   public var txFailures: UInt32
   public var rxMissed: UInt32
   public var feedbackAge: Int
+  public var acceleration: Int? = nil
 
   public static func decode(_ b: [UInt8]) -> Fm03Dump? {
-    guard b.count == 26, b[0] == kFfMagic, b[1] == kFfFm03Dump,
+    guard b.count == 26 || b.count == 28, b[0] == kFfMagic, b[1] == kFfFm03Dump,
       b[2] <= 1, b[3] <= 3 || b[3] == 255 else { return nil }
+    if b.count == 28, !(1...64).contains(readUInt16LE(b,26)) { return nil }
     return Fm03Dump(online: b[2] == 1, stage: Int(b[3]),
       value: Int(Int16(bitPattern: readUInt16LE(b,4))),
       maxSpeed: Int(readUInt16LE(b,6)), tolerance: Int(readUInt16LE(b,8)),
       gain: Int(readUInt16LE(b,10)), rawPosition: readInt32LE(b,12),
       txFailures: readUInt32LE(b,16), rxMissed: readUInt32LE(b,20),
-      feedbackAge: Int(readUInt16LE(b,24)))
+      feedbackAge: Int(readUInt16LE(b,24)),
+      acceleration: b.count == 28 ? Int(readUInt16LE(b,26)) : nil)
   }
   public func logLine() -> String {
     "CAN \(online ? "在线" : "离线") stage=\(stage) raw=\(rawPosition) value=\(value) age=\(feedbackAge)ms tx_fail=\(txFailures) rx_missed=\(rxMissed)"

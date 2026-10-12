@@ -35,6 +35,7 @@ struct Fm03Snapshot {
   int32_t rawPosition;
   uint32_t txFailures, rxMissed;
   uint16_t feedbackAge;
+  uint16_t acceleration;
 };
 Fm03Snapshot motorFm03Snapshot();
 void motorFm03Set(int32_t key, int32_t value);

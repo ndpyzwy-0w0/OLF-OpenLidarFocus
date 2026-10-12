@@ -214,10 +214,14 @@ private final class FakeFirmware {
     return b
   }
 
+  var supportsAcceleration = false
+  var maxSpeed: UInt16 = 64
+
   private func fm03Dump() -> [UInt8] {
     var raw=[UInt8](repeating:0,count:26)
     raw[0]=kFfMagic;raw[1]=kFfFm03Dump;raw[2]=1;raw[3]=3
-    writeUInt16LE(&raw,6,64);writeUInt16LE(&raw,8,4);writeUInt16LE(&raw,10,4)
+    writeUInt16LE(&raw,6,maxSpeed);writeUInt16LE(&raw,8,4);writeUInt16LE(&raw,10,4)
+    if supportsAcceleration { raw += [8,0] }
     return raw
   }
 
@@ -571,10 +575,15 @@ final class SessionTests: XCTestCase {
 
   // MARK: - 连接
 
-  func testConnectAppliesFm03SpeedLimitsAndEnable() throws {
+  func testConnectReadsSavedFm03SpeedWithoutOverwritingDevice() throws {
     let h=try Harness();defer { h.stop() }
-    h.session.connect();XCTAssertTrue(waitUntil { h.firmware.enabled })
-    XCTAssertEqual(h.firmware.last(kFfSetSpeed)?.a,64)
+    h.firmware.maxSpeed=128
+    h.session.connect();XCTAssertTrue(waitUntil { h.firmware.enabled && h.latest.current?.fm03?.maxSpeed==128 })
+    XCTAssertEqual(h.firmware.count(kFfSetSpeed),0)
+    XCTAssertEqual(h.latest.current?.speedRevS ?? 0,128.0/4096,accuracy:1e-9)
+    h.session.disconnect();h.session.connect()
+    XCTAssertTrue(waitUntil { h.latest.current?.linkAlive==true })
+    XCTAssertEqual(h.firmware.count(kFfSetSpeed),0)
     XCTAssertEqual(h.firmware.count(kFfSetLimits),0)
     XCTAssertEqual(h.firmware.count(kFfFm03Set),0)
     XCTAssertGreaterThan(h.firmware.count(kFfQuery),0)
@@ -939,6 +948,58 @@ final class SessionTests: XCTestCase {
     XCTAssertTrue(waitUntil(4) { h.latest.current?.wheelReady==true })
     XCTAssertNil(h.latest.current?.lensId)
     XCTAssertEqual(h.latest.current?.phase,.follow)
+  }
+
+  func testWheelCurvesAndRealtimeTargets() throws {
+    XCTAssertEqual(WheelPullCurve.smooth.progress(0.25), 0.15625, accuracy: 1e-9)
+    XCTAssertEqual(WheelPullCurve.linear.progress(0.25), 0.25, accuracy: 1e-9)
+    for curve in [WheelPullCurve.smooth, .linear] {
+      XCTAssertEqual(curve.progress(-1), 0)
+      XCTAssertEqual(curve.progress(2), 1)
+    }
+    let h=try Harness();defer { h.stop() }
+    prepareWheel(h)
+    h.session.setWheelPoint("A")
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelA != nil })
+    h.session.turnWheel(-0.25)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==2765 })
+    h.session.setWheelPullCurve(.linear)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelPullCurve == .linear })
+    h.session.pullWheelTo("A",duration:1)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelPulling==true })
+    // A running pull retains its selected curve even if the next pull's setting changes.
+    h.session.setWheelPullCurve(.smooth)
+    pump(0.2)
+    let fraction=(h.session.snapshot().slider*4096-2765)/1024
+    XCTAssertGreaterThan(fraction, 0.15)
+    XCTAssertLessThan(fraction, 0.35)
+    h.session.turnWheel(-0.01)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelPulling==false })
+    let before=h.firmware.count(kFfSetPos)
+    for _ in 0..<8 { h.session.turnWheel(-0.005);pump(0.025) }
+    XCTAssertGreaterThan(h.firmware.count(kFfSetPos)-before, 4,
+      "手轮目标必须随20ms控制周期发送，不能被60ms限流延后")
+  }
+
+  func testWheelAccelerationRequiresSupportedFirmwareAndStoppedMotor() throws {
+    let h=try Harness();defer { h.stop() }
+    prepareWheel(h)
+    h.session.setFm03(kFm03Acceleration,32)
+    pump(0.1)
+    XCTAssertEqual(h.firmware.count(kFfFm03Set),0)
+    h.firmware.supportsAcceleration=true
+    h.session.queryFm03()
+    XCTAssertTrue(waitUntil { h.latest.current?.fm03?.acceleration==8 })
+    h.session.setFm03(kFm03Acceleration,32)
+    XCTAssertTrue(waitUntil { h.firmware.last(kFfFm03Set)?.a==kFm03Acceleration })
+    XCTAssertEqual(h.firmware.last(kFfFm03Set)?.b,32)
+    let before=h.firmware.count(kFfFm03Set)
+    h.session.setFm03(kFm03Acceleration,65)
+    h.firmware.holdMotion.set(true);h.session.turnWheel(-0.1)
+    XCTAssertTrue(waitUntil { h.latest.current?.moving==true })
+    h.session.setFm03(kFm03Acceleration,16)
+    pump(0.1)
+    XCTAssertEqual(h.firmware.count(kFfFm03Set),before)
   }
 
   func testWheelCalibratesWithoutLensAndMapsRelativeTurns() throws {

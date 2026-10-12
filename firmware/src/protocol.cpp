@@ -94,7 +94,7 @@ void protocolSendDiscovery(const IPAddress &ip, uint16_t port) {
 static void protocolSendFm03(const IPAddress &ip, uint16_t port) {
   const auto s=motorFm03Snapshot();
   FfFm03Dump d{kFfMagic,FF_FM03_DUMP,(uint8_t)s.online,s.stage,s.value,
-    s.maxSpeed,s.tolerance,s.gain,s.rawPosition,s.txFailures,s.rxMissed,s.feedbackAge};
+    s.maxSpeed,s.tolerance,s.gain,s.rawPosition,s.txFailures,s.rxMissed,s.feedbackAge,s.acceleration};
   udp->beginPacket(ip,port); udp->write(reinterpret_cast<uint8_t *>(&d),sizeof(d)); udp->endPacket();
 }
 

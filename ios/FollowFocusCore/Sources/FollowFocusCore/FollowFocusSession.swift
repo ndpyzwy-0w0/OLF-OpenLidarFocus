@@ -10,6 +10,15 @@ public enum SetupPhase: String {
 
 public enum ControlMode: String { case automatic, handwheel }
 
+public enum WheelPullCurve: String {
+  case smooth, linear
+
+  public func progress(_ fraction: Double) -> Double {
+    let t = min(max(fraction, 0), 1)
+    return self == .linear ? t : t * t * (3 - 2 * t)
+  }
+}
+
 /// 给 UI 的一条聚合状态快照。
 ///
 /// UI 只渲染最新快照，不需要理解事件顺序，也不会看到中间态。
@@ -65,6 +74,7 @@ public struct FollowFocusState {
   public var wheelSensitivity = 1.0
   public var wheelReversed = false
   public var wheelPulling = false
+  public var wheelPullCurve: WheelPullCurve = .smooth
   public var wheelArrival = ""
   public var wheelArrivalSequence = 0
   public var slider = 0.5
@@ -152,7 +162,6 @@ public final class FollowFocusSession {
 
   // 以下是纯内部量，不给 UI。
   private var following = false
-  private var appliedStepsPerRev = 0
   private var wantEnabled = false
   private var pendingJog: Int32 = 0
   private var lastEnableAttempt = Date.distantPast
@@ -167,7 +176,7 @@ public final class FollowFocusSession {
   private var lastStopSent = Date.distantPast
   private var wheelCoordinate = 0.0
   private var wheelArrivalTarget: (name: String, coordinate: Int32)?
-  private var wheelPull: (started: Date, from: Double, to: Int32, duration: Double)?
+  private var wheelPull: (started: Date, from: Double, to: Int32, duration: Double, curve: WheelPullCurve)?
   private var lastQuery = Date.distantPast
   private var lastProbe = Date.distantPast
   private var lastFm03 = Date.distantPast
@@ -243,8 +252,8 @@ public final class FollowFocusSession {
 
   /// 恢复上次的板子并直接连接。没有存过、或者已经选过设备就什么都不做。
   ///
-  /// 和设备页里手动"选用"走同一条 [openLinkOnQueue]：同样会下发速度/限位/待机
-  /// 偏好和 ENABLE(1)。**这是有物理后果的**（线圈通电、镜头被握住），和用户手动
+  /// 和设备页里手动"选用"走同一条 [openLinkOnQueue]：读取设备已保存参数
+  /// 并下发 ENABLE(1)。**这是有物理后果的**（线圈通电、镜头被握住），和用户手动
   /// 点"连接电机"一致；所以只在有存档时做，且只在启动时做一次。
   private func restoreDeviceOnQueue() {
     guard device == nil, let saved = memo.load() else { return }
@@ -399,8 +408,6 @@ public final class FollowFocusSession {
       invalidatePosition("连接后请重新寻限位")
       try link.open()
       positionQueries.removeAll()
-      appliedStepsPerRev = 0
-      applySpeed()
       // 板子重启后固件 enabled 会归零，这里补一次使能，让状态自愈。
       wantEnabled = true
       lastEnableAttempt = Date()
@@ -534,8 +541,14 @@ public final class FollowFocusSession {
     queue.async {
       guard self.calPhase == .idle else { return }
       let valid = key == kFm03MaxSpeed ? (1...256).contains(value) :
-        ((key == kFm03Tolerance || key == kFm03Gain) && (1...64).contains(value))
+        ((key == kFm03Tolerance || key == kFm03Gain || key == kFm03Acceleration) && (1...64).contains(value))
       guard valid else { self.setMsg("FM03 参数超出范围"); return }
+      guard self.link.isOpen, !self.state.moving, self.wheelPull == nil else {
+        self.setMsg("请连接设备并等待电机停稳后调整参数"); return
+      }
+      if key == kFm03Acceleration, self.state.fm03?.acceleration == nil {
+        self.setMsg("启动加速调节需要固件2.1.0或更新版本"); return
+      }
       self.link.setFm03(key, value)
       self.markDirty()
     }
@@ -627,6 +640,10 @@ public final class FollowFocusSession {
     queue.async { self.state.wheelReversed = on; self.markDirty() }
   }
 
+  public func setWheelPullCurve(_ curve: WheelPullCurve) {
+    queue.async { self.state.wheelPullCurve = curve; self.markDirty() }
+  }
+
   /// Duration schedules targets; actual arrival is always confirmed by motor feedback.
   public func pullWheelTo(_ point: String, duration: Double) {
     queue.async {
@@ -636,7 +653,7 @@ public final class FollowFocusSession {
         self.wheelPull = nil; self.state.wheelPulling = false
         self.setWheelTarget(Double(target))
       } else {
-        self.wheelPull = (Date(), Double(self.state.pos), target, duration)
+        self.wheelPull = (Date(), Double(self.state.pos), target, duration, self.state.wheelPullCurve)
         self.state.wheelPulling = true
         self.lastAutoSend = .distantPast
       }
@@ -1094,11 +1111,6 @@ public final class FollowFocusSession {
       invalidatePosition("状态回包超时，已释放电机；请重新定位")
     }
     if link.isOpen {
-      // FM03 坐标尺度固定；连接后恢复控制速度。
-      if stepsPerRev != appliedStepsPerRev {
-        appliedStepsPerRev = stepsPerRev
-        applySpeed()
-      }
       // 板子重启后固件 enabled 会归零，App 这边补一次使能，让状态自愈。
       if wantEnabled, !state.enabled, now.timeIntervalSince(lastEnableAttempt) > 1.0 {
         lastEnableAttempt = now
@@ -1108,8 +1120,8 @@ public final class FollowFocusSession {
         let at = lastStatusAt, now.timeIntervalSince(at) < 0.5 {
         if state.controlMode == .handwheel, let pull=wheelPull {
           let t=min(now.timeIntervalSince(pull.started)/pull.duration,1)
-          // Smooth start/end for programmed A/B transitions.
-          let eased=t*t*(3-2*t)
+          // Curve is captured at the start to avoid mid-pull target jumps.
+          let eased=pull.curve.progress(t)
           setWheelTarget(pull.from + (Double(pull.to)-pull.from)*eased)
           if t >= 1 { wheelPull=nil; state.wheelPulling=false }
         }
@@ -1140,7 +1152,6 @@ public final class FollowFocusSession {
           }
         }
         if let target = want {
-          if state.controlMode == .handwheel && now.timeIntervalSince(lastControlSent) < 0.06 { emit(); return }
           lastSent = target
           lastControlSent = now
           link.setPos(target)

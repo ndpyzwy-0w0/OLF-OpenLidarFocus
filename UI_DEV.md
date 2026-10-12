@@ -33,3 +33,5 @@ App 2.0.1 移除手动 A/B 行程、最近点对齐和软件置零。`LensStore`
 App2.2.0启动页为模式选择。ModePage进入自动镜头列表或独立HandwheelPage，均共用FfCore。手轮页面支持横竖屏、轮缘触摸、刻度触感、A/B标记和实际到位强触感、限位、端点直达、定时拉焦、灵敏度、反转和最大速度。触感以wheel_arrival_sequence变化触发，首帧和重复快照不重放；HapticFeedback实际效果仅能在手机验证。
 
 停止按钮根据stop_latched显示复位；can_resume来自Swift的可信坐标/链路/测距判断。暂停时禁用普通运动入口，不能在Dart清除锁定。手轮映射、限位和定时目标必须在Swift会话实现，Dart只传递旋转圈数。功能交互参考[DJI Focus Pro手轮说明](https://www.dji.com/support/product/focus-pro)。
+
+App2.3.0手轮与停止按钮固定，设置区独立滚动；EagerGestureRecognizer从触摸按下接管，Listener记录单一指针，中心垂直微调和轮缘角度拖动固定到本次抬手。中心穿越时重建角度避免跳变。速度/启动加速/接近减速是固件参数，电机停稳且无定时拉焦时修改；A/B曲线由Swift管理并在每次拉焦开始时固定，运行中修改不会改变当前轨迹。新固件28字节反馈附加加速，旧26字节反馈将加速标为不支持。App连接读取设备参数，不覆盖已保存速度。
