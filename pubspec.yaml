@@ -20,7 +20,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # build-number 当 CFBundleVersion，而主界面标题下方显示的 `v<name>+<number>` 就是
 # 读的这两个键。所以**每次改动都 bump 这一行**（改一次 +1，功能/修 bug 提升前面的
 # 数字），装到手机上就能一眼看出是不是新版。
-version: 2.1.1+9
+version: 2.2.0+10
 
 environment:
   sdk: ^3.13.3

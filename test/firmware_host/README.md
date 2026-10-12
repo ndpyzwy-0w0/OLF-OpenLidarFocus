@@ -14,3 +14,5 @@ c++ -std=c++17 -Itest/firmware_host -Ifirmware/include test/firmware_host/fm03_t
 2.0.4增加大目标变化时的加速限制、换向先归零、延迟后不跳变、加速中STOP及反馈失效立即归零，并检查CAN任务固定到核心1。
 
 模拟不证明实际屏幕字形、电机角度、回差、齿轮啮合、对焦精度或接线正确。机械验收见根目录 HANDOFF.md。
+
+2.0.5检查STOP关闭使能，迟到目标及JOG不能重新运动，显式ENABLE后新目标才允许执行。

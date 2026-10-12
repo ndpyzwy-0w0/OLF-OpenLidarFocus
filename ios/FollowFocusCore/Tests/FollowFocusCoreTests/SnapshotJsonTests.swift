@@ -77,6 +77,8 @@ final class SnapshotJsonTests: XCTestCase {
       "microsteps", "steps_per_rev", "max_revs_per_sec", "pos_revs", "stroke_revs",
       // 会话
       "auto", "stop_latched", "slider", "speed_rev_s", "accel_rev_s2",
+      "can_resume", "control_mode", "wheel_ready", "wheel_range_enabled",
+      "wheel_sensitivity", "wheel_reversed", "wheel_pulling", "wheel_arrival", "wheel_arrival_sequence",
       "standby_feature", "faces",
       // 镜头与流程
       "lens_id", "lens_name", "lenses", "phase", "near_steps", "dir",
@@ -100,6 +102,8 @@ final class SnapshotJsonTests: XCTestCase {
     XCTAssertNil(m["lens_id"])
     XCTAssertNil(m["distance_m"])
     XCTAssertNil(m["fm03"])
+    XCTAssertNil(m["wheel_a"])
+    XCTAssertNil(m["wheel_b"])
     XCTAssertFalse(m.values.contains { $0 is NSNull }, "不要放 NSNull")
   }
 

@@ -47,7 +47,7 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
   deinit { NotificationCenter.default.removeObserver(self) }
 
-  @objc private func didEnterBackground() { session.cancelAutoCalibration() }
+  @objc private func didEnterBackground() { session.stopPressed() }
 
   static func register(with registrar: FlutterPluginRegistrar) {
     // 存档在这里加载：插件自己持有功能层，UI 侧不管存档路径。
@@ -111,6 +111,36 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
       result(nil)
     case "stopPressed":
       session.stopPressed()
+      result(nil)
+    case "resumeControl":
+      session.resumeControl()
+      result(nil)
+    case "setControlMode":
+      guard let mode=ControlMode(rawValue: string(a,"mode") ?? "") else {
+        result(FlutterError(code:"bad_args",message:"未知控制模式",details:nil)); return
+      }
+      session.setControlMode(mode)
+      result(nil)
+    case "turnWheel":
+      session.turnWheel(double(a,"turns") ?? 0)
+      result(nil)
+    case "setWheelPoint":
+      session.setWheelPoint(string(a,"point") ?? "")
+      result(nil)
+    case "clearWheelPoints":
+      session.clearWheelPoints()
+      result(nil)
+    case "setWheelRange":
+      session.setWheelRange(bool(a,"on") ?? false)
+      result(nil)
+    case "setWheelSensitivity":
+      session.setWheelSensitivity(double(a,"value") ?? 1)
+      result(nil)
+    case "setWheelReversed":
+      session.setWheelReversed(bool(a,"on") ?? false)
+      result(nil)
+    case "pullWheelTo":
+      session.pullWheelTo(string(a,"point") ?? "",duration:double(a,"duration") ?? 0)
       result(nil)
     case "jog":
       guard let delta = int(a, "delta"), let coordinate = Int32(exactly: delta),

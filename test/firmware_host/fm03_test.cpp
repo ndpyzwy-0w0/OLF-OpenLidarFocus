@@ -39,7 +39,10 @@ int main() {
   motorSetPos(0);advance(50,3,2000);assert(applied==0 && moving);
   advance(50,3,2000);assert(applied==-8);
   // A STOP during acceleration does not wait for a ramp down or the next 50ms slot.
-  motorStop();motorPoll();assert(applied==0 && !moving);
+  motorStop();motorPoll();assert(applied==0 && !moving && !enabled);
+  motorSetPos(3000);motorJog(80);advance(100,3,2000);
+  assert(!moving && applied==0 && result==MOTOR_RESULT_REJECTED); // Late motion cannot unlock STOP.
+  motorSetEnabled(true);motorSetPos(3000);advance(50,3,2000);assert(moving && applied>0);
   reset();motorSetPos(4096);advance(100,3,2000);assert(applied==16);
   fakeUs+=200000;feedback(3,2000);assert(applied==24); // A late task cannot jump to full speed.
   reset();motorSetPos(4096);advance(150,3,2000);assert(applied==24);
@@ -48,7 +51,7 @@ int main() {
   reset();motorNoteControlPacket(true);motorSetPos(1800);advance(50,3,2000);assert(applied<0);
   motorStop();motorPoll();assert(applied==0 && !moving);
   reset();motorSetPos(INT32_MAX);assert(target==4096 && limited);
-  motorStop();motorSetLimits(100,300);motorSetPos(800);assert(target==300);
+  motorStop();motorSetEnabled(true);motorSetLimits(100,300);motorSetPos(800);assert(target==300);
   reset();motorNoteControlPacket(false);motorSetPos(2500);advance(1050,3,2000);assert(!moving && applied==0 && motorFault()==4);
   reset();motorNoteControlPacket(true);motorSetPos(2500);fakeUs+=350000;motorPoll();assert(!moving && !motorPositionTrusted());
   reset();motorNoteControlPacket(true);motorSetPos(2500);advance(2100,3,2000);assert(!moving && motorFault()==3);
@@ -83,6 +86,7 @@ int main() {
   duringTxWait=[] {
     if (transmitted.size()==3) {
       duringTxWait=nullptr;motorStop();
+      motorSetEnabled(true);
       assert(motorCalibrationStart(9,0,0)==CAL_OK);
     }
   };
@@ -116,12 +120,12 @@ int main() {
   fakeUs=1000000;reset();protocolBegin(&u);
 
   oledBegin("change-me", "192.168.4.1");
-  assert(u8g2.lines[0]=="FW 2.0.4" && u8g2.lines[1]==deviceId());
+  assert(u8g2.lines[0]=="FW 2.0.5" && u8g2.lines[1]==deviceId());
   assert(u8g2.lines[2]=="PW change-me" && u8g2.lines[3]=="192.168.4.1");
   const auto bootFrames=u8g2.frames;
   advance(5900,3,2000);oledPoll();assert(u8g2.frames==bootFrames);
   advance(100,3,2000);handle(in,{},4210);oledPoll();
-  assert(u8g2.lines[0]=="V2.0.4 READY" && u8g2.lines[1]=="P 2000");
+  assert(u8g2.lines[0]=="V2.0.5 READY" && u8g2.lines[1]=="P 2000");
   assert(u8g2.lines[2]=="T 2000" && u8g2.lines[3]=="C:OK L:OK");
   fakeUs+=350000;motorPoll();oledPoll();
   assert(u8g2.lines[1]=="NO FEEDBACK" && u8g2.lines[2]=="P --");
@@ -133,12 +137,12 @@ int main() {
   fault=4;advance(250,3,2000);oledPoll();assert(u8g2.lines[1]=="CTRL TIMEOUT");
   reset();assert(motorCalibrationStart(10,0,0)==CAL_OK);
   advance(250,1,INT32_MAX);oledPoll();
-  assert(u8g2.lines[0]=="V2.0.4 CAL" && u8g2.lines[1]=="CAL 1");
+  assert(u8g2.lines[0]=="V2.0.5 CAL" && u8g2.lines[1]=="CAL 1");
   advance(250,2,INT32_MAX);oledPoll();assert(u8g2.lines[1]=="CAL 2");
   motorCalibrationCancel();advance(250,2,INT32_MAX);oledPoll();
   assert(u8g2.lines[2]=="CAL CONTINUES");
   cal.error=CAL_TIMEOUT;advance(250,2,INT32_MAX);oledPoll();
-  assert(u8g2.lines[0]=="V2.0.4 ERR" && u8g2.lines[1]=="CAL TIMEOUT");
+  assert(u8g2.lines[0]=="V2.0.5 ERR" && u8g2.lines[1]=="CAL TIMEOUT");
   // Movement, faults and calibration must not erase startup credentials early.
   for (int scenario=0; scenario<3; ++scenario) {
     reset();oledBegin("change-me", "192.168.4.1");
@@ -148,11 +152,11 @@ int main() {
     if (scenario==2) assert(motorCalibrationStart(11,0,0)==CAL_OK);
     const auto beforePoll=fakeUs;
     oledPoll();assert(fakeUs==beforePoll); // No blocking delay in the 6s display.
-    assert(u8g2.lines[0]=="FW 2.0.4" && u8g2.lines[2]=="PW change-me");
+    assert(u8g2.lines[0]=="FW 2.0.5" && u8g2.lines[2]=="PW change-me");
     handle(in,{},4210);assert(protocolLinkAlive()); // UDP remains usable.
     fakeUs+=5999000;oledPoll();assert(u8g2.frames==startupFrames);
     fakeUs+=1000;oledPoll();assert(u8g2.frames==startupFrames+1);
-    assert(u8g2.lines[0].find("V2.0.4 ")==0);
+    assert(u8g2.lines[0].find("V2.0.5 ")==0);
   }
   puts("PASS: CAN/UDP control, timeouts, OLED boot credentials, live link, stale position, calibration, errors, 72x40 layout");
 }

@@ -199,6 +199,13 @@ class FfState {
   // 会话
   final bool auto;
   final bool stopLatched;
+  final bool canResume;
+  final String controlMode;
+  final bool wheelReady, wheelRangeEnabled, wheelReversed, wheelPulling;
+  final int? wheelA, wheelB;
+  final double wheelSensitivity;
+  final String wheelArrival;
+  final int wheelArrivalSequence;
   final double slider;
   final double speedRevS;
   final double accelRevS2;
@@ -266,6 +273,17 @@ class FfState {
     this.strokeRevs = 0,
     this.auto = false,
     this.stopLatched = false,
+    this.canResume = false,
+    this.controlMode = 'automatic',
+    this.wheelReady = false,
+    this.wheelRangeEnabled = false,
+    this.wheelReversed = false,
+    this.wheelPulling = false,
+    this.wheelA,
+    this.wheelB,
+    this.wheelSensitivity = 1,
+    this.wheelArrival = '',
+    this.wheelArrivalSequence = 0,
     this.slider = 0.5,
     this.speedRevS = 64 / 4096,
     this.accelRevS2 = 30,
@@ -330,6 +348,17 @@ class FfState {
       strokeRevs: (m['stroke_revs'] as num?)?.toDouble() ?? 0,
       auto: (m['auto'] as bool?) ?? false,
       stopLatched: (m['stop_latched'] as bool?) ?? false,
+      canResume: m['can_resume'] == true,
+      controlMode: (m['control_mode'] as String?) ?? 'automatic',
+      wheelReady: m['wheel_ready'] == true,
+      wheelRangeEnabled: m['wheel_range_enabled'] == true,
+      wheelReversed: m['wheel_reversed'] == true,
+      wheelPulling: m['wheel_pulling'] == true,
+      wheelA: (m['wheel_a'] as num?)?.toInt(),
+      wheelB: (m['wheel_b'] as num?)?.toInt(),
+      wheelSensitivity: (m['wheel_sensitivity'] as num?)?.toDouble() ?? 1,
+      wheelArrival: (m['wheel_arrival'] as String?) ?? '',
+      wheelArrivalSequence: (m['wheel_arrival_sequence'] as num?)?.toInt() ?? 0,
       slider: (m['slider'] as num?)?.toDouble() ?? 0.5,
       speedRevS: (m['speed_rev_s'] as num?)?.toDouble() ?? 1.2,
       accelRevS2: (m['accel_rev_s2'] as num?)?.toDouble() ?? 30,
@@ -428,6 +457,20 @@ class FfCore {
   // 手动控制
   Future<void> enable(bool on) => invoke('enable', {'on': on});
   Future<void> stopPressed() => invoke('stopPressed');
+  Future<void> resumeControl() => invoke('resumeControl');
+  Future<void> setControlMode(String mode) =>
+      invoke('setControlMode', {'mode': mode});
+  Future<void> turnWheel(double turns) => invoke('turnWheel', {'turns': turns});
+  Future<void> setWheelPoint(String point) =>
+      invoke('setWheelPoint', {'point': point});
+  Future<void> clearWheelPoints() => invoke('clearWheelPoints');
+  Future<void> setWheelRange(bool on) => invoke('setWheelRange', {'on': on});
+  Future<void> setWheelSensitivity(double value) =>
+      invoke('setWheelSensitivity', {'value': value});
+  Future<void> setWheelReversed(bool on) =>
+      invoke('setWheelReversed', {'on': on});
+  Future<void> pullWheelTo(String point, {double duration = 0}) =>
+      invoke('pullWheelTo', {'point': point, 'duration': duration});
   Future<void> jog(int delta) => invoke('jog', {'delta': delta});
   Future<void> setSlider(double value) => invoke('setSlider', {'value': value});
   Future<void> setAuto(bool on) => invoke('setAuto', {'on': on});

@@ -7,6 +7,7 @@ import 'package:iphone_follow_focus/ff_core.dart';
 import 'package:iphone_follow_focus/lens_page.dart';
 import 'package:iphone_follow_focus/lidar.dart';
 import 'package:iphone_follow_focus/main.dart';
+import 'package:iphone_follow_focus/handwheel_page.dart';
 
 /// 伪造的核心：只记录命令、按需推快照。
 ///
@@ -107,6 +108,8 @@ FfState stateFor({
   bool connected = true,
   bool enabled = true,
   bool auto = false,
+  bool stopLatched = false,
+  bool canResume = false,
   bool lutReady = true,
   List<FfLutPoint>? lutPoints,
   List<String> fm03Log = const [],
@@ -158,6 +161,8 @@ FfState stateFor({
     limitHi: limitHi,
     distanceM: distanceM == null ? null : double.parse(distanceM),
     auto: auto,
+    stopLatched: stopLatched,
+    canResume: canResume,
     microsteps: 1,
     stepsPerRev: 4096,
     maxRevsPerSec: 6.25,
@@ -375,6 +380,8 @@ void main() {
     final core = FakeCore();
     await tester.pumpWidget(FollowApp(core: core));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('自动跟焦'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('新建镜头'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).first, '35mm');
@@ -471,12 +478,150 @@ void main() {
       expect(core.args['setDir'], {'dir': -1});
     },
   );
-  testWidgets('app starts on the lens picker', (tester) async {
+  testWidgets('app starts with an automatic or handwheel mode choice', (
+    tester,
+  ) async {
     final core = FakeCore();
     await tester.pumpWidget(FollowApp(core: core));
     await tester.pumpAndSettle();
+    expect(find.text('自动跟焦'), findsOneWidget);
+    expect(find.text('手机跟焦手轮'), findsOneWidget);
+    await tester.tap(find.text('自动跟焦'));
+    await tester.pumpAndSettle();
+    expect(core.args['setControlMode'], {'mode': 'automatic'});
     expect(find.text('选择镜头'), findsOneWidget);
     expect(find.text('还没有镜头，点下面新建一个。'), findsOneWidget);
+  });
+
+  testWidgets(
+    'stop becomes reset and all manual motion controls stay disabled',
+    (tester) async {
+      final core = FakeCore(stateFor(stopLatched: true, canResume: true));
+      await pumpFollowPage(tester, core);
+      await tapVisible(tester, find.text('复位继续跟焦'));
+      expect(core.called('resumeControl'), isTrue);
+      expect(core.called('stopPressed'), isFalse);
+      expect(
+        tester
+            .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '+80'))
+            .onPressed,
+        isNull,
+      );
+    },
+  );
+
+  testWidgets(
+    'handwheel entry needs no lens and sends wheel, point and reset intents',
+    (tester) async {
+      final core = FakeCore(
+        const FfState(
+          controlMode: 'handwheel',
+          wheelReady: true,
+          connected: true,
+          linkAlive: true,
+          canOk: true,
+          positionTrusted: true,
+          enabled: true,
+          pos: 1200,
+          target: 1200,
+          strokeSteps: 4096,
+          wheelA: 1200,
+          wheelB: 2800,
+        ),
+      );
+      await tester.pumpWidget(FollowApp(core: core));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('手机跟焦手轮'));
+      await tester.pumpAndSettle();
+      expect(core.args['setControlMode'], {'mode': 'handwheel'});
+      expect(find.byType(HandwheelPage), findsOneWidget);
+      expect(core.called('selectLens'), isFalse);
+      final center = tester.getCenter(
+        find.byKey(const ValueKey('focus-wheel')),
+      );
+      final gesture = await tester.startGesture(center + const Offset(120, 0));
+      await gesture.moveTo(center + const Offset(105, 65));
+      await gesture.moveTo(center + const Offset(60, 110));
+      await gesture.moveTo(center + const Offset(0, 120));
+      await gesture.up();
+      expect(core.called('turnWheel'), isTrue);
+      expect((core.args['turnWheel']!['turns'] as double).abs(), lessThan(.5));
+      await tapVisible(tester, find.text('重设 A 点'));
+      expect(core.args['setWheelPoint'], {'point': 'A'});
+      await tapVisible(tester, find.text('拉到 B'));
+      expect(core.args['pullWheelTo'], {'point': 'B', 'duration': 2.0});
+      core.push(
+        const FfState(
+          controlMode: 'handwheel',
+          connected: true,
+          positionTrusted: true,
+          strokeSteps: 4096,
+          stopLatched: true,
+          canResume: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tapVisible(tester, find.text('复位并继续手轮'));
+      expect(core.called('resumeControl'), isTrue);
+      final turns = core.countOf('turnWheel');
+      final stoppedCenter = tester.getCenter(
+        find.byKey(const ValueKey('focus-wheel')),
+      );
+      await tester.dragFrom(
+        stoppedCenter + const Offset(120, 0),
+        const Offset(-120, 120),
+      );
+      expect(core.countOf('turnWheel'), turns);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'handwheel endpoint haptic follows a new actual-arrival event once',
+    (tester) async {
+      final haptics = <Object?>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            haptics.add(call.arguments);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final core = FakeCore(const FfState(wheelArrivalSequence: 4));
+      await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
+      await tester.pumpAndSettle();
+      expect(haptics, isEmpty);
+      core.push(const FfState(wheelArrival: 'A', wheelArrivalSequence: 5));
+      await tester.pumpAndSettle();
+      expect(haptics, ['HapticFeedbackType.heavyImpact']);
+      core.push(const FfState(wheelArrival: 'A', wheelArrivalSequence: 5));
+      await tester.pumpAndSettle();
+      expect(haptics, hasLength(1));
+    },
+  );
+
+  testWidgets('handwheel layout fits portrait and landscape on a small phone', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    final core = FakeCore(const FfState());
+    for (final size in [const Size(375, 667), const Size(667, 375)]) {
+      tester.view.physicalSize = size;
+      await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('focus-wheel')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }
   });
 
   testWidgets('picker lists stored lenses with their calibration state', (

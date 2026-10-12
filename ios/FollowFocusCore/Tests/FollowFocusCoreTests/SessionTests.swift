@@ -37,6 +37,8 @@ private final class FakeFirmware {
   private let _target = Locked<Int32>(0)
   private let _calRun = Locked<UInt8>(0)
   private let _calStage = Locked<UInt8>(0)
+  private let _limits = Locked<(Int32, Int32)>((0,4096))
+  var dropFirstCommands = Set<UInt8>()
   var dropFirstStartReply = false
   var rejectStart = false
   /// 拒绝 CAL_START 时回的错误码。固件的 `CAL_内部取消 = 11` 是最新加的一个。
@@ -105,6 +107,7 @@ private final class FakeFirmware {
   private func handle(_ bytes: [UInt8], host: String, port: UInt16) {
     guard let p = FfPacket.decode(bytes) else { return }
     _commands.mutate { $0.append(bytes) }
+    if dropFirstCommands.remove(p.cmd) != nil { return }
     switch p.cmd {
     case kFfCalStart:
       if rejectStart {
@@ -112,6 +115,7 @@ private final class FakeFirmware {
         return
       }
       if _calRun.current != p.sequence {
+        _limits.set((0,4096))
         _calRun.set(p.sequence)
         _calStage.set(1)
       }
@@ -142,13 +146,26 @@ private final class FakeFirmware {
       reply(calStatus(sequence: p.sequence), to: host, port: port)
       return
     case kFfEnable:
-      if acksEnable { _enabled.set(p.a != 0) }
+      if acksEnable {
+        _enabled.set(p.a != 0)
+        if p.a == 0 { holdMotion.set(false); _target.set(_pos.current) }
+      }
+    case kFfStop:
+      _enabled.set(false); holdMotion.set(false); _target.set(_pos.current)
+    case kFfSetLimits:
+      _limits.set((p.a,p.b))
     case kFfJog:
-      _target.set(_target.current + p.a)
-      if !holdMotion.current { _pos.set(_pos.current + p.a) }
+      if _enabled.current {
+        let target = min(max(_pos.current+p.a,_limits.current.0),_limits.current.1)
+        _target.set(target)
+        if !holdMotion.current { _pos.set(target) }
+      }
     case kFfSetPos:
-      _target.set(p.a)
-      if !holdMotion.current { _pos.set(p.a) }
+      if _enabled.current {
+        let target = min(max(p.a,_limits.current.0),_limits.current.1)
+        _target.set(target)
+        if !holdMotion.current { _pos.set(target) }
+      }
     case kFfHome:
       _pos.set(0)
     case kFfFm03Set:
@@ -871,6 +888,137 @@ final class SessionTests: XCTestCase {
       h.firmware.count(kFfSetPos), stopped,
       "点停之后自动跟焦不能在下一个 tick 覆盖掉停机")
     XCTAssertEqual(h.latest.current?.auto, false, "手动介入要退出自动跟焦")
+  }
+
+  func testStopRejectsEveryMotionInputUntilExplicitReset() throws {
+    let h=try makeFollowingHarness(); defer { h.stop() }
+    h.session.ingest(distanceMeters:2)
+    h.session.setAuto(true)
+    XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos)>0 })
+    h.session.stopPressed()
+    XCTAssertTrue(waitUntil { h.latest.current?.stopLatched==true && !h.firmware.enabled })
+    let sent=h.firmware.count(kFfSetPos), jogs=h.firmware.count(kFfJog)
+    h.session.setSlider(0.95); h.session.jog(80); h.session.setAuto(true); h.session.enable(true)
+    pump(1.1)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),sent)
+    XCTAssertEqual(h.firmware.count(kFfJog),jogs)
+    XCTAssertFalse(h.firmware.enabled)
+    // An expired measurement must not release the latch.
+    h.session.resumeControl();pump(0.1)
+    XCTAssertTrue(h.latest.current?.stopLatched==true)
+    h.session.ingest(distanceMeters:3)
+    h.session.resumeControl()
+    XCTAssertTrue(waitUntil { h.latest.current?.auto==true && h.firmware.enabled })
+    XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos)>sent })
+    XCTAssertEqual(h.firmware.last(kFfSetPos)?.a,2800)
+  }
+
+  func testStopRetriesLostStopAndDisableWithoutReenabling() throws {
+    let h=try Harness();defer { h.stop() }
+    prepareReady(h)
+    XCTAssertTrue(waitUntil { h.firmware.enabled })
+    h.firmware.holdMotion.set(true)
+    h.session.setSlider(0.9)
+    XCTAssertTrue(waitUntil { h.latest.current?.moving==true })
+    h.firmware.dropFirstCommands=[kFfStop,kFfEnable]
+    h.session.stopPressed()
+    XCTAssertTrue(waitUntil { h.latest.current?.stopLatched==true && !h.firmware.enabled && h.latest.current?.moving==false })
+    let enables=h.firmware.count(kFfEnable)
+    pump(1.2)
+    XCTAssertEqual(h.firmware.count(kFfEnable),enables)
+    XCTAssertFalse(h.firmware.enabled)
+    h.session.resumeControl()
+    XCTAssertTrue(waitUntil { h.firmware.enabled && h.latest.current?.stopLatched==false })
+  }
+
+  private func prepareWheel(_ h: Harness) {
+    h.session.setControlMode(.handwheel)
+    h.session.connect()
+    XCTAssertTrue(waitUntil { h.latest.current?.fm03 != nil })
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil(4) { h.latest.current?.wheelReady==true })
+    XCTAssertNil(h.latest.current?.lensId)
+    XCTAssertEqual(h.latest.current?.phase,.follow)
+  }
+
+  func testWheelCalibratesWithoutLensAndMapsRelativeTurns() throws {
+    let h=try Harness();defer { h.stop() }
+    prepareWheel(h)
+    h.session.turnWheel(-0.25)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==2765 })
+    h.session.setWheelSensitivity(0.25)
+    h.session.setWheelReversed(true)
+    h.session.turnWheel(0.25)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==2509 })
+    h.session.ingest(distanceMeters:1);h.session.setAuto(true);pump(0.1)
+    XCTAssertFalse(h.latest.current?.auto ?? true)
+    let count=h.firmware.count(kFfSetPos)
+    h.session.turnWheel(.nan);h.session.turnWheel(100);pump(0.1)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),count)
+  }
+
+  func testWheelABLimitsAndArrivalRequireActualFeedback() throws {
+    let h=try Harness();defer { h.stop() }
+    prepareWheel(h)
+    h.session.setWheelPoint("A")
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelA==3789 })
+    h.session.turnWheel(-0.25)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==2765 })
+    h.session.setWheelPoint("B")
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelB==2765 })
+    h.session.setWheelRange(true)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelRangeEnabled==true })
+    XCTAssertEqual(h.firmware.last(kFfSetLimits)?.a,2765)
+    XCTAssertEqual(h.firmware.last(kFfSetLimits)?.b,3789)
+    h.firmware.holdMotion.set(true)
+    h.session.pullWheelTo("A",duration:0)
+    XCTAssertTrue(waitUntil { h.latest.current?.moving==true && h.firmware.last(kFfSetPos)?.a==3789 })
+    let sequence=h.session.snapshot().wheelArrivalSequence
+    pump(0.3)
+    XCTAssertEqual(h.session.snapshot().wheelArrivalSequence,sequence)
+    h.session.setWheelPoint("B");pump(0.1)
+    XCTAssertEqual(h.session.snapshot().wheelB,2765,"不能记录运动中位置")
+    h.firmware.pos=3789;h.firmware.holdMotion.set(false)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelArrivalSequence==sequence+1 })
+    XCTAssertEqual(h.latest.current?.wheelArrival,"A")
+    h.session.turnWheel(0.25)
+    XCTAssertTrue(waitUntil { h.firmware.last(kFfSetPos)?.a==3789 })
+    h.session.turnWheel(-0.5)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==2765 })
+    h.session.clearWheelPoints()
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelA==nil && h.latest.current?.wheelRangeEnabled==false })
+    XCTAssertEqual(h.firmware.last(kFfSetLimits)?.b,4096)
+    h.session.disconnect()
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelReady==false })
+  }
+
+  func testTimedWheelPullStopsAndDoesNotResumeOldTarget() throws {
+    let h=try Harness();defer { h.stop() }
+    prepareWheel(h)
+    h.session.setWheelPoint("A")
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelA != nil })
+    h.session.turnWheel(-0.25)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==2765 })
+    h.session.setWheelPoint("B")
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelB != nil })
+    h.session.pullWheelTo("A",duration:1)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelPulling==true })
+    XCTAssertTrue(waitUntil { h.firmware.last(kFfSetPos)?.a ?? 0 > 2765 })
+    h.session.stopPressed()
+    XCTAssertTrue(waitUntil { h.latest.current?.stopLatched==true && !h.firmware.enabled })
+    let count=h.firmware.count(kFfSetPos)
+    h.session.turnWheel(0.1);h.session.pullWheelTo("B",duration:0)
+    pump(1.1)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),count)
+    XCTAssertFalse(h.latest.current?.wheelPulling ?? true)
+    h.session.resumeControl()
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelReady==true })
+    pump(0.5)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),count)
+    h.session.turnWheel(-0.01)
+    XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos)>count })
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelA==nil && h.latest.current?.wheelB==nil })
   }
 
   func testAutoFocusUsesNearestAndFarthestCalibratedPointsInBothDirections() throws {

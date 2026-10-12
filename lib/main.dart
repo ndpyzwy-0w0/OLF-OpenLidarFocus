@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'device_page.dart';
 import 'ff_core.dart';
 import 'ff_core_demo.dart';
-import 'lens_page.dart';
+import 'mode_page.dart';
 import 'lidar.dart';
 import 'lens_chart.dart';
 
@@ -62,7 +62,7 @@ class FollowApp extends StatelessWidget {
           ],
         );
       },
-      home: LensPage(core: core),
+      home: ModePage(core: core),
     );
   }
 }
@@ -90,6 +90,16 @@ class FollowPage extends StatefulWidget {
 }
 
 class _FollowPageState extends State<FollowPage> {
+  bool get _paused => _s.stopLatched && _s.strokeSteps > 0;
+  Future<void> _stopOrResume() async {
+    setState(() => _sliderDrag = null);
+    if (_paused) {
+      await widget.core.resumeControl();
+    } else {
+      await widget.core.stopPressed();
+    }
+  }
+
   late final _lidar = widget.lidar ?? LidarChannel();
   final _revsText = TextEditingController(text: '1');
   final _stepsText = TextEditingController(text: '80');
@@ -379,7 +389,7 @@ class _FollowPageState extends State<FollowPage> {
             FilterChip(
               label: const Text('使能'),
               selected: _s.enabled,
-              onSelected: _calRunning || _s.calDirectionPending
+              onSelected: _calRunning || _s.calDirectionPending || _paused
                   ? null
                   : (v) => widget.core.enable(v),
             ),
@@ -394,6 +404,7 @@ class _FollowPageState extends State<FollowPage> {
               selected: _s.auto && _s.phase == SetupPhase.follow,
               onSelected:
                   !_calRunning &&
+                      !_paused &&
                       !_s.calDirectionPending &&
                       _s.lutReady &&
                       _s.phase == SetupPhase.follow
@@ -406,8 +417,10 @@ class _FollowPageState extends State<FollowPage> {
               onSelected: _lidarOk ? (v) => widget.core.setTrackFaces(v) : null,
             ),
             OutlinedButton(
-              onPressed: _s.connected ? () => widget.core.stopPressed() : null,
-              child: const Text('停'),
+              onPressed: _s.connected && (!_paused || _s.canResume)
+                  ? _stopOrResume
+                  : null,
+              child: Text(_paused ? '复位继续跟焦' : '停'),
             ),
           ],
         ),
@@ -420,13 +433,13 @@ class _FollowPageState extends State<FollowPage> {
           Text(_s.auto ? '手动滑条（自动开时无效）' : '手动焦点'),
           Slider(
             value: _sliderDrag ?? _s.slider,
-            onChanged: _s.auto
+            onChanged: _s.auto || _paused
                 ? null
                 : (v) {
                     setState(() => _sliderDrag = v);
                     widget.core.setSlider(v);
                   },
-            onChangeEnd: _s.auto
+            onChangeEnd: _s.auto || _paused
                 ? null
                 : (v) {
                     widget.core.setSlider(v);
@@ -645,11 +658,14 @@ class _FollowPageState extends State<FollowPage> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             _roundAction(
-                              label: '停止',
-                              icon: Icons.stop,
-                              color: const Color(0xFFAF4147),
-                              onPressed: _s.connected
-                                  ? widget.core.stopPressed
+                              label: _paused ? '复位继续' : '停止',
+                              icon: _paused ? Icons.restart_alt : Icons.stop,
+                              color: _paused
+                                  ? const Color(0xFF16A889)
+                                  : const Color(0xFFAF4147),
+                              onPressed:
+                                  _s.connected && (!_paused || _s.canResume)
+                                  ? _stopOrResume
                                   : null,
                             ),
                             const SizedBox(height: 16),
@@ -663,6 +679,7 @@ class _FollowPageState extends State<FollowPage> {
                                   : const Color(0xFF303638),
                               onPressed:
                                   !_calRunning &&
+                                      !_paused &&
                                       !_s.calDirectionPending &&
                                       _s.lutReady &&
                                       _s.phase == SetupPhase.follow
@@ -703,7 +720,9 @@ class _FollowPageState extends State<FollowPage> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            _calRunning
+                            _paused
+                                ? '已停止锁定，请复位'
+                                : _calRunning
                                 ? '正在寻限位'
                                 : _s.phase == SetupPhase.stroke
                                 ? '先完成寻限位'
@@ -721,6 +740,7 @@ class _FollowPageState extends State<FollowPage> {
                               value: _sliderDrag ?? _s.slider,
                               onChanged:
                                   _s.auto ||
+                                      _paused ||
                                       _calRunning ||
                                       _s.phase == SetupPhase.stroke
                                   ? null
@@ -728,10 +748,16 @@ class _FollowPageState extends State<FollowPage> {
                                       setState(() => _sliderDrag = v);
                                       widget.core.setSlider(v);
                                     },
-                              onChangeEnd: (v) {
-                                widget.core.setSlider(v);
-                                setState(() => _sliderDrag = null);
-                              },
+                              onChangeEnd:
+                                  _paused ||
+                                      _s.auto ||
+                                      _calRunning ||
+                                      _s.phase == SetupPhase.stroke
+                                  ? null
+                                  : (v) {
+                                      widget.core.setSlider(v);
+                                      setState(() => _sliderDrag = null);
+                                    },
                             ),
                           ),
                         ],
@@ -818,7 +844,7 @@ class _FollowPageState extends State<FollowPage> {
           children: [
             for (final d in [-800, -80, -8, 8, 80, 800])
               OutlinedButton(
-                onPressed: () => widget.core.jog(d),
+                onPressed: _paused ? null : () => widget.core.jog(d),
                 child: Text(d > 0 ? '+$d' : '$d'),
               ),
           ],

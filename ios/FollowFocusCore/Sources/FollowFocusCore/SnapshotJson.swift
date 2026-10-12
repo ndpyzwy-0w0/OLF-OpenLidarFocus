@@ -45,6 +45,15 @@ extension FollowFocusState {
       // 会话
       "auto": auto,
       "stop_latched": stopLatched,
+      "can_resume": canResume,
+      "control_mode": controlMode.rawValue,
+      "wheel_ready": wheelReady,
+      "wheel_range_enabled": wheelRangeEnabled,
+      "wheel_sensitivity": wheelSensitivity,
+      "wheel_reversed": wheelReversed,
+      "wheel_pulling": wheelPulling,
+      "wheel_arrival": wheelArrival,
+      "wheel_arrival_sequence": wheelArrivalSequence,
       "slider": slider,
       "speed_rev_s": speedRevS,
       "accel_rev_s2": accelRevS2,
@@ -77,6 +86,8 @@ extension FollowFocusState {
     ]
 
     if let v = lensId { m["lens_id"] = v }
+    if let v = wheelA { m["wheel_a"] = Int(v) }
+    if let v = wheelB { m["wheel_b"] = Int(v) }
     if let v = deviceId { m["device_id"] = v }
     if let v = host { m["host"] = v }
     if let v = localPort { m["local_port"] = Int(v) }

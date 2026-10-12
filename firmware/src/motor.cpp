@@ -257,7 +257,10 @@ void motorJog(int32_t delta) {
   Guard g; int64_t v=(int64_t)position()+delta;
   motorSetPos((int32_t)std::max((int64_t)INT32_MIN,std::min((int64_t)INT32_MAX,v)));
 }
-void motorStop() { Guard g; stopLocal(MOTOR_RESULT_STOPPED); txUrgent=true; }
+void motorStop() {
+  Guard g; enabled=false; stopLocal(MOTOR_RESULT_STOPPED); txUrgent=true;
+  // Late SET_POS/JOG packets cannot restart motion; a new ENABLE is required.
+}
 void motorSetEnabled(bool on) {
   Guard g;
   if (on && (!installed || calibrating || !fresh())) { result=MOTOR_RESULT_REJECTED; return; }

@@ -8,6 +8,8 @@ public enum SetupPhase: String {
   case follow
 }
 
+public enum ControlMode: String { case automatic, handwheel }
+
 /// 给 UI 的一条聚合状态快照。
 ///
 /// UI 只渲染最新快照，不需要理解事件顺序，也不会看到中间态。
@@ -54,6 +56,17 @@ public struct FollowFocusState {
   // 会话
   public var auto = false
   public var stopLatched = false
+  public var canResume = false
+  public var controlMode: ControlMode = .automatic
+  public var wheelReady = false
+  public var wheelA: Int32?
+  public var wheelB: Int32?
+  public var wheelRangeEnabled = false
+  public var wheelSensitivity = 1.0
+  public var wheelReversed = false
+  public var wheelPulling = false
+  public var wheelArrival = ""
+  public var wheelArrivalSequence = 0
   public var slider = 0.5
   public var speedRevS = 64.0 / 4096
   public var accelRevS2 = 30.0
@@ -150,6 +163,11 @@ public final class FollowFocusSession {
   private var lastControlSent = Date.distantPast
   private var sliderDirty = false
   private var stopLatched = false
+  private var resumeAuto = false
+  private var lastStopSent = Date.distantPast
+  private var wheelCoordinate = 0.0
+  private var wheelArrivalTarget: (name: String, coordinate: Int32)?
+  private var wheelPull: (started: Date, from: Double, to: Int32, duration: Double)?
   private var lastQuery = Date.distantPast
   private var lastProbe = Date.distantPast
   private var lastFm03 = Date.distantPast
@@ -401,6 +419,10 @@ public final class FollowFocusSession {
   public func enable(_ on: Bool) {
     queue.async {
       if self.calPhase != .idle { if !on { self.cancelCalibrationOnQueue("已禁用") }; return }
+      if on && self.stopLatched && self.calPositionValid {
+        self.setMsg("已停止锁定，请点击复位后继续")
+        return
+      }
       if !on { self.invalidatePosition("已禁用，请重新定位") }
       self.wantEnabled = on
       self.stopLatched = false
@@ -413,14 +435,51 @@ public final class FollowFocusSession {
   /// 停机闩锁：点“停”之后不再自动重发目标，否则自动跟焦会在 20ms 内把它覆盖掉。
   public func stopPressed() {
     queue.async {
-      if self.calPhase != .idle { self.cancelCalibrationOnQueue("已停机"); return }
+      if self.calPhase != .idle { self.cancelCalibrationOnQueue("停止观察；电机内部寻限位仍会继续，立即中止需断开电机电源"); return }
+      if !self.stopLatched { self.resumeAuto = self.state.auto }
+      self.stopLatched = true
+      self.wantEnabled = false
       self.link.stop()
+      self.link.enable(false)
+      self.lastStopSent = Date()
       self.pendingJog = 0
       self.takeManual("停机")
       self.stopLatched = true
       self.lastSent = nil
       self.sliderDirty = false
-      self.setMsg("已停机")
+      self.wheelPull = nil
+      self.state.wheelPulling = false
+      self.wheelArrivalTarget = nil
+      self.setMsg("已停止锁定；复位后才能继续控制")
+    }
+  }
+
+  /// Explicitly unlock STOP. Resume AF only if it was active before STOP and the distance is fresh.
+  public func resumeControl() {
+    queue.async {
+      guard self.calPhase == .idle, self.stopLatched, self.calPositionValid,
+        !self.state.moving, self.requireFreshPosition() else { return }
+      if self.resumeAuto {
+        guard self.phase == .follow, self.lens?.lut.matchesDirection(self.state.dir) == true,
+          self.lens?.lut.ready == true, self.distance != nil,
+          Date().timeIntervalSince(self.distanceAt) < 0.5 else {
+          self.setMsg("等待新鲜 LiDAR 测距与有效标定后再复位")
+          return
+        }
+      }
+      self.state.auto = self.resumeAuto
+      self.resumeAuto = false
+      self.stopLatched = false
+      self.wantEnabled = true
+      self.pendingJog = 0
+      self.sliderDirty = false
+      self.lastSent = nil
+      self.lastAutoSend = .distantPast
+      self.wheelCoordinate = Double(self.state.pos)
+      self.state.slider = Double(self.state.pos) / 4096
+      self.lastEnableAttempt = Date()
+      self.link.enable(true)
+      self.setMsg(self.state.auto ? "已复位，继续自动跟焦" : "已复位，可继续手动控制")
     }
   }
 
@@ -430,7 +489,7 @@ public final class FollowFocusSession {
 
   public func setSlider(_ v: Double) {
     queue.async {
-      guard self.calPhase == .idle, self.calPositionValid, self.requireFreshPosition() else { return }
+      guard self.calPhase == .idle, !self.stopLatched, self.calPositionValid, self.requireFreshPosition() else { return }
       self.takeManual("手动焦点")
       guard v.isFinite else { return }
       self.state.slider = min(max(v, 0), 1)
@@ -444,6 +503,7 @@ public final class FollowFocusSession {
   public func setAuto(_ on: Bool) {
     queue.async {
       guard self.calPhase == .idle else { return }
+      guard !on || (!self.stopLatched && self.state.controlMode == .automatic) else { return }
       guard !on || (self.phase == .follow && self.calPositionValid && self.requireFreshPosition() && self.lens?.lut.matchesDirection(self.state.dir) == true) else { return }
       if on && (self.distance == nil || Date().timeIntervalSince(self.distanceAt) >= 0.5) {
         self.setMsg("等待新鲜 LiDAR 测距后再开启自动跟焦")
@@ -451,7 +511,7 @@ public final class FollowFocusSession {
       }
       self.state.auto = on
       self.lastSent = nil
-      self.stopLatched = false
+      if on { self.stopLatched = false }
       self.lastAutoSend = .distantPast
       self.filter.reset()
       self.markDirty()
@@ -481,6 +541,135 @@ public final class FollowFocusSession {
     }
   }
   public func queryFm03() { queue.async { self.link.queryFm03() } }
+
+  // MARK: - 手机手轮（无需物距表或 LiDAR）
+
+  public func setControlMode(_ mode: ControlMode) {
+    queue.async {
+      guard self.state.controlMode != mode else { return }
+      self.cancelCalibrationOnQueue("已切换控制模式")
+      if self.link.isOpen { self.link.stop(); self.link.enable(false); self.link.setLimits(0, 4096) }
+      self.invalidatePosition("已切换模式，请先自动寻限位")
+      self.state.controlMode = mode
+      self.markDirty()
+    }
+  }
+
+  public func turnWheel(_ turns: Double) {
+    queue.async {
+      guard self.wheelCanControl(), turns.isFinite, abs(turns) <= 0.5 else { return }
+      self.wheelPull = nil
+      self.state.wheelPulling = false
+      let delta = turns * 4096 * self.state.wheelSensitivity * (self.state.wheelReversed ? -1 : 1)
+      self.setWheelTarget(self.wheelCoordinate + delta)
+    }
+  }
+
+  public func setWheelPoint(_ point: String) {
+    queue.async {
+      guard self.state.controlMode == .handwheel, self.calPositionValid,
+        self.requireFreshPosition(), !self.state.moving, self.wheelPull == nil,
+        point == "A" || point == "B" else {
+        self.setMsg("请先寻限位，并等待电机停稳后设置 A/B 点")
+        return
+      }
+      let other = point == "A" ? self.state.wheelB : self.state.wheelA
+      let tolerance = self.state.fm03?.tolerance ?? 4
+      if let other, abs(Int(other - self.state.pos)) <= tolerance * 2 {
+        self.setMsg("A/B 点距离太近，请转动手轮后重新设置")
+        return
+      }
+      if point == "A" { self.state.wheelA = self.state.pos }
+      else { self.state.wheelB = self.state.pos }
+      self.syncWheelLimits()
+      self.setMsg("已记录 \(point) 点：\(self.state.pos)")
+    }
+  }
+
+  public func clearWheelPoints() {
+    queue.async {
+      guard self.state.controlMode == .handwheel, !self.state.moving, self.wheelPull == nil else { return }
+      self.state.wheelA = nil; self.state.wheelB = nil
+      self.state.wheelRangeEnabled = false
+      self.wheelArrivalTarget = nil
+      self.wheelPull = nil; self.state.wheelPulling = false
+      self.sliderDirty = false; self.lastSent = nil
+      self.syncWheelLimits()
+      self.setMsg("已清除 A/B 点，恢复完整行程")
+    }
+  }
+
+  public func setWheelRange(_ on: Bool) {
+    queue.async {
+      guard self.state.controlMode == .handwheel, !self.state.moving else { return }
+      if on {
+        guard let a=self.state.wheelA, let b=self.state.wheelB,
+          (min(a,b)...max(a,b)).contains(self.state.pos) else {
+          self.setMsg("先设置 A/B 点，并将电机转到两点之间")
+          return
+        }
+      }
+      self.state.wheelRangeEnabled = on
+      self.syncWheelLimits()
+      self.setMsg(on ? "手轮已限制在 A/B 范围内" : "手轮已恢复完整行程")
+    }
+  }
+
+  public func setWheelSensitivity(_ value: Double) {
+    queue.async {
+      guard value.isFinite, (0.1...2).contains(value) else { return }
+      self.state.wheelSensitivity = value
+      self.markDirty()
+    }
+  }
+
+  public func setWheelReversed(_ on: Bool) {
+    queue.async { self.state.wheelReversed = on; self.markDirty() }
+  }
+
+  /// Duration schedules targets; actual arrival is always confirmed by motor feedback.
+  public func pullWheelTo(_ point: String, duration: Double) {
+    queue.async {
+      guard self.wheelCanControl(), duration.isFinite, (0...10).contains(duration),
+        let target = point == "A" ? self.state.wheelA : point == "B" ? self.state.wheelB : nil else { return }
+      if duration == 0 {
+        self.wheelPull = nil; self.state.wheelPulling = false
+        self.setWheelTarget(Double(target))
+      } else {
+        self.wheelPull = (Date(), Double(self.state.pos), target, duration)
+        self.state.wheelPulling = true
+        self.lastAutoSend = .distantPast
+      }
+      self.setMsg("正在拉焦至 \(point) 点")
+    }
+  }
+
+  private func wheelCanControl() -> Bool {
+    state.controlMode == .handwheel && calPhase == .idle && !stopLatched &&
+      calPositionValid && state.enabled && link.isOpen && requireFreshPosition()
+  }
+
+  private func setWheelTarget(_ coordinate: Double) {
+    let range = limitsFor(microsteps)
+    wheelCoordinate = min(max(coordinate, Double(range.lo)), Double(range.hi))
+    state.slider = wheelCoordinate / 4096
+    sliderDirty = true
+    let target = Int32(wheelCoordinate.rounded())
+    let name: String? = target == state.wheelA ? "A" : target == state.wheelB ? "B" :
+      target == 0 ? "起点" : target == 4096 ? "终点" : nil
+    if let name {
+      if wheelArrivalTarget?.coordinate != target { wheelArrivalTarget = (name,target) }
+    } else { wheelArrivalTarget = nil }
+    markDirty()
+  }
+
+  private func syncWheelLimits() {
+    if state.controlMode == .handwheel && link.isOpen {
+      let range=limitsFor(microsteps)
+      link.setLimits(Int32(range.lo), Int32(range.hi))
+    }
+    markDirty()
+  }
 
   // MARK: - 镜头
 
@@ -562,7 +751,7 @@ public final class FollowFocusSession {
       self.state.calDirectionPending = self.calPositionValid
       self.lastSent = nil
       self.sliderDirty = false
-      self.stopLatched = true
+      // Clearing a distance table must not unlock an explicit STOP.
       self.setMsg(self.calPositionValid ? "已清空距离表，请选择物距变近方向并重新标定" : "已清空距离表，请先自动寻限位")
     }
   }
@@ -571,7 +760,7 @@ public final class FollowFocusSession {
   public func startAutoCalibration() {
     queue.async {
       guard self.calPhase == .idle, self.state.calSupported, self.link.isOpen,
-        let lens = self.lens else {
+        self.state.controlMode == .handwheel || self.lens != nil else {
         self.setMsg("需连接 FM03 2.0 固件并选择镜头")
         return
       }
@@ -587,7 +776,10 @@ public final class FollowFocusSession {
       self.calHighestState = 0
       self.calLastQuery = .distantPast
       self.calLastReply = .distantPast
-      self.calPendingLensId = lens.id
+      self.calPendingLensId = self.lens?.id
+      self.state.wheelA = nil; self.state.wheelB = nil; self.state.wheelRangeEnabled = false
+      self.wheelArrivalTarget = nil; self.wheelPull = nil; self.state.wheelPulling = false
+      self.resumeAuto = false
       self.state.auto = false
       self.pendingJog = 0
       self.sliderDirty = false
@@ -661,6 +853,9 @@ public final class FollowFocusSession {
     sliderDirty = false
     stopLatched = true
     wantEnabled = false
+    resumeAuto = false
+    wheelPull = nil; state.wheelPulling = false; wheelArrivalTarget = nil
+    state.wheelA = nil; state.wheelB = nil; state.wheelRangeEnabled = false
     setMsg(message)
   }
 
@@ -720,13 +915,15 @@ public final class FollowFocusSession {
       state.calDirectionPending = lens?.directionConfirmed != true
       state.nearSteps = state.dir > 0 ? 0 : 4096
       state.slider = Double(c.pos) / 4096
+      wheelCoordinate = Double(c.pos)
+      if state.controlMode == .handwheel { state.calDirectionPending = false }
       stopLatched = false
       wantEnabled = true
       calQueries.removeAll()
       calPhase = .idle
       positionQueries.removeAll()
       positionQueries.insert(link.query())
-      setMsg(state.calDirectionPending ? "寻限位完成，请选择物距变近的旋转方向" : "寻限位完成，距离表已保留；可继续标定或开始跟焦")
+      setMsg(state.controlMode == .handwheel ? "寻限位完成，可转动手轮并设置 A/B 点" : state.calDirectionPending ? "寻限位完成，请选择物距变近的旋转方向" : "寻限位完成，距离表已保留；可继续标定或开始跟焦")
     } else if c.state == 6 || c.state == 7 || c.error != 0 {
       failCalibration(error: Int(c.error))
     }
@@ -770,7 +967,7 @@ public final class FollowFocusSession {
   /// dir 沿用协议含义：坐标变大时物距变远为 +1。
   public func setDir(_ d: Int) {
     queue.async {
-      guard self.calPhase == .idle, self.calPositionValid, self.requireFreshPosition(), !self.state.moving else { return }
+      guard self.calPhase == .idle, !self.stopLatched, self.calPositionValid, self.requireFreshPosition(), !self.state.moving else { return }
       let normalized = d >= 0 ? 1 : -1
       self.link.stop()
       self.takeManual("选择方向")
@@ -852,6 +1049,7 @@ public final class FollowFocusSession {
   private var stepsPerRev: Int { cal.stepsPerRev(microsteps) }
 
   private var phase: SetupPhase {
+    if state.controlMode == .handwheel { return calPositionValid ? .follow : .stroke }
     guard lens != nil, calPositionValid else { return .stroke }
     if state.calDirectionPending || lens?.directionConfirmed != true { return .align }
     return following ? .follow : .calibrate
@@ -859,6 +1057,9 @@ public final class FollowFocusSession {
 
   private func tick() {
     let now = Date()
+    if stopLatched && calPositionValid && (state.enabled || state.moving) && now.timeIntervalSince(lastStopSent) >= 0.2 {
+      link.stop(); link.enable(false); lastStopSent = now
+    }
     if link.isOpen {
       // 200ms 轮询状态：位置反馈用。**注意它喂不了固件看门狗** ——
       // 固件只把 SET_POS/JOG 当控制包（`motorNoteControlPacket`），
@@ -905,12 +1106,18 @@ public final class FollowFocusSession {
       }
       if state.enabled, !stopLatched, calPositionValid, state.positionTrusted,
         let at = lastStatusAt, now.timeIntervalSince(at) < 0.5 {
+        if state.controlMode == .handwheel, let pull=wheelPull {
+          let t=min(now.timeIntervalSince(pull.started)/pull.duration,1)
+          // Smooth start/end for programmed A/B transitions.
+          let eased=t*t*(3-2*t)
+          setWheelTarget(pull.from + (Double(pull.to)-pull.from)*eased)
+          if t >= 1 { wheelPull=nil; state.wheelPulling=false }
+        }
         var want: Int32?
         if state.auto {
           if let d = distance { want = autoSteps(d) }
         } else if sliderDirty {
           want = sliderSteps()
-          sliderDirty = false
         }
         if let candidate = want {
           if state.auto {
@@ -933,16 +1140,18 @@ public final class FollowFocusSession {
           }
         }
         if let target = want {
+          if state.controlMode == .handwheel && now.timeIntervalSince(lastControlSent) < 0.06 { emit(); return }
           lastSent = target
           lastControlSent = now
           link.setPos(target)
+          sliderDirty = false
         }
         // 看门狗保活：固件只把 SET_POS/JOG 当控制包，静默 >1s 就刹停
         // （`kControlTimeoutMs`，且只在 `ARMED && MOVING` 时生效）。
         // 所以“目标没变”不等于“不用发”：一次 >1s 的行程会在中途被刹掉，
         // 表现就是“点了走一半就停” —— 这是 §7 记过的“控制有时候不灵”的根因。
         // 重发同一个 SET_POS 是幂等的，顺带解除待机，所以按 ≤400ms 重发当前目标。
-        else if state.moving, let last = lastSent,
+        else if let last = lastSent, (state.moving || state.target != last),
           now.timeIntervalSince(lastControlSent) > 0.4
         {
           lastSent = last
@@ -1009,13 +1218,19 @@ public final class FollowFocusSession {
   }
 
   private func sliderSteps() -> Int32 {
+    if state.controlMode == .handwheel { return Int32(wheelCoordinate.rounded()) }
     let r = limitsFor(microsteps)
     if r.hi == r.lo { return Int32(r.lo) }
     return Int32((Double(r.lo) + state.slider * Double(r.hi - r.lo)).rounded())
   }
 
   /// FM03 内部维护机械限位；App 仅使用协议的归一化坐标范围。
-  private func limitsFor(_ ms: Int) -> (lo: Int, hi: Int) { (lo: 0, hi: 4096) }
+  private func limitsFor(_ ms: Int) -> (lo: Int, hi: Int) {
+    if state.controlMode == .handwheel, state.wheelRangeEnabled, let a=state.wheelA, let b=state.wheelB {
+      return (Int(min(a,b)), Int(max(a,b)))
+    }
+    return (0,4096)
+  }
 
   /// 把物理单位换算成固件要的坐标/秒、坐标/秒²。
   private func applySpeed() {
@@ -1027,7 +1242,7 @@ public final class FollowFocusSession {
   // MARK: - 内部：命令
 
   private func jogOnQueue(_ delta: Int32) {
-    guard link.isOpen, delta != 0, calPhase == .idle, calPositionValid, requireFreshPosition() else { return }
+    guard link.isOpen, delta != 0, calPhase == .idle, !stopLatched, calPositionValid, requireFreshPosition() else { return }
     let r = limitsFor(microsteps)
     let want = Int(state.pos) + Int(delta)
     guard want >= r.lo, want <= r.hi else {
@@ -1129,7 +1344,7 @@ public final class FollowFocusSession {
     state.canOk = s.canOk
     state.standby = s.standby
     state.limitHit = s.limited
-    if calPhase == .idle, s.enabled, pendingJog != 0 {
+    if calPhase == .idle, !stopLatched, wantEnabled, s.enabled, pendingJog != 0 {
       let delta = pendingJog
       pendingJog = 0
       takeManual("走坐标")
@@ -1151,6 +1366,14 @@ public final class FollowFocusSession {
     state.positionTrusted = s.positionTrusted
     state.pos = s.pos
     state.target = s.target
+    if state.controlMode == .handwheel, !stopLatched, s.positionTrusted, s.canOk, !s.moving,
+      let arrival=wheelArrivalTarget, s.target==arrival.coordinate,
+      abs(Int(s.pos-arrival.coordinate)) <= (state.fm03?.tolerance ?? 4) {
+      state.wheelArrival=arrival.name
+      state.wheelArrivalSequence += 1
+      wheelArrivalTarget=nil
+      setMsg("已到达 \(arrival.name) 点")
+    }
     markDirty()
   }
 
@@ -1212,6 +1435,11 @@ public final class FollowFocusSession {
     s.limitLo = r.lo
     s.limitHi = r.hi
     s.stopLatched = stopLatched
+    let fresh = calPositionValid && state.positionTrusted && state.canOk &&
+      link.isOpen && lastStatusAt.map { Date().timeIntervalSince($0)<0.5 } == true
+    s.wheelReady = state.controlMode == .handwheel && fresh && state.enabled && !stopLatched
+    s.canResume = stopLatched && fresh && !state.moving && (!resumeAuto ||
+      (phase == .follow && lens?.lut.ready == true && distance != nil && Date().timeIntervalSince(distanceAt)<0.5))
     s.distanceM = distance
     s.socketError = socketErrorText
     s.statusAgeMs = lastStatusAt.map { Int(Date().timeIntervalSince($0) * 1000) }

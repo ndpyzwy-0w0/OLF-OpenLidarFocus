@@ -21,6 +21,14 @@ class FfCoreDemo extends FfCore {
   _DemoLens get _cur => _lenses.where((l) => l.id == _id).firstOrNull ?? _none;
   bool _connected = true, _enabled = true, _valid = true, _following = true;
   bool _auto = false, _faces = false, _pending = false, _stopLatched = false;
+  bool _resumeAuto = false,
+      _wheel = false,
+      _wheelRange = false,
+      _wheelReversed = false;
+  int? _a, _b;
+  double _sensitivity = 1;
+  int _arrivalSequence = 0;
+  String _arrival = '';
   String _stage = 'idle';
   int _pos = 1000;
   double _speed = 64 / 4096;
@@ -59,15 +67,66 @@ class FfCoreDemo extends FfCore {
       case 'enable':
         _enabled = a?['on'] == true;
       case 'stopPressed':
+        if (!_stopLatched) _resumeAuto = _auto;
         _stopLatched = true;
+        _enabled = false;
         _auto = false;
-      case 'jog':
+      case 'resumeControl':
         if (_valid) {
+          _stopLatched = false;
+          _enabled = true;
+          _auto = _resumeAuto;
+          _resumeAuto = false;
+        }
+      case 'setControlMode':
+        final wheel = a?['mode'] == 'handwheel';
+        if (wheel != _wheel) {
+          _wheel = wheel;
+          _valid = false;
+          _auto = false;
+          _enabled = false;
+          _a = _b = null;
+          _wheelRange = false;
+          _stopLatched = true;
+        }
+      case 'turnWheel':
+        if (_wheel && _valid && _enabled && !_stopLatched) {
+          _wheelPosition(
+            _pos +
+                ((a?['turns'] as double? ?? 0) *
+                        4096 *
+                        _sensitivity *
+                        (_wheelReversed ? -1 : 1))
+                    .round(),
+          );
+        }
+      case 'setWheelPoint':
+        if (_valid) {
+          if (a?['point'] == 'A') {
+            _a = _pos;
+          } else {
+            _b = _pos;
+          }
+        }
+      case 'clearWheelPoints':
+        _a = _b = null;
+        _wheelRange = false;
+      case 'setWheelRange':
+        _wheelRange = a?['on'] == true && _a != null && _b != null;
+      case 'setWheelSensitivity':
+        _sensitivity = a?['value'] as double? ?? 1;
+      case 'setWheelReversed':
+        _wheelReversed = a?['on'] == true;
+      case 'pullWheelTo':
+        final target = a?['point'] == 'A' ? _a : _b;
+        if (target != null && _valid && !_stopLatched) _wheelPosition(target);
+      case 'jog':
+        if (_valid && !_stopLatched) {
           _pos = (_pos + (a?['delta'] as int? ?? 0)).clamp(0, 4096);
           _auto = false;
         }
       case 'setSlider':
-        if (_valid) {
+        if (_valid && !_stopLatched) {
           _pos = ((a?['value'] as double? ?? 0.5) * 4096).round().clamp(
             0,
             4096,
@@ -75,10 +134,16 @@ class FfCoreDemo extends FfCore {
           _stopLatched = false;
         }
       case 'setAuto':
-        _auto = _following && _cur.points.length >= 5 && a?['on'] == true;
+        _auto =
+            !_stopLatched &&
+            !_wheel &&
+            _following &&
+            _cur.points.length >= 5 &&
+            a?['on'] == true;
       case 'setSpeed':
         _speed = a?['revsPerSec'] as double? ?? _speed;
       case 'setFm03':
+        if (a?['key'] == kFm03MaxSpeed) _speed = (a?['value'] as int) / 4096;
         _log.add('demo FM03 key=${a?['key']} value=${a?['value']}');
       case 'queryFm03':
         _log.add('demo CAN 反馈刷新');
@@ -112,17 +177,22 @@ class FfCoreDemo extends FfCore {
         _following = false;
         _pending = _valid;
       case 'startAutoCalibration':
+        _stopLatched = false;
+        _a = _b = null;
+        _wheelRange = false;
         _stage = 'completed';
         _valid = true;
         _enabled = true;
         _following = false;
-        _pending = !_cur.directionConfirmed;
+        _pending = !_wheel && !_cur.directionConfirmed;
         _pos = 3789;
       case 'cancelAutoCalibration':
         _stage = 'cancelled';
         _valid = false;
         _pending = false;
       case 'leaveLens':
+        _a = _b = null;
+        _wheelRange = false;
         _valid = false;
         _enabled = false;
         _following = false;
@@ -155,7 +225,7 @@ class FfCoreDemo extends FfCore {
   }
 
   FfState _build() => FfState(
-    appVersion: '2.1.1+demo',
+    appVersion: '2.2.0+demo',
     calSupported: true,
     calStage: _stage,
     calSafeSpan: _valid ? 4096 : 0,
@@ -180,6 +250,16 @@ class FfCoreDemo extends FfCore {
     strokeRevs: _valid ? 1 : 0,
     auto: _auto,
     stopLatched: _stopLatched,
+    canResume: _valid && _connected && _stopLatched,
+    controlMode: _wheel ? 'handwheel' : 'automatic',
+    wheelReady: _wheel && _valid && _enabled && _connected && !_stopLatched,
+    wheelA: _a,
+    wheelB: _b,
+    wheelRangeEnabled: _wheelRange,
+    wheelSensitivity: _sensitivity,
+    wheelReversed: _wheelReversed,
+    wheelArrival: _arrival,
+    wheelArrivalSequence: _arrivalSequence,
     slider: _pos / 4096,
     speedRevS: _speed,
     faces: _faces,
@@ -199,6 +279,8 @@ class FfCoreDemo extends FfCore {
     ],
     phase: !_valid
         ? SetupPhase.stroke
+        : _wheel
+        ? SetupPhase.follow
         : _pending
         ? SetupPhase.align
         : _following
@@ -219,7 +301,7 @@ class FfCoreDemo extends FfCore {
       online: true,
       stage: 3,
       value: 0,
-      maxSpeed: 64,
+      maxSpeed: (_speed * 4096).round(),
       tolerance: 4,
       gain: 4,
       rawPosition: _pos,
@@ -231,6 +313,25 @@ class FfCoreDemo extends FfCore {
     fm03Log: List.unmodifiable(_log),
     msg: 'web 演示核心（没有真实硬件）',
   );
+
+  void _wheelPosition(int position) {
+    final lo = _wheelRange ? (_a! < _b! ? _a! : _b!) : 0;
+    final hi = _wheelRange ? (_a! > _b! ? _a! : _b!) : 4096;
+    _pos = position.clamp(lo, hi);
+    final point = _pos == _a
+        ? 'A'
+        : _pos == _b
+        ? 'B'
+        : _pos == 0
+        ? '起点'
+        : _pos == 4096
+        ? '终点'
+        : '';
+    if (point.isNotEmpty) {
+      _arrival = point;
+      _arrivalSequence++;
+    }
+  }
 
   // 仅为假数据画曲线；真机曲线由 Swift 快照提供。
   List<FfLutPoint> _previewCurve() {
