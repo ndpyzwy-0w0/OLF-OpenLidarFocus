@@ -666,8 +666,10 @@ class _FollowPageState extends State<FollowPage> {
         const Text('距离标定', style: TextStyle(fontWeight: FontWeight.bold)),
         const Text(
           '用手机手动旋转电机，观察相机画面，实焦停稳后记录。'
-          '至少 5 点，建议覆盖最近实用距离、1 m、2 m、3 m 和最远实用距离；可继续补点。'
-          '按 1/物距分段插值，超出标定距离时保持表的端点位置。',
+          '至少 5 点，达到 5 点后仍可继续新增，建议覆盖近、中、远距离。'
+          '相差不足 2 cm 的物距会更新原点位。'
+          '按 1/物距分段插值；自动跟焦时，小于最小标定物距使用最近标定点，'
+          '大于最大标定物距使用最远标定点。',
         ),
         TextField(
           textInputAction: TextInputAction.done,
@@ -686,7 +688,7 @@ class _FollowPageState extends State<FollowPage> {
                 : null,
           ),
         ),
-        FilledButton.tonal(
+        FilledButton.tonalIcon(
           onPressed:
               _s.connected &&
                   _s.positionTrusted &&
@@ -697,11 +699,17 @@ class _FollowPageState extends State<FollowPage> {
                   meters: manual.isEmpty ? null : meters,
                 )
               : null,
-          child: const Text('记录当前'),
+          icon: const Icon(Icons.add),
+          label: const Text('新增标定点'),
         ),
         Text(
-          '已记录 ${_s.lutPoints.length} / 至少 5 点 · ${_s.lutReady ? "图表可用于跟焦" : "请继续标定"}',
+          '已记录 ${_s.lutPoints.length} 点 · 至少 5 点，可继续新增 · ${_s.lutReady ? "图表可用于跟焦" : "请继续标定"}',
         ),
+        if (_s.lutPoints.isNotEmpty)
+          Text(
+            '最近标定 ${_s.lutPoints.first.meters.toStringAsFixed(2)} m · '
+            '最远标定 ${_s.lutPoints.last.meters.toStringAsFixed(2)} m',
+          ),
         LensChart(points: _s.lutPoints, curve: _s.lutCurve),
         for (var i = 0; i < _s.lutPoints.length; i++)
           ListTile(
@@ -723,7 +731,10 @@ class _FollowPageState extends State<FollowPage> {
             child: const Text('开始跟焦'),
           ),
         if (_s.phase == SetupPhase.follow)
-          TextButton(onPressed: widget.core.unalign, child: const Text('继续标定')),
+          TextButton(
+            onPressed: widget.core.unalign,
+            child: const Text('继续新增标定点'),
+          ),
       ],
     );
   }

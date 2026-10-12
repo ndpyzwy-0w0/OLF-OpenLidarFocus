@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "../../firmware/src/motor.cpp"
 #include "../../firmware/src/protocol.cpp"
+#include "../../firmware/src/oled.cpp"
 const char* deviceId() { return "FF-TEST"; }
 const uint8_t* deviceMac() { static uint8_t m[6]{}; return m; }
 static void feedback(int state,int32_t pos) {
@@ -32,7 +33,7 @@ int main() {
   motorStop();motorPoll();assert(applied==0 && !moving);
   reset();motorSetPos(INT32_MAX);assert(target==4096 && limited);
   motorStop();motorSetLimits(100,300);motorSetPos(800);assert(target==300);
-  reset();motorNoteControlPacket(false);motorSetPos(2500);advance(1050,3,2000);assert(!moving && applied==0);
+  reset();motorNoteControlPacket(false);motorSetPos(2500);advance(1050,3,2000);assert(!moving && applied==0 && motorFault()==4);
   reset();motorNoteControlPacket(true);motorSetPos(2500);fakeUs+=350000;motorPoll();assert(!moving && !motorPositionTrusted());
   reset();motorNoteControlPacket(true);motorSetPos(2500);advance(2100,3,2000);assert(!moving && motorFault()==3);
   reset();motorSetPos(2500);failTx=true;advance(50,3,2000);assert(!moving && !enabled && txFailures>0);failTx=false;
@@ -87,5 +88,55 @@ int main() {
   WiFiUDP u;protocolBegin(&u);FfPacket in{kFfMagic,FF_FM03_QUERY,0,1,0,0};handle(in,{},4210);
   assert(u.sent.size()==1 && u.sent[0].size()==26 && u.sent[0][1]==0x86);
   u.sent.clear();in.cmd=FF_QUERY;handle(in,{},4210);assert(u.sent.size()==2 && u.sent[1].size()==16);
-  puts("PASS: CAN framing/CRC, feedback positioning, limits, timeouts, tx/rx failure, home, calibration, UDP");
+  // Discovery/unknown packets are not a live control link; timeout wraps safely.
+  protocolBegin(&u);assert(!protocolLinkAlive());
+  in.cmd=FF_DISCOVER;handle(in,{},4210);assert(!protocolLinkAlive());
+  in.cmd=0x77;handle(in,{},4210);assert(!protocolLinkAlive());
+  in.cmd=FF_QUERY;handle(in,{},4210);assert(protocolLinkAlive());
+  fakeUs+=1501000;assert(!protocolLinkAlive());
+  fakeUs=(uint64_t)UINT32_MAX*1000-500000;
+  handle(in,{},4210);fakeUs+=1000000;assert(protocolLinkAlive());
+  fakeUs+=501000;assert(!protocolLinkAlive());
+  fakeUs=1000000;reset();protocolBegin(&u);
+
+  oledBegin("change-me", "192.168.4.1");
+  assert(u8g2.lines[0]=="FW 2.0.3" && u8g2.lines[1]==deviceId());
+  assert(u8g2.lines[2]=="PW change-me" && u8g2.lines[3]=="192.168.4.1");
+  const auto bootFrames=u8g2.frames;
+  advance(5900,3,2000);oledPoll();assert(u8g2.frames==bootFrames);
+  advance(100,3,2000);handle(in,{},4210);oledPoll();
+  assert(u8g2.lines[0]=="V2.0.3 READY" && u8g2.lines[1]=="P 2000");
+  assert(u8g2.lines[2]=="T 2000" && u8g2.lines[3]=="C:OK L:OK");
+  fakeUs+=350000;motorPoll();oledPoll();
+  assert(u8g2.lines[1]=="NO FEEDBACK" && u8g2.lines[2]=="P --");
+  fakeUs+=1501000;oledPoll();assert(u8g2.lines[3]=="C:LOST L:LOST");
+
+  reset();advance(250,3,2000);fault=1;oledPoll();assert(u8g2.lines[1]=="CAN ERROR");
+  fault=2;advance(250,3,2000);oledPoll();assert(u8g2.lines[1]=="POSITION LOST");
+  fault=3;advance(250,3,2000);oledPoll();assert(u8g2.lines[1]=="MOVE TIMEOUT");
+  fault=4;advance(250,3,2000);oledPoll();assert(u8g2.lines[1]=="CTRL TIMEOUT");
+  reset();assert(motorCalibrationStart(10,0,0)==CAL_OK);
+  advance(250,1,INT32_MAX);oledPoll();
+  assert(u8g2.lines[0]=="V2.0.3 CAL" && u8g2.lines[1]=="CAL 1");
+  advance(250,2,INT32_MAX);oledPoll();assert(u8g2.lines[1]=="CAL 2");
+  motorCalibrationCancel();advance(250,2,INT32_MAX);oledPoll();
+  assert(u8g2.lines[2]=="CAL CONTINUES");
+  cal.error=CAL_TIMEOUT;advance(250,2,INT32_MAX);oledPoll();
+  assert(u8g2.lines[0]=="V2.0.3 ERR" && u8g2.lines[1]=="CAL TIMEOUT");
+  // Movement, faults and calibration must not erase startup credentials early.
+  for (int scenario=0; scenario<3; ++scenario) {
+    reset();oledBegin("change-me", "192.168.4.1");
+    const auto startupFrames=u8g2.frames;
+    if (scenario==0) motorSetPos(2300);
+    if (scenario==1) fault=1;
+    if (scenario==2) assert(motorCalibrationStart(11,0,0)==CAL_OK);
+    const auto beforePoll=fakeUs;
+    oledPoll();assert(fakeUs==beforePoll); // No blocking delay in the 6s display.
+    assert(u8g2.lines[0]=="FW 2.0.3" && u8g2.lines[2]=="PW change-me");
+    handle(in,{},4210);assert(protocolLinkAlive()); // UDP remains usable.
+    fakeUs+=5999000;oledPoll();assert(u8g2.frames==startupFrames);
+    fakeUs+=1000;oledPoll();assert(u8g2.frames==startupFrames+1);
+    assert(u8g2.lines[0].find("V2.0.3 ")==0);
+  }
+  puts("PASS: CAN/UDP control, timeouts, OLED boot credentials, live link, stale position, calibration, errors, 72x40 layout");
 }

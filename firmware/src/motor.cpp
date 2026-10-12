@@ -160,8 +160,10 @@ void motorPoll() {
     }
   }
   if (moving) {
-    if (!trusted() || feedbackEpoch!=moveEpoch || (watchdog && now-lastControl>1000)) {
+    if (!trusted() || feedbackEpoch!=moveEpoch) {
       fault=2; stopLocal(MOTOR_RESULT_REJECTED);
+    } else if (watchdog && now-lastControl>1000) {
+      fault=4; stopLocal(MOTOR_RESULT_REJECTED);
     } else if (now-started>60000 || now-progressAt>2000) {
       fault=3; stopLocal(MOTOR_RESULT_REJECTED);
     }

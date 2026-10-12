@@ -509,7 +509,7 @@ void main() {
     final core = FakeCore(stateFor(distanceM: '2.34'));
     await pumpFollowPage(tester, core);
 
-    await tapVisible(tester, find.text('记录当前'));
+    await tapVisible(tester, find.text('新增标定点'));
     expect(core.called('addLutPoint'), isTrue);
   });
 
@@ -521,11 +521,26 @@ void main() {
 
     expect(
       tester
-          .widget<FilledButton>(find.widgetWithText(FilledButton, '记录当前'))
+          .widget<FilledButton>(find.widgetWithText(FilledButton, '新增标定点'))
           .onPressed,
       isNull,
       reason: '没测到距离时不该能记录标定点',
     );
+  });
+
+  testWidgets('follow mode offers continuing calibration while auto is on', (
+    tester,
+  ) async {
+    final core = FakeCore(stateFor(auto: true, distanceM: '2'));
+    await pumpFollowPage(tester, core);
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, '新增标定点'))
+          .onPressed,
+      isNull,
+    );
+    await tapVisible(tester, find.text('继续新增标定点'));
+    expect(core.called('unalign'), isTrue);
   });
 
   testWidgets('recalibrating the stroke is behind a long press and a confirm', (
@@ -633,18 +648,36 @@ void main() {
       isNull,
     );
   });
-  testWidgets('manual measured distance can record without LiDAR', (
-    tester,
-  ) async {
-    final core = FakeCore(stateFor(phase: SetupPhase.calibrate));
-    await pumpFollowPage(tester, core);
-    await scrollTo(tester, find.widgetWithText(TextField, '物距（m，可手动输入）'));
-    await tester.enterText(
-      find.widgetWithText(TextField, '物距（m，可手动输入）'),
-      '2.5',
-    );
-    await tester.pumpAndSettle();
-    await tapVisible(tester, find.text('记录当前'));
-    expect(core.args['addLutPoint']?['meters'], 2.5);
-  });
+  testWidgets(
+    'manual measured distance can add more than five points without LiDAR',
+    (tester) async {
+      final core = FakeCore(stateFor(phase: SetupPhase.calibrate));
+      await pumpFollowPage(tester, core);
+      await scrollTo(tester, find.widgetWithText(TextField, '物距（m，可手动输入）'));
+      await tester.enterText(
+        find.widgetWithText(TextField, '物距（m，可手动输入）'),
+        '2.5',
+      );
+      await tester.pumpAndSettle();
+      await tapVisible(tester, find.text('新增标定点'));
+      expect(core.args['addLutPoint']?['meters'], 2.5);
+
+      final sixPoints = [
+        ...core.state.lutPoints,
+        const FfLutPoint(meters: 6, steps: 3900),
+      ];
+      core.push(stateFor(phase: SetupPhase.calibrate, lutPoints: sixPoints));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('已记录 6 点'), findsOneWidget);
+      expect(find.text('最近标定 0.50 m · 最远标定 6.00 m'), findsOneWidget);
+      await tester.enterText(
+        find.widgetWithText(TextField, '物距（m，可手动输入）'),
+        '7',
+      );
+      await tester.pumpAndSettle();
+      await tapVisible(tester, find.text('新增标定点'));
+      expect(core.countOf('addLutPoint'), 2);
+      expect(core.args['addLutPoint']?['meters'], 7.0);
+    },
+  );
 }

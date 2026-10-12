@@ -27,7 +27,7 @@ v2 沿用通用运动命令号，但坐标单位改为 FM03 标定行程坐标�
 
 STATUS（0x81，12字节）与请求同布局，a=反馈当前位置，b=目标。flags：bit0使能、bit1普通位置控制活动、bit2 CAN反馈新鲜、bit3保留0、bit4目标被限位、bit5～7结果。结果0 idle、1 accepted、2 completed、3 limited、4 rejected、5 stopped。
 
-STATUS_V2（0x83，16字节）：前12字节同STATUS；offset12 position_trusted:u8、13 fault:u8、14 reserved:u16（bit0运动看门狗武装）。fault=0正常、1总线/发送/丢帧异常、2反馈过期/epoch变化/控制通信超时、3无进展/运动总超时。旧位置可在失联时保留显示，但 position_trusted=false，不能用于运动。
+STATUS_V2（0x83，16字节）：前12字节同STATUS；offset12 position_trusted:u8、13 fault:u8、14 reserved:u16（bit0运动看门狗武装）。fault=0正常、1总线/发送/丢帧异常、2反馈无效/过期/epoch变化、3无进展/运动总超时、4控制通信超时（固件2.0.2起；旧固件归入2）。旧位置可在失联时保留，但 position_trusted=false，不能用于运动；OLED不可信位置显示`--`。
 
 FM03_DUMP（0x86，26字节）：offset0 magic、1 cmd、2 online、3 stage（255未知、0未校准、1/2内部校准、3可用）；4 value:i16（最近发送拨轮值）；6 max_speed:u16；8 tolerance:u16；10 gain:u16；12 raw_position:i32；16 tx_failures:u32；20 rx_missed:u32；24 feedback_age:u16 ms（65535无反馈/饱和）。原始阶段1/2哨兵不得当位置使用。
 

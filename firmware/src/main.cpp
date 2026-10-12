@@ -104,7 +104,6 @@ void setup() {
 
   Serial.printf("reset reason=%d\n", (int)esp_reset_reason());
   motorBegin();
-  oledBegin();
 
   btStop();
   WiFi.persistent(false);
@@ -127,6 +126,7 @@ void setup() {
   http.begin();
   udp.begin(kUdpPort);
   protocolBegin(&udp);
+  oledBegin(kPass, ip.toString().c_str());
 
   Serial.printf("AP %s  pass %s  mac %s  http://%s  udp %u\n", deviceId(), kPass,
                 deviceMacText(), ip.toString().c_str(), kUdpPort);

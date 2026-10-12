@@ -4,5 +4,5 @@
 static const int PIN_OLED_SDA = 8;
 static const int PIN_OLED_SCL = 9;
 
-void oledBegin();
+void oledBegin(const char *password, const char *ip);
 void oledPoll();

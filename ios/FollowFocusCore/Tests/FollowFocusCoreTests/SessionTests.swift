@@ -703,6 +703,33 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(h.store.lenses.first!.lut.points.count, 5)
   }
 
+  func testContinuingCalibrationPreservesFivePointsAndAddsNewEndpoints() throws {
+    let h = try makeFollowingHarness(); defer { h.stop() }
+    let original = h.store.lenses.first!.lut.points
+    h.session.ingest(distanceMeters: 2)
+    h.session.setAuto(true)
+    XCTAssertTrue(waitUntil { h.firmware.last(kFfSetPos)?.a == 2000 })
+    h.session.unalign()
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .calibrate && h.latest.current?.auto == false })
+    XCTAssertEqual(h.store.lenses.first!.lut.points, original)
+
+    for (meters, coordinate) in [(0.3, 50), (6.0, 3900)] {
+      h.firmware.pos = Int32(coordinate)
+      XCTAssertTrue(waitUntil { h.latest.current?.pos == Int32(coordinate) && h.latest.current?.moving == false })
+      let count = h.session.snapshot().lutPoints.count
+      h.session.addLutPoint(meters: meters)
+      XCTAssertTrue(waitUntil { h.latest.current?.lutPoints.count == count + 1 })
+    }
+    let lut = h.store.lenses.first!.lut
+    XCTAssertEqual(lut.points.count, 7)
+    XCTAssertTrue(original.allSatisfy { lut.points.contains($0) })
+    XCTAssertTrue(lut.ready)
+    XCTAssertEqual(lut.stepsFor(0.15), 50)
+    XCTAssertEqual(lut.stepsFor(7), 3900)
+    h.session.startFollow()
+    XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
+  }
+
   func testReverseDirectionKeepsNormalizedRangeAndPersistsRawCoordinates() throws {
     let h = try Harness(); defer { h.stop() }
     prepareReady(h, direction: -1)
@@ -846,17 +873,25 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(h.latest.current?.auto, false, "手动介入要退出自动跟焦")
   }
 
-  func testAutoFocusClampsTargetIntoTheAlignedRange() throws {
-    let h = try makeFollowingHarness()
-    defer { h.stop() }
-    h.session.ingest(distanceMeters: 8.0)
-    h.session.setAuto(true)
-    XCTAssertTrue(waitUntil { h.latest.current?.auto == true })
-    XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 })
-    let sent = h.firmware.last(kFfSetPos)?.a
-    XCTAssertNotNil(sent)
-    XCTAssertLessThanOrEqual(sent ?? 0, 4096, "自动目标不能越过行程上端")
-    XCTAssertGreaterThanOrEqual(sent ?? 0, 0, "自动目标不能低于最近点")
+  func testAutoFocusUsesNearestAndFarthestCalibratedPointsInBothDirections() throws {
+    for direction in [1, -1] {
+      let h = try Harness()
+      defer { h.stop() }
+      prepareReady(h, direction: direction)
+      h.session.startFollow()
+      XCTAssertTrue(waitUntil { h.latest.current?.phase == .follow })
+      for (meters, coordinate) in [(0.15, 100), (5.5, 3800)] {
+        h.session.setAuto(false)
+        h.session.ingest(distanceMeters: nil)
+        h.session.ingest(distanceMeters: meters)
+        let before = h.firmware.count(kFfSetPos)
+        h.session.setAuto(true)
+        XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > before })
+        let expected = direction > 0 ? coordinate : 4096 - coordinate
+        XCTAssertEqual(h.firmware.last(kFfSetPos)?.a, Int32(expected),
+          "范围外测距应驱动到对应标定端点，而非机械行程两端")
+      }
+    }
   }
   func testStaleLidarStopsAutoAndCannotRecordOldDistance() throws {
     let h = try makeFollowingHarness(); defer { h.stop() }

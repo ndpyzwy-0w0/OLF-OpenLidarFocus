@@ -50,6 +50,8 @@ static const uint8_t FF_REQ_LATCH = 0x01;
 // 判断“现在必须持续发包吗”要与 FF_FLAG_MOVING 一起看。
 static const uint16_t FF_V2_WATCHDOG_ARMED = 0x0001;
 
+bool protocolLinkAlive();
+
 // Upper three flag bits carry the latest command result.
 static const uint8_t FF_RESULT_SHIFT = 5;
 static const uint8_t FF_RESULT_MASK = 0xE0;

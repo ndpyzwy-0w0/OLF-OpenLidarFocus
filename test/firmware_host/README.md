@@ -1,6 +1,6 @@
 # FM03 固件主机模拟
 
-直接编译生产 `motor.cpp` 和 `protocol.cpp`，模拟 TWAI、时间和 CAN 反馈，不连接硬件。
+直接编译生产 `motor.cpp`、`protocol.cpp` 和 `oled.cpp`，模拟 TWAI、时间、CAN 反馈和 OLED 文本输出，不连接硬件。
 
 ```sh
 c++ -std=c++17 -Itest/firmware_host -Ifirmware/include test/firmware_host/fm03_test.cpp -o /tmp/olf-fm03-test
@@ -9,4 +9,6 @@ c++ -std=c++17 -Itest/firmware_host -Ifirmware/include test/firmware_host/fm03_t
 
 覆盖 CAN ID/分片/CRC、正反方向反馈控制、400ms稳定到位、软件限位、溢出增量、通信/反馈/无进展超时、TX失败/RX丢帧、软件置零、内部校准幂等、无法软件取消、校准后0～4096及UDP26/16字节回包、CAN 等待期间 UDP 可立即回包、等待中 STOP 不发送旧速度、整包 50ms 截止时间。
 
-模拟不证明实际电机角度、回差、齿轮啮合、对焦精度或接线正确。机械验收见根目录 HANDOFF.md。
+同时检查 OLED 开机版本/热点/密码/IP、完整 6 秒非阻塞展示（运动、故障和寻限位不会提前切页）、可信位置屏蔽、控制链路有效报文/超时/时钟回绕、标定阶段及故障优先显示，并检查每行字符宽度适配 72×40。
+
+模拟不证明实际屏幕字形、电机角度、回差、齿轮啮合、对焦精度或接线正确。机械验收见根目录 HANDOFF.md。

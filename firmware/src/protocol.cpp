@@ -7,6 +7,10 @@
 
 static WiFiUDP *udp = nullptr;
 static uint8_t buf[64];
+static bool linkSeen = false;
+static uint32_t lastPacketMs = 0;
+
+bool protocolLinkAlive() { return linkSeen && millis() - lastPacketMs <= 1500; }
 
 // Shared by STATUS and STATUS_V2 so both report the same command result: a move
 // that actually finished must not still look "accepted".
@@ -111,6 +115,13 @@ static void sendCalibration(const IPAddress &ip, uint16_t port, uint8_t sequence
 }
 
 static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
+  // Discovery and arbitrary echoes do not prove a control connection is alive.
+  if ((in.cmd >= FF_SET_POS && in.cmd <= FF_SET_SPEED) || in.cmd == FF_HOME ||
+      (in.cmd >= FF_CAL_START && in.cmd <= FF_CAL_CANCEL) ||
+      in.cmd == FF_FM03_QUERY || in.cmd == FF_FM03_SET) {
+    linkSeen = true;
+    lastPacketMs = millis();
+  }
   switch (in.cmd) {
     case FF_CAL_START: {
       const uint8_t error = motorCalibrationStart(in.pad, in.a, in.b);
@@ -172,6 +183,8 @@ static void handle(const FfPacket &in, const IPAddress &ip, uint16_t port) {
 
 void protocolBegin(WiFiUDP *u) {
   udp = u;
+  linkSeen = false;
+  lastPacketMs = 0;
 }
 
 void protocolPoll() {
