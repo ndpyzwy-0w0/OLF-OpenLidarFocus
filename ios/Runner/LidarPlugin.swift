@@ -208,16 +208,36 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
     sinkLock.lock()
     let sink = eventSink
     sinkLock.unlock()
-    DispatchQueue.main.async { sink?(map) }
+    DispatchQueue.main.async {
+      // Samples stay in portrait coordinates. Rotate the preview and its overlay together.
+      let scene = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .first { $0.activationState == .foregroundActive }
+      map["preview_quarter_turns"] = LidarPreviewView.quarterTurns(
+        for: scene?.interfaceOrientation ?? .portrait
+      )
+      sink?(map)
+    }
   }
 }
 
 final class LidarPreviewView: UIView {
   let preview = AVCaptureVideoPreviewLayer(session: LidarEngine.shared.session)
 
+  static func quarterTurns(for orientation: UIInterfaceOrientation) -> Int {
+    // Interface landscapeRight has the Home button on the right; it needs
+    // counterclockwise image rotation. UIDeviceOrientation uses opposite names.
+    switch orientation {
+    case .landscapeRight: return -1
+    case .landscapeLeft: return 1
+    case .portraitUpsideDown: return 2
+    default: return 0
+    }
+  }
+
   override init(frame: CGRect) {
     super.init(frame: frame)
-    preview.videoGravity = .resizeAspectFill
+    preview.videoGravity = .resizeAspect
     layer.addSublayer(preview)
     let tap = UITapGestureRecognizer(target: self, action: #selector(onTap(_:)))
     addGestureRecognizer(tap)
@@ -228,7 +248,15 @@ final class LidarPreviewView: UIView {
 
   override func layoutSubviews() {
     super.layoutSubviews()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
     preview.frame = bounds
+    CATransaction.commit()
+    if let connection = preview.connection,
+       connection.isVideoOrientationSupported,
+       connection.videoOrientation != .portrait {
+      connection.videoOrientation = .portrait
+    }
   }
 
   @objc private func onTap(_ g: UITapGestureRecognizer) {

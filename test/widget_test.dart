@@ -1,9 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iphone_follow_focus/ff_core.dart';
 import 'package:iphone_follow_focus/lens_page.dart';
+import 'package:iphone_follow_focus/lidar.dart';
 import 'package:iphone_follow_focus/main.dart';
 
 /// 伪造的核心：只记录命令、按需推快照。
@@ -49,6 +51,31 @@ class FakeCore extends FfCore {
   bool called(String method) => calls.contains(method);
 
   int countOf(String method) => calls.where((c) => c == method).length;
+}
+
+class FakeLidar extends LidarChannel {
+  void Function(LidarSample)? onSample;
+  int starts = 0;
+  int disposals = 0;
+
+  @override
+  Future<bool> available() async => true;
+
+  @override
+  Future<void> listen(void Function(LidarSample) callback) async {
+    onSample = callback;
+  }
+
+  @override
+  Future<void> start({required bool trackFaces}) async {
+    starts++;
+  }
+
+  @override
+  Future<void> dispose() async {
+    disposals++;
+    onSample = null;
+  }
 }
 
 FfLens lens({
@@ -148,13 +175,22 @@ Future<void> pumpLensPage(WidgetTester tester, FakeCore core) async {
 /// 同一个测试里重复 pumpWidget 时，Flutter 会复用同类型同 key 的 State，
 /// 于是 initState/订阅不会重跑、页面还停在上一个核心的状态上。
 /// 每次给不同的 key，强制重建，测试才是真的在测“这一次的状态”。
-Future<void> pumpFollowPage(WidgetTester tester, FakeCore core) async {
+Future<void> pumpFollowPage(
+  WidgetTester tester,
+  FakeCore core, {
+  LidarChannel? lidar,
+}) async {
+  tester.view.physicalSize = const Size(430, 932);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
   await tester.pumpWidget(
     MaterialApp(
       home: FollowPage(
         key: UniqueKey(),
         core: core,
         lensId: core.state.lensId ?? 'L1',
+        lidar: lidar,
       ),
     ),
   );
@@ -177,6 +213,162 @@ Future<void> tapVisible(WidgetTester tester, Finder f) async {
 }
 
 void main() {
+  testWidgets(
+    'rotation and collapse retain the native camera and capture session',
+    (tester) async {
+      final platformCalls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        (call) async {
+          platformCalls.add(call);
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform_views,
+          null,
+        ),
+      );
+      final lidar = FakeLidar();
+      await pumpFollowPage(tester, FakeCore(stateFor()), lidar: lidar);
+      final cameraState = tester.state(find.byType(UiKitView));
+      expect(platformCalls.where((c) => c.method == 'create'), hasLength(1));
+      for (final turns in [-1, 0, 1, 0, -1, 0]) {
+        tester.view.physicalSize = turns == 0
+            ? const Size(430, 932)
+            : const Size(932, 430);
+        lidar.onSample!(
+          LidarSample(distanceM: 2, u: .2, v: .3, previewQuarterTurns: turns),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.state(find.byType(UiKitView)), same(cameraState));
+        expect(
+          tester.widget<RotatedBox>(find.byType(RotatedBox)).quarterTurns,
+          turns,
+        );
+        expect(platformCalls.where((c) => c.method == 'create'), hasLength(1));
+        expect(platformCalls.where((c) => c.method == 'dispose'), isEmpty);
+      }
+      await tester.tap(find.text('摄像头 展开'));
+      await tester.pumpAndSettle();
+      expect(find.byType(UiKitView), findsNothing);
+      expect(
+        tester.state(find.byType(UiKitView, skipOffstage: false)),
+        same(cameraState),
+      );
+      await tester.tap(find.text('摄像头 已折叠'));
+      await tester.pumpAndSettle();
+      expect(tester.state(find.byType(UiKitView)), same(cameraState));
+      expect(platformCalls.where((c) => c.method == 'create'), hasLength(1));
+      expect(lidar.starts, 1);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+      expect(platformCalls.where((c) => c.method == 'dispose'), hasLength(1));
+      expect(lidar.disposals, 1);
+    },
+  );
+
+  testWidgets('tap requests orientation, landscape controls keep core state', (
+    tester,
+  ) async {
+    final orientations = <Object?>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'SystemChrome.setPreferredOrientations') {
+          orientations.add(call.arguments);
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    final core = FakeCore(stateFor(distanceM: '2.34', appVersion: '2.1.0+8'));
+    await pumpFollowPage(tester, core);
+    await tester.tap(find.byTooltip('切换横屏'));
+    await tester.pumpAndSettle();
+    expect(orientations.last, ['DeviceOrientation.landscapeLeft']);
+    // The OS supplies new metrics after accepting the rotation request.
+    tester.view.physicalSize = const Size(932, 430);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('landscape-viewfinder')), findsOneWidget);
+    expect(find.text('物距 2.34 m'), findsOneWidget);
+    expect(find.text('v2.1.0+8'), findsOneWidget);
+    await tester.tap(find.text('手动'));
+    expect(core.args['setAuto'], {'on': true});
+    await tester.tap(find.text('停止'));
+    expect(core.called('stopPressed'), isTrue);
+    await tester.tap(find.byTooltip('构图网格'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('控制与标定'));
+    await tester.pumpAndSettle();
+    await tapVisible(tester, find.text('+80'));
+    expect(core.args['jog'], {'delta': 80});
+    await tester.tap(find.byTooltip('关闭控制面板'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('切换竖屏'));
+    await tester.pumpAndSettle();
+    expect(orientations.last, ['DeviceOrientation.portraitUp']);
+    tester.view.physicalSize = const Size(430, 932);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('landscape-viewfinder')), findsNothing);
+    expect(find.text('手动焦点'), findsOneWidget);
+    expect(
+      tester.getBottomLeft(find.byType(SingleChildScrollView).first).dy,
+      932,
+    );
+    expect(core.called('leaveLens'), isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+    expect(
+      orientations.last,
+      isEmpty,
+      reason: 'Leaving the page restores system rotation',
+    );
+  });
+
+  testWidgets('small landscape supports setup, keyboard and disabled auto', (
+    tester,
+  ) async {
+    final core = FakeCore(
+      stateFor(phase: SetupPhase.calibrate, lutReady: false),
+    );
+    await pumpFollowPage(tester, core);
+    tester.view.physicalSize = const Size(667, 375);
+    tester.view.padding = const FakeViewPadding(
+      left: 44,
+      right: 44,
+      bottom: 21,
+    );
+    addTearDown(tester.view.resetPadding);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, '手动'))
+          .onPressed,
+      isNull,
+    );
+    await tester.tap(find.byTooltip('控制与标定'));
+    await tester.pumpAndSettle();
+    await scrollTo(tester, find.widgetWithText(TextField, '物距（m，可手动输入）'));
+    await tester.enterText(
+      find.widgetWithText(TextField, '物距（m，可手动输入）'),
+      '2.5',
+    );
+    tester.view.viewInsets = const FakeViewPadding(bottom: 160);
+    addTearDown(tester.view.resetViewInsets);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tapVisible(tester, find.text('新增标定点'));
+    expect(core.args['addLutPoint'], {'meters': 2.5});
+  });
+
   testWidgets('keyboard can be dismissed in a dialog without losing input', (
     tester,
   ) async {

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'device_page.dart';
 import 'ff_core.dart';
@@ -29,10 +30,11 @@ class FollowApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '跟焦器',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF4CAF50),
+          seedColor: const Color(0xFF16A889),
           brightness: Brightness.dark,
         ),
       ),
@@ -74,15 +76,21 @@ class FollowApp extends StatelessWidget {
 class FollowPage extends StatefulWidget {
   final FfCore core;
   final String lensId;
+  final LidarChannel? lidar;
 
-  const FollowPage({super.key, required this.core, required this.lensId});
+  const FollowPage({
+    super.key,
+    required this.core,
+    required this.lensId,
+    this.lidar,
+  });
 
   @override
   State<FollowPage> createState() => _FollowPageState();
 }
 
 class _FollowPageState extends State<FollowPage> {
-  final _lidar = LidarChannel();
+  late final _lidar = widget.lidar ?? LidarChannel();
   final _revsText = TextEditingController(text: '1');
   final _stepsText = TextEditingController(text: '80');
   final _distanceText = TextEditingController();
@@ -92,6 +100,11 @@ class _FollowPageState extends State<FollowPage> {
 
   bool _lidarOk = false;
   bool _previewExpanded = true;
+  bool _showGrid = false;
+  bool? _webLandscape;
+  bool _rotating = false;
+  int _previewQuarterTurns = 0;
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
 
   /// 纯界面覆盖值：拖动中先用本地值，松手后回到快照，避免 20Hz 回读造成卡顿。
   double? _sliderDrag;
@@ -123,6 +136,7 @@ class _FollowPageState extends State<FollowPage> {
   void _onLidar(LidarSample s) {
     if (!mounted) return;
     setState(() {
+      _previewQuarterTurns = s.previewQuarterTurns;
       _u = s.u;
       _v = s.v;
       _face =
@@ -137,6 +151,7 @@ class _FollowPageState extends State<FollowPage> {
 
   @override
   void dispose() {
+    unawaited(SystemChrome.setPreferredOrientations([]));
     widget.core.leaveLens();
     _sub?.cancel();
     _lidar.dispose();
@@ -220,197 +235,559 @@ class _FollowPageState extends State<FollowPage> {
     final distText = _s.distanceM == null
         ? '--'
         : '${_s.distanceM!.toStringAsFixed(2)} m';
+    final landscape = _isLandscape;
     return Scaffold(
-      appBar: AppBar(
-        // 标题里带上 App 版本（`pubspec.yaml` 的 `version:`，由 iOS 壳从 Bundle 读出来）。
-        // 装在手机上的到底是哪一版，一眼可见，不用去 设置→通用 里翻。
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
+      key: _scaffoldKey,
+      backgroundColor: Colors.black,
+      endDrawer: landscape ? _settingsDrawer() : null,
+      appBar: landscape
+          ? null
+          : AppBar(
+              // 标题里带上 App 版本（`pubspec.yaml` 的 `version:`，由 iOS 壳从 Bundle 读出来）。
+              // 装在手机上的到底是哪一版，一眼可见，不用去 设置→通用 里翻。
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('跟焦器'),
+                  Text(
+                    _s.appVersion.isEmpty ? '版本未知' : 'v${_s.appVersion}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.normal,
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                _orientationButton(),
+                IconButton(
+                  tooltip: '设备',
+                  onPressed: _calRunning || _s.calDirectionPending
+                      ? null
+                      : _openDevicePage,
+                  icon: Icon(
+                    _s.deviceId == null ? Icons.router_outlined : Icons.router,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: Center(child: _linkStatusText()),
+                ),
+              ],
+            ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final padding = MediaQuery.paddingOf(context);
+          final availableHeight = (constraints.maxHeight - padding.bottom)
+              .clamp(0, double.infinity);
+          final controlsHeight = _previewExpanded
+              ? (availableHeight * .5).clamp(0, 340).toDouble()
+              : (availableHeight - 40).clamp(0, double.infinity).toDouble();
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              // Keep the native camera in the same tree slot across layouts.
+              // Recreating UiKitView also recreates its capture preview layer.
+              Positioned.fill(
+                left: landscape ? 0 : padding.left,
+                right: landscape ? 0 : padding.right,
+                bottom: landscape || !_previewExpanded
+                    ? 0
+                    : controlsHeight + padding.bottom,
+                child: Offstage(
+                  offstage: !landscape && !_previewExpanded,
+                  child: _preview(),
+                ),
+              ),
+              if (landscape)
+                _landscapeView(distText)
+              else
+                SafeArea(
+                  top: false,
+                  child: Column(
+                    children: [
+                      if (_previewExpanded)
+                        Expanded(
+                          child: Align(
+                            alignment: Alignment.topLeft,
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 12, top: 8),
+                              child: _previewToggle(distText),
+                            ),
+                          ),
+                        )
+                      else
+                        _previewToggle(distText, compact: true),
+                      SizedBox(
+                        height: controlsHeight,
+                        child: Material(
+                          color: Theme.of(context).colorScheme.surface,
+                          borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(20),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: _controls(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _controls() => SingleChildScrollView(
+    keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+    padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '电机 ${_s.pos} → ${_s.target}    ${_s.msg}',
+          style: const TextStyle(fontSize: 13),
+        ),
+        Row(
           children: [
-            const Text('跟焦器'),
-            Text(
-              _s.appVersion.isEmpty ? '版本未知' : 'v${_s.appVersion}',
-              style: const TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.normal,
+            Expanded(
+              child: Text(
+                '镜头 ${_s.lensName}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+            Text(switch (_s.phase) {
+              SetupPhase.stroke => '① 自动寻限位',
+              SetupPhase.align => '② 选择方向',
+              SetupPhase.calibrate => '③ 标定物距',
+              SetupPhase.follow => '④ 跟焦',
+            }, style: const TextStyle(fontSize: 12)),
+          ],
+        ),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilledButton(
+              onPressed: _calRunning || _s.calDirectionPending
+                  ? null
+                  : () => widget.core.connect(),
+              child: Text(_s.connected ? '重连' : '连接电机'),
+            ),
+            FilterChip(
+              label: const Text('使能'),
+              selected: _s.enabled,
+              onSelected: _calRunning || _s.calDirectionPending
+                  ? null
+                  : (v) => widget.core.enable(v),
+            ),
+            FilterChip(
+              // 核心决定图表是否可用，UI 只显示五点标定门槛。
+              // 能不能开由核心决定（setAuto 会自己拒绝），这里只管显示。
+              label: Text(
+                _s.phase != SetupPhase.follow
+                    ? '自动(先完成标定)'
+                    : (_s.lutReady ? '自动跟焦' : '自动(需5点标定)'),
+              ),
+              selected: _s.auto && _s.phase == SetupPhase.follow,
+              onSelected:
+                  !_calRunning &&
+                      !_s.calDirectionPending &&
+                      _s.lutReady &&
+                      _s.phase == SetupPhase.follow
+                  ? (v) => widget.core.setAuto(v)
+                  : null,
+            ),
+            FilterChip(
+              label: const Text('人脸'),
+              selected: _s.faces,
+              onSelected: _lidarOk ? (v) => widget.core.setTrackFaces(v) : null,
+            ),
+            OutlinedButton(
+              onPressed: _s.connected ? () => widget.core.stopPressed() : null,
+              child: const Text('停'),
+            ),
+          ],
+        ),
+        _autoCalibrationEntry(),
+        _setupPanel(),
+        if ((_s.phase == SetupPhase.calibrate ||
+                _s.phase == SetupPhase.follow ||
+                _s.phase == SetupPhase.align) &&
+            !_calRunning) ...[
+          Text(_s.auto ? '手动滑条（自动开时无效）' : '手动焦点'),
+          Slider(
+            value: _sliderDrag ?? _s.slider,
+            onChanged: _s.auto
+                ? null
+                : (v) {
+                    setState(() => _sliderDrag = v);
+                    widget.core.setSlider(v);
+                  },
+            onChangeEnd: _s.auto
+                ? null
+                : (v) {
+                    widget.core.setSlider(v);
+                    setState(() => _sliderDrag = null);
+                  },
+          ),
+          _jogControls(),
+          Text('最大拨轮速度 ${((_speedDrag ?? _s.speedRevS) * 4096).round()} / 256'),
+          Slider(
+            min: 1 / 4096,
+            max: 256 / 4096,
+            divisions: 255,
+            value: (_speedDrag ?? _s.speedRevS).clamp(1 / 4096, 256 / 4096),
+            onChanged: (v) => setState(() => _speedDrag = v),
+            onChangeEnd: (v) {
+              setState(() => _speedDrag = null);
+              widget.core.setFm03(kFm03MaxSpeed, (v * 4096).round());
+            },
+          ),
+          const Text(
+            'FM03 采用坐标反馈到位，接近目标时自动减速。'
+            '拨轮速度是协议值，不是角速度；0～4096 表示已校准的整个行程。',
+            style: TextStyle(fontSize: 11),
+          ),
+          _directionRow(),
+          if (_s.phase != SetupPhase.align) _distanceCalibrationPanel(),
+        ],
+        if (_s.phase == SetupPhase.stroke && _s.lutPoints.isNotEmpty)
+          LensChart(points: _s.lutPoints, curve: _s.lutCurve),
+        if (!_calRunning) _recalibrateTile(),
+        const SizedBox(height: 8),
+        _diagnosticPanel(),
+        AbsorbPointer(
+          absorbing: _calRunning || _s.calDirectionPending,
+          child: _fm03Panel(),
+        ),
+      ],
+    ),
+  );
+
+  bool get _isLandscape =>
+      _webLandscape ??
+      MediaQuery.orientationOf(context) == Orientation.landscape;
+
+  Future<void> _toggleOrientation() async {
+    if (_rotating) return;
+    final landscape = !_isLandscape;
+    FocusManager.instance.primaryFocus?.unfocus();
+    _scaffoldKey.currentState?.closeEndDrawer();
+    setState(() => _rotating = true);
+    try {
+      await SystemChrome.setPreferredOrientations([
+        landscape
+            ? DeviceOrientation.landscapeLeft
+            : DeviceOrientation.portraitUp,
+      ]);
+      if (mounted && kIsWeb) setState(() => _webLandscape = landscape);
+    } on PlatformException {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('屏幕切换失败，请重试')));
+      }
+    } finally {
+      if (mounted) setState(() => _rotating = false);
+    }
+  }
+
+  Widget _orientationButton() => IconButton(
+    tooltip: _isLandscape ? '切换竖屏' : '切换横屏',
+    onPressed: _rotating ? null : _toggleOrientation,
+    icon: Icon(
+      _isLandscape ? Icons.stay_current_portrait : Icons.stay_current_landscape,
+    ),
+  );
+
+  Widget _settingsDrawer() => Drawer(
+    width: MediaQuery.sizeOf(context).width.clamp(0, 440).toDouble(),
+    child: SafeArea(
+      child: Column(
+        children: [
+          ListTile(
+            title: const Text('跟焦控制与标定'),
+            trailing: IconButton(
+              tooltip: '关闭控制面板',
+              onPressed: () => _scaffoldKey.currentState?.closeEndDrawer(),
+              icon: const Icon(Icons.close),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(child: _controls()),
+        ],
+      ),
+    ),
+  );
+
+  Widget _landscapeView(String distance) => Stack(
+    key: const ValueKey('landscape-viewfinder'),
+    fit: StackFit.expand,
+    children: [
+      SafeArea(
+        child: Column(
+          children: [
+            Material(
+              color: Colors.black.withValues(alpha: .8),
+              child: Row(
+                children: [
+                  IconButton(
+                    tooltip: '返回镜头列表',
+                    onPressed: () => Navigator.maybePop(context),
+                    icon: const Icon(Icons.arrow_back_ios_new, size: 20),
+                  ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _s.lensName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        Text(
+                          _s.appVersion.isEmpty ? '跟焦器' : 'v${_s.appVersion}',
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: Colors.white54,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  _orientationButton(),
+                  IconButton(
+                    tooltip: '人脸追踪',
+                    isSelected: _s.faces,
+                    onPressed: _lidarOk
+                        ? () => widget.core.setTrackFaces(!_s.faces)
+                        : null,
+                    icon: const Icon(Icons.face_retouching_natural),
+                  ),
+                  IconButton(
+                    tooltip: '构图网格',
+                    isSelected: _showGrid,
+                    style: IconButton.styleFrom(
+                      backgroundColor: _showGrid
+                          ? const Color(0xFF16A889)
+                          : null,
+                    ),
+                    onPressed: () => setState(() => _showGrid = !_showGrid),
+                    icon: const Icon(Icons.grid_on),
+                  ),
+                  IconButton(
+                    tooltip: '设备',
+                    onPressed: _calRunning || _s.calDirectionPending
+                        ? null
+                        : _openDevicePage,
+                    icon: const Icon(Icons.wifi),
+                  ),
+                  IconButton(
+                    tooltip: '控制与标定',
+                    onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
+                    icon: const Icon(Icons.tune),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(12),
+                      child: Align(
+                        alignment: Alignment.topLeft,
+                        child: Material(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(8),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '物距 $distance',
+                                  style: const TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                Text(
+                                  _calRunning ? '正在自动寻限位 · 请等待' : _s.msg,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 96,
+                    child: Center(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _roundAction(
+                              label: '停止',
+                              icon: Icons.stop,
+                              color: const Color(0xFFAF4147),
+                              onPressed: _s.connected
+                                  ? widget.core.stopPressed
+                                  : null,
+                            ),
+                            const SizedBox(height: 16),
+                            _roundAction(
+                              label: _s.auto ? '自动' : '手动',
+                              icon: _s.auto
+                                  ? Icons.center_focus_strong
+                                  : Icons.touch_app_outlined,
+                              color: _s.auto
+                                  ? const Color(0xFF16A889)
+                                  : const Color(0xFF303638),
+                              onPressed:
+                                  !_calRunning &&
+                                      !_s.calDirectionPending &&
+                                      _s.lutReady &&
+                                      _s.phase == SetupPhase.follow
+                                  ? () => widget.core.setAuto(!_s.auto)
+                                  : null,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Material(
+              color: Colors.black.withValues(alpha: .8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 6,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: 2,
+                      child: _statusItem('电机链路', _linkStatusText()),
+                    ),
+                    Expanded(
+                      flex: 2,
+                      child: _statusItem(
+                        '位置 → 目标',
+                        Text('${_s.pos} → ${_s.target}'),
+                      ),
+                    ),
+                    Expanded(
+                      flex: 4,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _calRunning
+                                ? '正在寻限位'
+                                : _s.phase == SetupPhase.stroke
+                                ? '先完成寻限位'
+                                : _s.auto
+                                ? '自动跟焦中'
+                                : '手动焦点',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.white70,
+                            ),
+                          ),
+                          SizedBox(
+                            height: 32,
+                            child: Slider(
+                              value: _sliderDrag ?? _s.slider,
+                              onChanged:
+                                  _s.auto ||
+                                      _calRunning ||
+                                      _s.phase == SetupPhase.stroke
+                                  ? null
+                                  : (v) {
+                                      setState(() => _sliderDrag = v);
+                                      widget.core.setSlider(v);
+                                    },
+                              onChangeEnd: (v) {
+                                widget.core.setSlider(v);
+                                setState(() => _sliderDrag = null);
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: _statusItem(
+                        '标定点',
+                        Text('${_s.lutPoints.length} / 5+'),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
         ),
-        actions: [
-          IconButton(
-            tooltip: '设备',
-            onPressed: _calRunning || _s.calDirectionPending
-                ? null
-                : _openDevicePage,
-            icon: Icon(
-              _s.deviceId == null ? Icons.router_outlined : Icons.router,
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: Center(child: _linkStatusText()),
-          ),
-        ],
       ),
-      body: Column(
+    ],
+  );
+
+  Widget _statusItem(String label, Widget value) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label, style: const TextStyle(fontSize: 10, color: Colors.white54)),
+      const SizedBox(height: 4),
+      value,
+    ],
+  );
+
+  Widget _roundAction({
+    required String label,
+    required IconData icon,
+    required Color color,
+    VoidCallback? onPressed,
+  }) => SizedBox(
+    width: 72,
+    height: 72,
+    child: FilledButton(
+      onPressed: onPressed,
+      style: FilledButton.styleFrom(
+        backgroundColor: color,
+        foregroundColor: Colors.white,
+        padding: EdgeInsets.zero,
+        shape: const CircleBorder(),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          if (_previewExpanded)
-            Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  _preview(),
-                  Positioned(left: 12, top: 8, child: _previewToggle(distText)),
-                ],
-              ),
-            )
-          else
-            _previewToggle(distText, compact: true),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 340),
-            child: SingleChildScrollView(
-              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '电机 ${_s.pos} → ${_s.target}    ${_s.msg}',
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '镜头 ${_s.lensName}',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      Text(switch (_s.phase) {
-                        SetupPhase.stroke => '① 自动寻限位',
-                        SetupPhase.align => '② 选择方向',
-                        SetupPhase.calibrate => '③ 标定物距',
-                        SetupPhase.follow => '④ 跟焦',
-                      }, style: const TextStyle(fontSize: 12)),
-                    ],
-                  ),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      FilledButton(
-                        onPressed: _calRunning || _s.calDirectionPending
-                            ? null
-                            : () => widget.core.connect(),
-                        child: Text(_s.connected ? '重连' : '连接电机'),
-                      ),
-                      FilterChip(
-                        label: const Text('使能'),
-                        selected: _s.enabled,
-                        onSelected: _calRunning || _s.calDirectionPending
-                            ? null
-                            : (v) => widget.core.enable(v),
-                      ),
-                      FilterChip(
-                        // 核心决定图表是否可用，UI 只显示五点标定门槛。
-                        // 能不能开由核心决定（setAuto 会自己拒绝），这里只管显示。
-                        label: Text(
-                          _s.phase != SetupPhase.follow
-                              ? '自动(先完成标定)'
-                              : (_s.lutReady ? '自动跟焦' : '自动(需5点标定)'),
-                        ),
-                        selected: _s.auto && _s.phase == SetupPhase.follow,
-                        onSelected:
-                            !_calRunning &&
-                                !_s.calDirectionPending &&
-                                _s.lutReady &&
-                                _s.phase == SetupPhase.follow
-                            ? (v) => widget.core.setAuto(v)
-                            : null,
-                      ),
-                      FilterChip(
-                        label: const Text('人脸'),
-                        selected: _s.faces,
-                        onSelected: _lidarOk
-                            ? (v) => widget.core.setTrackFaces(v)
-                            : null,
-                      ),
-                      OutlinedButton(
-                        onPressed: _s.connected
-                            ? () => widget.core.stopPressed()
-                            : null,
-                        child: const Text('停'),
-                      ),
-                    ],
-                  ),
-                  _autoCalibrationEntry(),
-                  _setupPanel(),
-                  if ((_s.phase == SetupPhase.calibrate ||
-                          _s.phase == SetupPhase.follow ||
-                          _s.phase == SetupPhase.align) &&
-                      !_calRunning) ...[
-                    Text(_s.auto ? '手动滑条（自动开时无效）' : '手动焦点'),
-                    Slider(
-                      value: _sliderDrag ?? _s.slider,
-                      onChanged: _s.auto
-                          ? null
-                          : (v) {
-                              setState(() => _sliderDrag = v);
-                              widget.core.setSlider(v);
-                            },
-                      onChangeEnd: _s.auto
-                          ? null
-                          : (v) {
-                              widget.core.setSlider(v);
-                              setState(() => _sliderDrag = null);
-                            },
-                    ),
-                    _jogControls(),
-                    Text(
-                      '最大拨轮速度 ${((_speedDrag ?? _s.speedRevS) * 4096).round()} / 256',
-                    ),
-                    Slider(
-                      min: 1 / 4096,
-                      max: 256 / 4096,
-                      divisions: 255,
-                      value: (_speedDrag ?? _s.speedRevS).clamp(
-                        1 / 4096,
-                        256 / 4096,
-                      ),
-                      onChanged: (v) => setState(() => _speedDrag = v),
-                      onChangeEnd: (v) {
-                        setState(() => _speedDrag = null);
-                        widget.core.setFm03(kFm03MaxSpeed, (v * 4096).round());
-                      },
-                    ),
-                    const Text(
-                      'FM03 采用坐标反馈到位，接近目标时自动减速。'
-                      '拨轮速度是协议值，不是角速度；0～4096 表示已校准的整个行程。',
-                      style: TextStyle(fontSize: 11),
-                    ),
-                    _directionRow(),
-                    if (_s.phase != SetupPhase.align)
-                      _distanceCalibrationPanel(),
-                  ],
-                  if (_s.phase == SetupPhase.stroke && _s.lutPoints.isNotEmpty)
-                    LensChart(points: _s.lutPoints, curve: _s.lutCurve),
-                  if (!_calRunning) _recalibrateTile(),
-                  const SizedBox(height: 8),
-                  _diagnosticPanel(),
-                  AbsorbPointer(
-                    absorbing: _calRunning || _s.calDirectionPending,
-                    child: _fm03Panel(),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          Icon(icon, size: 26),
+          Text(label, style: const TextStyle(fontSize: 12)),
         ],
       ),
-    );
-  }
+    ),
+  );
 
   Future<void> _openDevicePage() async {
     final picked = await Navigator.push<FfDevice>(
@@ -448,7 +825,9 @@ class _FollowPageState extends State<FollowPage> {
         ),
         const Divider(height: 16),
         // 原始坐标增量与归一化行程比例。
-        Row(
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          runSpacing: 6,
           children: [
             const Text('坐标增量'),
             const SizedBox(width: 6),
@@ -480,7 +859,9 @@ class _FollowPageState extends State<FollowPage> {
           ],
         ),
         const SizedBox(height: 8),
-        Row(
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          runSpacing: 6,
           children: [
             const Text('行程比例'),
             const SizedBox(width: 6),
@@ -940,23 +1321,68 @@ class _FollowPageState extends State<FollowPage> {
   }
 
   Widget _preview() {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        if (_lidarOk)
-          const UiKitView(viewType: 'ff.lidar/preview')
-        else
-          const ColoredBox(
-            color: Color(0xFF1A1A1A),
-            child: Center(child: Text('LiDAR 需 iPhone Pro')),
-          ),
-        IgnorePointer(
-          child: CustomPaint(
-            painter: _OverlayPainter(u: _u, v: _v, face: _face),
-            child: const SizedBox.expand(),
-          ),
-        ),
-      ],
+    return ColoredBox(
+      key: const ValueKey('camera-preview'),
+      color: Colors.black,
+      child: Center(
+        child: _lidarOk
+            ? RotatedBox(
+                quarterTurns: _previewQuarterTurns,
+                // VGA frames and LiDAR samples use portrait coordinates.
+                // Keep the image, tap target and overlay in the same 3:4 space.
+                child: AspectRatio(
+                  aspectRatio: 3 / 4,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      const UiKitView(viewType: 'ff.lidar/preview'),
+                      IgnorePointer(
+                        child: CustomPaint(
+                          painter: _OverlayPainter(
+                            u: _u,
+                            v: _v,
+                            face: _face,
+                            grid: _showGrid,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            : Stack(
+                fit: StackFit.expand,
+                children: [
+                  const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.center_focus_weak,
+                          size: 44,
+                          color: Colors.white24,
+                        ),
+                        SizedBox(height: 12),
+                        Text(
+                          'LiDAR 需 iPhone Pro',
+                          style: TextStyle(color: Colors.white38),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IgnorePointer(
+                    child: CustomPaint(
+                      painter: _OverlayPainter(
+                        u: _u,
+                        v: _v,
+                        face: _face,
+                        grid: _showGrid,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+      ),
     );
   }
 
@@ -992,11 +1418,34 @@ class _OverlayPainter extends CustomPainter {
   final double u;
   final double v;
   final Rect? face;
+  final bool grid;
 
-  _OverlayPainter({required this.u, required this.v, required this.face});
+  _OverlayPainter({
+    required this.u,
+    required this.v,
+    required this.face,
+    required this.grid,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (grid) {
+      final lines = Paint()
+        ..color = Colors.white24
+        ..strokeWidth = 1;
+      for (final fraction in [1 / 3, 2 / 3]) {
+        canvas.drawLine(
+          Offset(size.width * fraction, 0),
+          Offset(size.width * fraction, size.height),
+          lines,
+        );
+        canvas.drawLine(
+          Offset(0, size.height * fraction),
+          Offset(size.width, size.height * fraction),
+          lines,
+        );
+      }
+    }
     final stroke = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2
@@ -1020,5 +1469,5 @@ class _OverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _OverlayPainter old) =>
-      old.u != u || old.v != v || old.face != face;
+      old.u != u || old.v != v || old.face != face || old.grid != grid;
 }

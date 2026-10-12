@@ -14,12 +14,14 @@ void main() {
       'face_v': .2,
       'face_w': .3,
       'face_h': .4,
+      'preview_quarter_turns': -1,
     });
     expect(sample.schemaVersion, 1);
     expect(sample.timestampMs, 1234);
     expect(sample.valid, isTrue);
     expect(sample.distanceM, 1.25);
     expect(sample.u, .4);
+    expect(sample.previewQuarterTurns, -1);
   });
 
   test('parses legacy and missing fields safely', () {
@@ -29,5 +31,6 @@ void main() {
     expect(sample.distanceM, isNull);
     expect(sample.u, .2);
     expect(sample.v, .8);
+    expect(sample.previewQuarterTurns, 0);
   });
 }

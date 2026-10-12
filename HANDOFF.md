@@ -16,7 +16,7 @@
 
 ## 构建与刷写
 
-固件 2.0.3，App 2.0.3+7；固件仍用 `firmware/platformio.ini` 的 `s3mini` 配置、4MB flash、USB CDC。
+固件 2.0.3，App 2.1.1+9；固件仍用 `firmware/platformio.ini` 的 `s3mini` 配置、4MB flash、USB CDC。
 
 ```sh
 pio run -d firmware

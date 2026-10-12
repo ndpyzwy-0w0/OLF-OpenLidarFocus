@@ -155,7 +155,7 @@ class FfCoreDemo extends FfCore {
   }
 
   FfState _build() => FfState(
-    appVersion: '2.0.1+demo',
+    appVersion: '2.1.1+demo',
     calSupported: true,
     calStage: _stage,
     calSafeSpan: _valid ? 4096 : 0,

@@ -12,6 +12,7 @@ class LidarSample {
   final double? distanceM;
   final double u;
   final double v;
+  final int previewQuarterTurns;
   final double? faceU;
   final double? faceV;
   final double? faceW;
@@ -24,6 +25,7 @@ class LidarSample {
     required this.distanceM,
     required this.u,
     required this.v,
+    this.previewQuarterTurns = 0,
     this.faceU,
     this.faceV,
     this.faceW,
@@ -34,6 +36,7 @@ class LidarSample {
     final distance = (m['distance_m'] as num?)?.toDouble();
     return LidarSample(
       schemaVersion: (m['schema_version'] as num?)?.toInt() ?? 0,
+      previewQuarterTurns: (m['preview_quarter_turns'] as num?)?.toInt() ?? 0,
       timestampMs: (m['timestamp_ms'] as num?)?.toInt(),
       valid: (m['valid'] as bool?) ?? distance != null,
       distanceM: distance,
