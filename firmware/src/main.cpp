@@ -147,4 +147,5 @@ void loop() {
     delay(40);
   }
   lastBtn = btn;
+  motorDiagnosticsPoll();
 }

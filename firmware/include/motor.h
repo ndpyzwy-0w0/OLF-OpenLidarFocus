@@ -6,6 +6,7 @@ static const int PIN_CAN_TX = 4;
 static const int PIN_CAN_RX = 5;
 void motorBegin();
 void motorPoll();
+void motorDiagnosticsPoll();
 void motorSetPos(int32_t coordinate);
 void motorJog(int32_t delta);
 void motorStop();

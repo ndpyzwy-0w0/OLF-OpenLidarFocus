@@ -9,6 +9,7 @@ inline uint64_t fakeUs=1000000;
 inline uint32_t millis() { return fakeUs/1000; }
 inline void delay(uint32_t ms) { assert(stateLockDepth==0); fakeUs+=ms*1000; }
 struct FakeSerial {
+  explicit operator bool() const { return true; }
   template<class... T> void printf(const char*, T...) {}
   template<class T> void println(T) {}
 };
@@ -20,4 +21,7 @@ using portMUX_TYPE=int;
 #define pdMS_TO_TICKS(x) (x)
 #define portMAX_DELAY 0xffffffff
 inline int xTaskCreate(void(*)(void*),const char*,int,void*,int,void*) { return 1; }
+inline int xTaskCreatePinnedToCore(void(*)(void*),const char*,int,void*,int,void*,int core) {
+  assert(core==1); return 1;
+}
 inline void vTaskDelay(int) {}

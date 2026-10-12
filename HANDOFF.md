@@ -4,6 +4,8 @@
 
 开发板仍为 ESP32-S3 Super Mini，OLED 仍为 SSD1306 72×40，I²C GPIO8 SDA / GPIO9 SCL，地址自动探测 0x3C/0x3D。BOOT 按钮 GPIO0 切换普通控制使能。
 
+2026-10-12经USB实际读取：ESP32-S3（QFN56），revision v0.2，内置4MB Flash（XMC）及2MB PSRAM（AP_3v3）。PlatformIO的DevKitC编译板型名称不代表这块实物板的Flash容量；继续使用项目4MB配置。
+
 使用 SN65HVD230 或其他兼容 3.3V 逻辑、支持 1 Mbps 的 CAN 收发器：
 
 - ESP32 GPIO4 → 收发器 D/TXD；GPIO5 ← R/RXD。
@@ -16,7 +18,7 @@
 
 ## 构建与刷写
 
-固件 2.0.3，App 2.1.1+9；固件仍用 `firmware/platformio.ini` 的 `s3mini` 配置、4MB flash、USB CDC。
+固件 2.0.4，App 2.1.1+9；固件仍用 `firmware/platformio.ini` 的 `s3mini` 配置、4MB flash、USB CDC。
 
 ```sh
 pio run -d firmware
@@ -28,10 +30,14 @@ flutter build ios --no-codesign
 
 固件 2.0.3 增加 OLED 版本、开机热点信息、实时链路及标定/故障提示，兼容 App 2.0.3+7。App 2.0.2 / 固件 2.0.1 的链路修复及慢 CAN 发送、UDP 丢包、长时间寻限位与旧回包的模拟回归验证保留；编译不会自动安装 App 或刷写板子。实际安装后请低速核对方向、终端电阻及反馈新鲜度。
 
+固件 2.0.4 增加 CAN 任务固定核心1、普通跟焦加速渐变和换向先归零，以及每秒 USB 串口 CAN 诊断。此版本用于排查运动时闪红，尚不能认定已解决实机问题。测试时核对 OLED 显示 V2.0.4，并记录明显距离变化时的 `CAN diag`。
+
+诊断时必须确认FM03已通电并接入CAN。只有单片机、没有对端应答时，发送超时、TEC升高及总线错误增加是预期现象；此时 `gap_ms` 也会包含请求和归零报文的发送等待，不能直接当作Wi-Fi抢占的证据。2.0.4已经通过编译及主机模拟，并刷入上述USB板子；本次串口检查时FM03未连接，尚未完成运动场景实机验收。
+
 ## 控制行为与验收
 
-1. 开机 OLED 显示约 6 秒：`FW 2.0.3`、热点名、`PW change-me`、`192.168.4.1`；信息来自实际配置，期间 UDP/CAN 正常运行。开机页完整显示 6 秒，运动、寻限位或故障不会提前切页；仅延后状态显示，不延后控制和保护。串口输出 oled startup elapsed=... ms 可核对实际展示时间。运行页显示版本与 OFF/RUN/READY/WAIT、可信 P/T 坐标、`C:OK/LOST` 与 `L:OK/LOST`。C 表示电机反馈在 300ms 内且无 CAN 故障；L 表示 1.5s 内收到有效控制/查询报文，发现请求、未知指令和任意 echo 不算控制连接。反馈失效后 P/T 不显示旧坐标；故障页优先显示原因及 P（无效为`--`）。寻限位显示 CAL 1/2/WAIT，取消观察后内部校准继续时显示 CAL CONTINUES；故障显示 CAN ERROR、POSITION LOST、CTRL TIMEOUT、MOVE TIMEOUT 或 CAL TIMEOUT。OLED 使用英文短词以适配 72×40 屏幕。
-2. App 扫描发现 2.0.3 / protocol=2；旧 1.x 板子不能连接控制。CAN 面板显示 stage、原始坐标、反馈年龄、发送失败和接收丢帧。
+1. 开机 OLED 显示约 6 秒：`FW 2.0.4`、热点名、`PW change-me`、`192.168.4.1`；信息来自实际配置，期间 UDP/CAN 正常运行。开机页完整显示 6 秒，运动、寻限位或故障不会提前切页；仅延后状态显示，不延后控制和保护。串口输出 oled startup elapsed=... ms 可核对实际展示时间。运行页显示版本与 OFF/RUN/READY/WAIT、可信 P/T 坐标、`C:OK/LOST` 与 `L:OK/LOST`。C 表示电机反馈在 300ms 内且无 CAN 故障；L 表示 1.5s 内收到有效控制/查询报文，发现请求、未知指令和任意 echo 不算控制连接。反馈失效后 P/T 不显示旧坐标；故障页优先显示原因及 P（无效为`--`）。寻限位显示 CAL 1/2/WAIT，取消观察后内部校准继续时显示 CAL CONTINUES；故障显示 CAN ERROR、POSITION LOST、CTRL TIMEOUT、MOVE TIMEOUT 或 CAL TIMEOUT。OLED 使用英文短词以适配 72×40 屏幕。
+2. App 扫描发现 2.0.4 / protocol=2；旧 1.x 板子不能连接控制。CAN 面板显示 stage、原始坐标、反馈年龄、发送失败和接收丢帧。
 3. 新镜头、重新连接和换镜头后运行一次自动寻限位，观察阶段1/2到阶段3，坐标0～4096；不能把阶段1/2的 INT32_MAX 哨兵当位置。App 不持久化行程/限位，不下发 HOME 或 SET_LIMITS；仅保存方向和距离坐标表。
 4. 用最大速度16～64、容差4，从两个方向接近机械标记，核对重复到位、齿轮回差和实际停止误差，再按相机实焦记录至少五点距离标定。重新寻限位保留距离表；安装条件改变则长按重置。
 5. 普通运动中关闭 App/断开 Wi-Fi，应在1秒通信超时后归零；拔掉 CAN 反馈，应在300ms过期后停止普通输出。恢复后用新命令重新取得控制。

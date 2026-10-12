@@ -5,6 +5,9 @@
 #include "freertos/semphr.h"
 #include <stdint.h>
 #define ESP_OK 0
+#define ESP_ERR_INVALID_STATE 0x103
+#define ESP_ERR_TIMEOUT 0x107
+using esp_err_t=int;
 #define TWAI_MODE_NORMAL 0
 #define TWAI_STATE_RUNNING 1
 #define TWAI_STATE_BUS_OFF 2
@@ -16,7 +19,11 @@ struct twai_filter_config_t { int mask; };
 #define TWAI_GENERAL_CONFIG_DEFAULT(tx,rx,mode) {5,5}
 #define TWAI_TIMING_CONFIG_1MBITS() {1000000}
 #define TWAI_FILTER_CONFIG_ACCEPT_ALL() {0}
-struct twai_status_info_t { int state=1; unsigned msgs_to_tx=0; uint32_t rx_missed_count=0; };
+struct twai_status_info_t {
+  int state=1; unsigned msgs_to_tx=0;
+  uint32_t rx_missed_count=0,tx_error_counter=0,rx_error_counter=0,tx_failed_count=0;
+  uint32_t rx_overrun_count=0,bus_error_count=0,arb_lost_count=0;
+};
 struct twai_message_t { uint32_t identifier=0; bool extd=false,rtr=false; uint8_t data_length_code=0,data[8]{}; };
 inline std::vector<twai_message_t> transmitted;
 inline bool failTx=false;

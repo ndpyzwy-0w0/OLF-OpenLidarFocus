@@ -5,7 +5,7 @@
 // Reported in discovery; firmware releases are independent of App versions.
 static const uint8_t kFwMajor = 2;
 static const uint8_t kFwMinor = 0;
-static const uint8_t kFwPatch = 3;
+static const uint8_t kFwPatch = 4;
 
 // Identity of this board, derived from the AP interface MAC. Call after
 // WiFi.mode(WIFI_AP) and before starting the AP, because deviceId() is the SSID.

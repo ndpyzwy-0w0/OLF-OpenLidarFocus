@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <algorithm>
+#include <cstdlib>
 #include <limits.h>
 #include <cstring>
 #include "driver/twai.h"
@@ -27,9 +28,13 @@ static bool watchdog = false, calibrating = false, calSeen = false, calPending =
 static bool txUrgent = false;
 static int32_t origin = 0, target = 0, minLim = 0, maxLim = 4096;
 static int16_t applied = 0;
+static const int kDialAccelerationPerCycle = 8; // Dial units per 50ms, tune after mechanical testing.
 static uint16_t speed = 64, tolerance = 4, gain = 4;
 static uint8_t fault = 0;
 static uint32_t txFailures = 0, rxMissed = 0, lastControl = 0, lastTx = 0;
+static uint32_t lastDialAt = 0, previousPollAt = 0, maxPollGap = 0, maxPacketMs = 0;
+static esp_err_t lastTxError = ESP_OK;
+static const char *lastTxFailureAt = "none";
 static uint32_t started = 0, progressAt = 0, settledAt = 0, calStarted = 0;
 static int64_t calStartedUs = 0, lastSample = 0;
 static int32_t progressPosition = 0;
@@ -51,11 +56,15 @@ static uint16_t crc(const uint8_t *p, unsigned n, uint16_t v, uint16_t poly) {
 static bool waitTxIdle(uint32_t startedAt) {
   do {
     twai_status_info_t s{};
-    if (twai_get_status_info(&s) != ESP_OK || s.state != TWAI_STATE_RUNNING) return false;
+    esp_err_t err = twai_get_status_info(&s);
+    if (err != ESP_OK || s.state != TWAI_STATE_RUNNING) {
+      Guard g; lastTxError = err != ESP_OK ? err : ESP_ERR_INVALID_STATE;
+      lastTxFailureAt = "bus-state"; return false;
+    }
     if (!s.msgs_to_tx) return true;
     delay(1);
   } while (millis() - startedAt < 50);
-  return false;
+  Guard g; lastTxError = ESP_ERR_TIMEOUT; lastTxFailureAt = "tx-wait"; return false;
 }
 static bool sendPacket(const uint8_t *p, unsigned n) {
   if (!installed) return false;
@@ -66,10 +75,15 @@ static bool sendPacket(const uint8_t *p, unsigned n) {
     twai_message_t m{}; m.identifier = 0x503;
     m.data_length_code = std::min(n, 8u);
     memcpy(m.data, p, m.data_length_code);
-    if (twai_transmit(&m, 0) != ESP_OK) { Guard g; ++txFailures; return false; }
+    esp_err_t err = twai_transmit(&m, 0);
+    if (err != ESP_OK) {
+      Guard g; ++txFailures; lastTxError=err; lastTxFailureAt="transmit"; return false;
+    }
     p += m.data_length_code; n -= m.data_length_code;
   }
-  if (waitTxIdle(startedAt)) return true;
+  if (waitTxIdle(startedAt)) {
+    Guard g; maxPacketMs=std::max<uint32_t>(maxPacketMs,millis()-startedAt); return true;
+  }
   Guard g; ++txFailures; return false;
 }
 static bool sendDial(int16_t value) {
@@ -77,7 +91,14 @@ static bool sendDial(int16_t value) {
   p[15] = (uint8_t)value; p[16] = (uint8_t)((uint16_t)value>>8);
   uint16_t c = crc(p,17,0x3692,0x8408); p[17]=c; p[18]=c>>8;
   if (!sendPacket(p,sizeof(p))) return false;
-  Guard g; applied=value; return true;
+  Guard g; applied=value; lastDialAt=millis(); return true;
+}
+// Only acceleration is limited. STOP/feedback loss/arrival still output zero immediately.
+static int16_t smoothDial(int16_t desired) {
+  if (!desired || (desired>0 && applied<0) || (desired<0 && applied>0)) return 0;
+  const int step=std::min<uint32_t>(millis()-lastDialAt,50)*kDialAccelerationPerCycle/50;
+  const int magnitude=std::min(std::abs((int)desired),std::abs((int)applied)+step);
+  return desired<0 ? -magnitude : magnitude;
 }
 static bool fresh() {
   return installed && sampleUs > 0 && esp_timer_get_time()-sampleUs <= 300000;
@@ -122,9 +143,10 @@ void motorBegin() {
   installed=twai_driver_install(&g,&t,&f)==ESP_OK;
   if (installed && twai_start()!=ESP_OK) { twai_driver_uninstall(); installed=false; }
   if (!installed) { fault=1; Serial.println("FM03 CAN init failed"); return; }
-  xTaskCreate(rxTask,"fm03_rx",4096,nullptr,4,nullptr);
-  xTaskCreate(controlTask,"fm03_control",4096,nullptr,3,nullptr);
-  Serial.println("FM03 CAN 1Mbps TX4 RX5; OLED unchanged");
+  // Wi-Fi/lwIP run on core 0; keep CAN on core 1 above the UDP/OLED loop.
+  xTaskCreatePinnedToCore(rxTask,"fm03_rx",4096,nullptr,4,nullptr,1);
+  xTaskCreatePinnedToCore(controlTask,"fm03_control",4096,nullptr,3,nullptr,1);
+  Serial.println("FM03 CAN 1Mbps TX4 RX5; RX/control core=1; ramp=8/50ms");
 }
 void motorPoll() {
   Guard g;
@@ -138,6 +160,8 @@ void motorPoll() {
     origin=0; minLim=0; maxLim=4096; cal.valid=false;
   }
   const uint32_t now=millis();
+  if (previousPollAt) maxPollGap=std::max(maxPollGap,now-previousPollAt);
+  previousPollAt=now;
   twai_status_info_t s{};
   bool bus=installed && twai_get_status_info(&s)==ESP_OK && s.state==TWAI_STATE_RUNNING;
   if (!bus || s.rx_missed_count!=rxMissed) {
@@ -191,7 +215,7 @@ void motorPoll() {
   g.unlock();
   // 归零流在禁用/失联时仍发送：DISARM 不能靠停止发送使电机停下。
   const bool requested = sendPacket(request,sizeof(request));
-  { Guard stateGuard; if (!enabled || !moving || !trusted()) value=0; }
+  { Guard stateGuard; value=enabled && moving && trusted() ? smoothDial(value) : 0; }
   if (!requested || !sendDial(value)) {
     { Guard stateGuard; fault=1; enabled=false; stopLocal(MOTOR_RESULT_REJECTED); }
     sendDial(0);
@@ -299,3 +323,27 @@ void motorCalibrationCancel() {
   cal.state=CAL_CANCELLED; cal.valid=false;
 }
 CalibrationSnapshot motorCalibrationSnapshot() { Guard g; return cal; }
+
+// Logging runs in the low-priority Arduino loop, never in the CAN tasks.
+void motorDiagnosticsPoll() {
+  static uint32_t lastLog=0;
+  const uint32_t now=millis();
+  if (!Serial || now-lastLog<1000) return;
+  lastLog=now;
+  twai_status_info_t s{};
+  const esp_err_t status=twai_get_status_info(&s);
+  Guard g;
+  const uint32_t gap=maxPollGap, packet=maxPacketMs, failures=txFailures;
+  const esp_err_t error=lastTxError;
+  const char *where=lastTxFailureAt;
+  const uint8_t currentFault=fault;
+  const int16_t value=applied;
+  maxPollGap=maxPacketMs=0;
+  g.unlock();
+  Serial.printf("CAN diag status=%d bus=%d fault=%u value=%d TEC=%lu REC=%lu tx_fail=%lu hw_tx_fail=%lu rx_miss=%lu rx_overrun=%lu bus_err=%lu arb_lost=%lu gap_ms=%lu packet_ms=%lu last_err=%d at=%s\n",
+    (int)status,(int)s.state,currentFault,value,(unsigned long)s.tx_error_counter,
+    (unsigned long)s.rx_error_counter,(unsigned long)failures,(unsigned long)s.tx_failed_count,
+    (unsigned long)s.rx_missed_count,(unsigned long)s.rx_overrun_count,
+    (unsigned long)s.bus_error_count,(unsigned long)s.arb_lost_count,
+    (unsigned long)gap,(unsigned long)packet,(int)error,where);
+}
