@@ -688,7 +688,13 @@ void main() {
         ),
       );
       final core = FakeCore(
-        const FfState(connected: true, wheelReady: true, slider: .5),
+        const FfState(
+          connected: true,
+          wheelReady: true,
+          slider: .5,
+          wheelA: 2048,
+          wheelB: 3686,
+        ),
       );
       await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
       await tester.pumpAndSettle();
@@ -697,6 +703,10 @@ void main() {
       expect(core.calls, isEmpty, reason: '切换控件不能发送目标或重新寻限位');
       expect(find.byKey(const ValueKey('focus-wheel')), findsNothing);
       final slider = find.byKey(const ValueKey('focus-slider'));
+      expect(find.text('A 50.0%'), findsOneWidget);
+      expect(find.text('B 90.0%'), findsOneWidget);
+      expect(find.byKey(const ValueKey('slider-marker-A')), findsOneWidget);
+      expect(find.byKey(const ValueKey('slider-marker-B')), findsOneWidget);
       final gesture = await tester.startGesture(tester.getCenter(slider));
       await gesture.moveBy(const Offset(45, 0));
       expect(core.countOf('setSlider'), greaterThan(0), reason: '拖动中发送，不等抬手');
@@ -1017,7 +1027,7 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetPhysicalSize);
-    final core = FakeCore(const FfState());
+    final core = FakeCore(const FfState(wheelA: 4096, wheelB: 4094));
     for (final size in [const Size(375, 667), const Size(667, 375)]) {
       tester.view.physicalSize = size;
       await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
@@ -1027,6 +1037,8 @@ void main() {
       await tester.tap(find.text('滑块'));
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('focus-slider')), findsOneWidget);
+      expect(find.text('A 100.0%'), findsOneWidget);
+      expect(find.text('B 100.0%'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.tap(find.text('手轮'));
       await tester.pumpAndSettle();

@@ -329,36 +329,70 @@ class _HandwheelPageState extends State<HandwheelPage>
             '${(value * 100).toStringAsFixed(1)}%',
             style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w300),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 4),
           SliderTheme(
             data: SliderTheme.of(context).copyWith(
               trackHeight: 12,
               thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 16),
               overlayShape: const RoundSliderOverlayShape(overlayRadius: 24),
             ),
-            child: Slider(
-              key: const ValueKey('focus-slider'),
-              value: value,
-              secondaryTrackValue: _s.positionTrusted
-                  ? (_s.pos / 4096).clamp(0.0, 1.0)
-                  : null,
-              semanticFormatterCallback: (v) =>
-                  '目标焦点 ${(v * 100).toStringAsFixed(1)}%',
-              onChangeStart: _s.wheelReady ? (_) => _sliderTicks.reset() : null,
-              onChanged: _s.wheelReady
-                  ? (v) {
-                      _sliderTicks.move(
-                        v - (_sliderDrag ?? _s.slider),
-                        _hapticStyle,
-                        _haptics,
-                      );
-                      setState(() => _sliderDrag = v);
-                      unawaited(widget.core.setSlider(v));
-                    }
-                  : null,
-              onChangeEnd: _s.wheelReady
-                  ? (_) => setState(() => _sliderDrag = null)
-                  : null,
+            child: LayoutBuilder(
+              builder: (context, box) => SizedBox(
+                height: 72,
+                child: Stack(
+                  children: [
+                    Positioned(
+                      top: 12,
+                      left: 0,
+                      right: 0,
+                      child: Slider(
+                        key: const ValueKey('focus-slider'),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 8,
+                        ),
+                        value: value,
+                        secondaryTrackValue: _s.positionTrusted
+                            ? (_s.pos / 4096).clamp(0.0, 1.0)
+                            : null,
+                        semanticFormatterCallback: (v) =>
+                            '目标焦点 ${(v * 100).toStringAsFixed(1)}%',
+                        onChangeStart: _s.wheelReady
+                            ? (_) => _sliderTicks.reset()
+                            : null,
+                        onChanged: _s.wheelReady
+                            ? (v) {
+                                _sliderTicks.move(
+                                  v - (_sliderDrag ?? _s.slider),
+                                  _hapticStyle,
+                                  _haptics,
+                                );
+                                setState(() => _sliderDrag = v);
+                                unawaited(widget.core.setSlider(v));
+                              }
+                            : null,
+                        onChangeEnd: _s.wheelReady
+                            ? (_) => setState(() => _sliderDrag = null)
+                            : null,
+                      ),
+                    ),
+                    if (_s.wheelA != null)
+                      _sliderMarker(
+                        'A',
+                        _s.wheelA!,
+                        const Color(0xFFFFBF69),
+                        box.maxWidth,
+                      ),
+                    if (_s.wheelB != null)
+                      _sliderMarker(
+                        'B',
+                        _s.wheelB!,
+                        const Color(0xFF79B8FF),
+                        box.maxWidth,
+                      ),
+                  ],
+                ),
+              ),
             ),
           ),
           const Padding(
@@ -368,12 +402,61 @@ class _HandwheelPageState extends State<HandwheelPage>
               children: [Text('0%'), Text('100%')],
             ),
           ),
-          const SizedBox(height: 12),
+          Wrap(
+            spacing: 16,
+            children: [
+              Text(
+                _s.wheelA == null
+                    ? 'A 未设置'
+                    : 'A ${(_s.wheelA! / 4096 * 100).toStringAsFixed(1)}%',
+                key: const ValueKey('slider-a-value'),
+                style: const TextStyle(color: Color(0xFFFFBF69)),
+              ),
+              Text(
+                _s.wheelB == null
+                    ? 'B 未设置'
+                    : 'B ${(_s.wheelB! / 4096 * 100).toStringAsFixed(1)}%',
+                key: const ValueKey('slider-b-value'),
+                style: const TextStyle(color: Color(0xFF79B8FF)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
           Text(
             _s.wheelReady ? '拖动直接跟焦 · 遵循 A/B 限位' : '等待解锁与电机就绪',
             style: const TextStyle(fontSize: 12, color: Colors.white60),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _sliderMarker(String name, int coordinate, Color color, double width) {
+    final fraction = (coordinate / 4096).clamp(0.0, 1.0);
+    final visual = Directionality.of(context) == TextDirection.rtl
+        ? 1 - fraction
+        : fraction;
+    final line = Container(width: 2, height: 18, color: color);
+    final label = Text(
+      name,
+      style: TextStyle(
+        color: color,
+        fontSize: 11,
+        height: 16 / 11,
+        fontWeight: FontWeight.bold,
+      ),
+    );
+    return Positioned(
+      left: 24 + (width - 48) * visual - 10,
+      top: name == 'A' ? 0 : 38,
+      width: 20,
+      child: IgnorePointer(
+        child: ExcludeSemantics(
+          child: Column(
+            key: ValueKey('slider-marker-$name'),
+            children: name == 'A' ? [label, line] : [line, label],
+          ),
+        ),
       ),
     );
   }
