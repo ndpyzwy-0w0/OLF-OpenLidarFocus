@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 import Flutter
+import ImageIO
 import UIKit
 import Vision
 
@@ -30,6 +31,7 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   private var target = CGPoint(x: 0.5, y: 0.5)
   private var trackFaces = false
   private var face: CGRect?
+  private var faceOrientation: CGImagePropertyOrientation = .up
 
   func available() -> Bool {
     AVCaptureDevice.default(.builtInLiDARDepthCamera, for: .video, position: .back) != nil
@@ -132,27 +134,47 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
 
   private func updateFace(_ pb: CVPixelBuffer) {
     let req = VNDetectFaceRectanglesRequest()
-    let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: .right, options: [:])
+    // Video/depth buffers are already rotated to portrait by their connections.
+    // Only rotate for the interface, then return detections to that buffer space.
+    let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: faceOrientation, options: [:])
     try? handler.perform([req])
     let obs = (req.results as? [VNFaceObservation]) ?? []
-    guard !obs.isEmpty else {
+    let rects = obs.map { Self.portraitFaceRect($0.boundingBox, orientation: faceOrientation) }
+    guard let rect = rects.min(by: { dist($0) < dist($1) }) else {
       face = nil
       return
     }
-    let chosen = obs.min(by: { a, b in
-      dist(a) < dist(b)
-    })!
-    let box = chosen.boundingBox
-    let rect = CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
     face = rect
     target = CGPoint(x: rect.midX, y: min(rect.midY + rect.height * 0.35, 0.98))
   }
 
-  private func dist(_ o: VNFaceObservation) -> CGFloat {
-    let u = o.boundingBox.midX
-    let v = 1 - o.boundingBox.midY
-    let du = u - target.x
-    let dv = v - target.y
+  static func visionOrientation(for quarterTurns: Int) -> CGImagePropertyOrientation {
+    switch quarterTurns {
+    case -1: return .left
+    case 1: return .right
+    case 2: return .down
+    default: return .up
+    }
+  }
+
+  static func portraitFaceRect(_ box: CGRect, orientation: CGImagePropertyOrientation) -> CGRect {
+    // Vision uses a bottom-left origin in the oriented image. Undo its rotation
+    // as well as the Y flip before selecting a face, sampling depth or drawing.
+    switch orientation {
+    case .left:
+      return CGRect(x: box.minY, y: box.minX, width: box.height, height: box.width)
+    case .right:
+      return CGRect(x: 1 - box.maxY, y: 1 - box.maxX, width: box.height, height: box.width)
+    case .down:
+      return CGRect(x: 1 - box.maxX, y: box.minY, width: box.width, height: box.height)
+    default:
+      return CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+    }
+  }
+
+  private func dist(_ rect: CGRect) -> CGFloat {
+    let du = rect.midX - target.x
+    let dv = rect.midY - target.y
     return du * du + dv * dv
   }
 
@@ -213,9 +235,13 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
       let scene = UIApplication.shared.connectedScenes
         .compactMap { $0 as? UIWindowScene }
         .first { $0.activationState == .foregroundActive }
-      map["preview_quarter_turns"] = LidarPreviewView.quarterTurns(
+      let quarterTurns = LidarPreviewView.quarterTurns(
         for: scene?.interfaceOrientation ?? .portrait
       )
+      self.camQueue.async {
+        self.faceOrientation = Self.visionOrientation(for: quarterTurns)
+      }
+      map["preview_quarter_turns"] = quarterTurns
       sink?(map)
     }
   }
