@@ -7,13 +7,14 @@ static const int PIN_CAN_RX = 5;
 void motorBegin();
 void motorPoll();
 void motorDiagnosticsPoll();
+void motorPersistParameters();
 void motorSetPos(int32_t coordinate);
 void motorJog(int32_t delta);
 void motorStop();
 void motorSetEnabled(bool on);
 bool motorSetHome();
 void motorSetLimits(int32_t lo, int32_t hi);
-// a 为最大拨轮速度 1..256；b 保留。不表示角速度。
+// a 为拨轮速度 1..256，同时缩放追赶响应（64为基准）并限幅；b 保留。不表示角速度。
 void motorSetSpeed(int32_t value, int32_t reserved);
 int32_t motorPos();
 int32_t motorTarget();

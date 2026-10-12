@@ -24,12 +24,7 @@ class _HandwheelPageState extends State<HandwheelPage>
   int? _arrivalSequence;
   double _duration = 2;
   final _parameterDrag = <int, double>{};
-  bool get _canTune =>
-      _s.linkAlive &&
-      _s.fm03?.online == true &&
-      !_s.moving &&
-      !_s.wheelPulling &&
-      !_calRunning;
+  bool get _canTune => _s.linkAlive && _s.fm03?.online == true && !_calRunning;
   bool get _calRunning =>
       !['idle', 'completed', 'cancelled', 'failed'].contains(_s.calStage);
   bool get _paused => _s.stopLatched && _s.strokeSteps > 0;
@@ -215,7 +210,16 @@ class _HandwheelPageState extends State<HandwheelPage>
                   : _calRunning
                   ? '正在寻限位'
                   : _s.wheelReady
-                  ? (_s.moving ? '正在拉焦' : '手轮就绪')
+                  ? (_s.wheelPulling
+                        ? 'A/B 定时拉焦'
+                        : _s.moving
+                        ? ((_s.target - _s.pos).abs() <=
+                                  (_s.fm03?.tolerance ?? 4)
+                              ? '正在确认到位'
+                              : '正在拉焦')
+                        : _s.result == kResultRejected
+                        ? '未到目标 · 已停止'
+                        : '手轮就绪')
                   : '先完成寻限位',
             ),
           ),
@@ -224,7 +228,9 @@ class _HandwheelPageState extends State<HandwheelPage>
       ),
       const SizedBox(height: 8),
       Text(
-        _s.positionTrusted ? '实际 ${_s.pos}  →  目标 ${_s.target}' : '实际位置 --',
+        _s.positionTrusted
+            ? '实际 ${_s.pos} → 目标 ${_s.target} · 误差 ${(_s.target - _s.pos).abs()} / ±${_s.fm03?.tolerance ?? 4}'
+            : '实际位置 --',
         style: const TextStyle(color: Colors.white70),
       ),
     ],
@@ -250,11 +256,11 @@ class _HandwheelPageState extends State<HandwheelPage>
     children: [
       if (showStatus) ...[_status(), const SizedBox(height: 12)],
       _motorParameter(
-        '电机速度上限',
+        '电机速度',
         kFm03MaxSpeed,
         _s.fm03?.maxSpeed ?? (_s.speedRevS * 4096).round(),
         256,
-        '1～256 拨轮协议值；越大追赶越快，不是 RPM。停稳后可调。',
+        '1～256 拨轮协议值，64 为原响应。新版固件调速同时影响小幅追赶和速度上限；可边转边调，不是 RPM。',
       ),
       Row(
         children: [
@@ -435,8 +441,19 @@ class _HandwheelPageState extends State<HandwheelPage>
               64,
               '默认 4；越小，小幅转动越跟手；越大，接近目标越柔和。响应慢可先试 2。',
             ),
+            _motorParameter(
+              '到位容差（±坐标）',
+              kFm03Tolerance,
+              _s.fm03?.tolerance ?? 4,
+              64,
+              '默认 ±4。差几个坐标仍追焦可试 ±8 或 ±12；范围越大越容易停稳，但到位精度越低。运动中可调。',
+            ),
+            Text(
+              '设备已回读：速度 ${_s.fm03?.maxSpeed ?? "--"} · 加速 ${_s.fm03?.acceleration ?? "--"} · 减速 ${_s.fm03?.gain ?? "--"} · 容差 ±${_s.fm03?.tolerance ?? "--"} · 拨轮输出 ${_s.fm03?.value ?? "--"}',
+              style: const TextStyle(fontSize: 12, color: Colors.white60),
+            ),
             const Text(
-              '电机参数保存在设备上，自动模式也会使用。A/B 点在重连、离开模式或重新寻限位后清除。',
+              '运动中调参需固件 2.1.1。参数以设备回读为准，停稳后保存到设备，自动模式也会使用。A/B 点在重连、离开模式或重新寻限位后清除。',
               style: TextStyle(fontSize: 12, color: Colors.white60),
             ),
             const SizedBox(height: 12),

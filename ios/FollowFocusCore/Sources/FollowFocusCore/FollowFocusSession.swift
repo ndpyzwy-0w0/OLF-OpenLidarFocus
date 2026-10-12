@@ -202,6 +202,7 @@ public final class FollowFocusSession {
   private var calQueries = Set<UInt8>()
   private var calPositionValid = false
   private var calPendingLensId: String?
+  private var pendingFm03: [Int32: (value: Int32, started: Date, sent: Date)] = [:]
   private var lastFm03At = Date.distantPast
   private var calHighestState: UInt8 = 0
 
@@ -543,16 +544,27 @@ public final class FollowFocusSession {
       let valid = key == kFm03MaxSpeed ? (1...256).contains(value) :
         ((key == kFm03Tolerance || key == kFm03Gain || key == kFm03Acceleration) && (1...64).contains(value))
       guard valid else { self.setMsg("FM03 参数超出范围"); return }
-      guard self.link.isOpen, !self.state.moving, self.wheelPull == nil else {
-        self.setMsg("请连接设备并等待电机停稳后调整参数"); return
+      guard self.link.isOpen else {
+        self.setMsg("请连接设备后调整参数"); return
       }
       if key == kFm03Acceleration, self.state.fm03?.acceleration == nil {
         self.setMsg("启动加速调节需要固件2.1.0或更新版本"); return
       }
+      let now = Date()
+      self.pendingFm03[key] = (value, now, now)
       self.link.setFm03(key, value)
-      self.markDirty()
+      self.setMsg("正在应用\(Self.fm03Name(key))：\(value)")
     }
   }
+  private static func fm03Name(_ key: Int32) -> String {
+    switch key {
+    case kFm03MaxSpeed: return "电机速度"
+    case kFm03Tolerance: return "到位容差"
+    case kFm03Gain: return "接近目标减速"
+    default: return "启动加速"
+    }
+  }
+
   public func queryFm03() { queue.async { self.link.queryFm03() } }
 
   // MARK: - 手机手轮（无需物距表或 LiDAR）
@@ -856,6 +868,7 @@ public final class FollowFocusSession {
   }
 
   private func invalidatePosition(_ message: String) {
+    pendingFm03.removeAll()
     following = false
     state.nearSteps = nil
     state.auto = false
@@ -1097,9 +1110,21 @@ public final class FollowFocusSession {
       }
     }
     if calPhase != .idle {
+      pendingFm03.removeAll()
       tickCalibration(now)
       emit()
       return
+    }
+    for (key, pending) in pendingFm03 {
+      if !link.isOpen {
+        pendingFm03.removeValue(forKey: key)
+      } else if now.timeIntervalSince(pending.started) >= 2 {
+        pendingFm03.removeValue(forKey: key)
+        setMsg("\(Self.fm03Name(key))未获设备确认；停稳后重试，运动中调参需固件2.1.1")
+      } else if now.timeIntervalSince(pending.sent) >= 0.25 {
+        link.setFm03(key, pending.value)
+        pendingFm03[key]?.sent = now
+      }
     }
     if distance != nil && now.timeIntervalSince(distanceAt) >= 0.5 { distance = nil; filter.reset() }
     if state.auto && distance == nil {
@@ -1377,6 +1402,14 @@ public final class FollowFocusSession {
     state.positionTrusted = s.positionTrusted
     state.pos = s.pos
     state.target = s.target
+    if s.fault == 3, !s.moving, !sliderDirty, s.target == lastSent {
+      // A completed failure is terminal; do not feed the old goal again.
+      takeManual("拉焦无有效进展")
+      lastSent = nil; sliderDirty = false
+      wheelPull = nil; state.wheelPulling = false; wheelArrivalTarget = nil
+      wheelCoordinate = Double(s.pos); state.slider = Double(s.pos) / 4096
+      setMsg("拉焦未完成：坐标未有效接近目标，已停止旧目标；可调整容差或速度后重新操作")
+    }
     if state.controlMode == .handwheel, !stopLatched, s.positionTrusted, s.canOk, !s.moving,
       let arrival=wheelArrivalTarget, s.target==arrival.coordinate,
       abs(Int(s.pos-arrival.coordinate)) <= (state.fm03?.tolerance ?? 4) {
@@ -1392,6 +1425,12 @@ public final class FollowFocusSession {
     lastFm03At = Date()
     state.fm03 = t
     state.speedRevS = Double(t.maxSpeed) / 4096
+    let values: [Int32: Int] = [kFm03MaxSpeed: t.maxSpeed, kFm03Tolerance: t.tolerance,
+      kFm03Gain: t.gain, kFm03Acceleration: t.acceleration ?? -1]
+    for (key, pending) in pendingFm03 where values[key] == Int(pending.value) {
+      pendingFm03.removeValue(forKey: key)
+      setMsg("已确认\(Self.fm03Name(key))：\(pending.value)")
+    }
     let ts = Self.clockLabel()
     state.fm03Log.insert("\(ts)  \(t.logLine())", at: 0)
     if state.fm03Log.count > 40 { state.fm03Log.removeLast(state.fm03Log.count - 40) }

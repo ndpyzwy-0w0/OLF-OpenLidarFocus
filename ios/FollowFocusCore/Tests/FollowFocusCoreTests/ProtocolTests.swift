@@ -143,12 +143,14 @@ final class ProtocolTests: XCTestCase {
     writeInt32LE(&raw, 4, 12)
     writeInt32LE(&raw, 8, 12)
     raw[12] = 1
+    raw[13] = 3
 
     guard let s = MotorStatusV2.decode(raw) else { return XCTFail("decode failed") }
     XCTAssertEqual(s.sequence, 9)
     XCTAssertTrue(s.positionTrusted)
     XCTAssertEqual(s.result, kResultCompleted)
     XCTAssertEqual(s.pos, 12)
+    XCTAssertEqual(s.fault, 3)
   }
 
   func testDiscoveryReply32ByteLayout() {

@@ -703,6 +703,11 @@ void main() {
       );
       gain.onChangeEnd!(2);
       expect(core.args['setFm03'], {'key': kFm03Gain, 'value': 2});
+      final tolerance = tester.widget<Slider>(
+        find.byKey(const ValueKey('wheel-parameter-2')),
+      );
+      tolerance.onChangeEnd!(8);
+      expect(core.args['setFm03'], {'key': kFm03Tolerance, 'value': 8});
       final curve = tester.widget<DropdownButton<String>>(
         find.byKey(const ValueKey('wheel-pull-curve')),
       );
@@ -721,11 +726,26 @@ void main() {
         tester
             .widget<Slider>(find.byKey(const ValueKey('wheel-parameter-1')))
             .onChanged,
-        isNull,
+        isNotNull,
       );
       expect(
         tester
             .widget<Slider>(find.byKey(const ValueKey('wheel-parameter-4')))
+            .onChanged,
+        isNotNull,
+      );
+      core.push(
+        const FfState(
+          connected: true,
+          linkAlive: true,
+          calStage: 'seek_negative',
+          fm03: fm03,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Slider>(find.byKey(const ValueKey('wheel-parameter-2')))
             .onChanged,
         isNull,
       );
@@ -788,6 +808,41 @@ void main() {
       core.push(const FfState(wheelArrival: 'A', wheelArrivalSequence: 5));
       await tester.pumpAndSettle();
       expect(haptics, hasLength(1));
+    },
+  );
+
+  testWidgets(
+    'wheel distinguishes settling from a failed goal with small residual error',
+    (tester) async {
+      final core = FakeCore(
+        const FfState(
+          connected: true,
+          linkAlive: true,
+          wheelReady: true,
+          positionTrusted: true,
+          moving: true,
+          pos: 2000,
+          target: 2003,
+        ),
+      );
+      await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
+      await tester.pumpAndSettle();
+      expect(find.text('正在确认到位'), findsOneWidget);
+      expect(find.textContaining('误差 3 / ±4'), findsOneWidget);
+      core.push(
+        const FfState(
+          connected: true,
+          linkAlive: true,
+          wheelReady: true,
+          positionTrusted: true,
+          pos: 2000,
+          target: 2009,
+          result: kResultRejected,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('未到目标 · 已停止'), findsOneWidget);
+      expect(find.text('正在拉焦'), findsNothing);
     },
   );
 

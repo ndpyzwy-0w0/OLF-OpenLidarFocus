@@ -14,7 +14,7 @@ static void advance(int ms,int state,int32_t pos) {
 static void reset() {
   enabled=moving=watchdog=calibrating=calPending=calSeen=false;
   origin=0; minLim=0;maxLim=4096;target=0;cal={};fault=0;txFailures=0;
-  speed=64;tolerance=4;gain=4;acceleration=8;
+  speed=64;tolerance=4;gain=4;acceleration=8;parametersDirty=false;Preferences::writes=0;
   applied=0;lastDialAt=millis();previousPollAt=maxPollGap=maxPacketMs=0;
   lastTxError=ESP_OK;lastTxFailureAt="none";
   fakeBus={};failTx=false;txDelayUs=0;duringTxWait=nullptr;rxMissed=0;lastTx=0;txUrgent=false;transmitted.clear();
@@ -32,6 +32,29 @@ int main() {
   uint8_t packet[19];memcpy(packet,(end-3)->data,8);memcpy(packet+8,(end-2)->data,8);memcpy(packet+16,(end-1)->data,3);
   assert(crc(packet,17,0x3692,0x8408)==(packet[17]|(packet[18]<<8)));
   advance(500,3,2200);assert(!motorMoving() && applied==0 && result==MOTOR_RESULT_COMPLETED);
+  // Arrival is tolerant and duplicate heartbeats do not re-arm a completed move.
+  reset();motorSetPos(2010);advance(500,3,2008);
+  assert(!moving && target==2010 && result==MOTOR_RESULT_COMPLETED && applied==0);
+  for (int i=0;i<12;++i) {
+    motorNoteControlPacket(false);motorSetPos(2010);advance(50,3,2007);
+    assert(!moving && applied==0 && result==MOTOR_RESULT_COMPLETED);
+  }
+  reset();motorSetPos(2004);assert(!moving && target==2004 && result==MOTOR_RESULT_COMPLETED);
+  motorSetPos(2009);advance(50,3,2000);assert(moving && applied>0);
+  motorFm03Set(2,12);assert(tolerance==12);advance(500,3,2000);
+  assert(!moving && applied==0 && target==2009 && result==MOTOR_RESULT_COMPLETED);
+  // Tiny feedback oscillation is not useful progress and cannot keep a goal alive.
+  reset();motorSetPos(2009);
+  for (int i=0;i<44;++i) { advance(50,3,2000+i%3);motorSetPos(2009); }
+  assert(!moving && applied==0 && fault==3 && target==2009);
+  motorSetPos(2200);advance(50,3,2000);assert(moving && fault==0);
+  // Speed scales small-error response, not only a ceiling that is never reached.
+  for (int v : {32,64,128}) {
+    reset();motorFm03Set(1,v);motorFm03Set(4,64);motorSetPos(2100);advance(50,3,2000);
+    assert(applied==(100*v+255)/256);
+    motorSetPos(4096);advance(150,3,2000);assert(applied==v);
+    motorFm03Set(1,16);advance(50,3,2000);assert(applied==16);
+  }
   // Large target changes ramp up; reversing sends a full zero cycle first.
   reset();motorSetPos(4096);
   for(int expected=8;expected<=64;expected+=8) {
@@ -43,10 +66,14 @@ int main() {
   reset();motorFm03Set(4,32);assert(acceleration==32);
   motorFm03Set(4,0);motorFm03Set(4,65);assert(acceleration==32);
   motorSetPos(4096);advance(50,3,2000);assert(applied==32);
-  motorFm03Set(4,8);assert(acceleration==32); // Cannot configure in motion.
+  motorFm03Set(4,16);assert(acceleration==16 && parametersDirty);
+  motorPersistParameters();assert(Preferences::writes==0); // No flash writes in motion.
+  advance(50,3,2000);assert(applied==48);
   advance(50,3,2000);assert(applied==64);
   motorSetPos(0);advance(50,3,2000);assert(applied==0);
-  advance(50,3,2000);assert(applied==-32);
+  advance(50,3,2000);assert(applied==-16);
+  motorStop();motorPoll();motorPersistParameters();
+  assert(!parametersDirty && Preferences::writes==4);
   reset();motorFm03Set(4,1);txDelayUs=1000;motorSetPos(4096);
   advance(50,3,2000);assert(applied==1);
   advance(50,3,2000);assert(applied==2); // Slowest ramp must not stall on CAN overhead.
@@ -75,6 +102,7 @@ int main() {
   assert(motorCalibrationStart(8,60,6400)==CAL_BAD_PARAMETER);
   reset();assert(motorCalibrationStart(7,0,0)==CAL_OK);advance(50,0,0);
   assert(calibrating && calPending==false);
+  motorFm03Set(2,32);assert(tolerance==4);
   const auto n=transmitted.size();assert(motorCalibrationStart(7,0,0)==CAL_OK);
   assert(transmitted.size()==n); // 重复 UDP START 不重发 CAN 标定。
   motorSetPos(100);assert(result==MOTOR_RESULT_REJECTED);
@@ -89,6 +117,13 @@ int main() {
   };
   advance(50,3,2000);
   assert(!waitingUdp.sent.empty() && enabled && txFailures==0);
+  // Live settings received while waiting for CAN must affect the next dial frame.
+  reset();motorSetPos(2500);advance(150,3,2000);assert(applied==24);
+  txDelayUs=1000;duringTxWait=[] { motorFm03Set(1,4); };
+  advance(50,3,2000);assert(applied==4);
+  reset();motorSetPos(2010);txDelayUs=1000;
+  duringTxWait=[] { motorFm03Set(2,12); };
+  advance(50,3,2000);assert(applied==0);
   // STOP 在请求发完前到达，后面的速度帧必须归零，不能再发旧的非零速度。
   reset();motorSetPos(2500);txDelayUs=1000;
   duringTxWait=[] { motorStop(); };
@@ -135,12 +170,12 @@ int main() {
   fakeUs=1000000;reset();protocolBegin(&u);
 
   oledBegin("change-me", "192.168.4.1");
-  assert(u8g2.lines[0]=="FW 2.1.0" && u8g2.lines[1]==deviceId());
+  assert(u8g2.lines[0]=="FW 2.1.1" && u8g2.lines[1]==deviceId());
   assert(u8g2.lines[2]=="PW change-me" && u8g2.lines[3]=="192.168.4.1");
   const auto bootFrames=u8g2.frames;
   advance(5900,3,2000);oledPoll();assert(u8g2.frames==bootFrames);
   advance(100,3,2000);handle(in,{},4210);oledPoll();
-  assert(u8g2.lines[0]=="V2.1.0 READY" && u8g2.lines[1]=="P 2000");
+  assert(u8g2.lines[0]=="V2.1.1 READY" && u8g2.lines[1]=="P 2000");
   assert(u8g2.lines[2]=="T 2000" && u8g2.lines[3]=="C:OK L:OK");
   fakeUs+=350000;motorPoll();oledPoll();
   assert(u8g2.lines[1]=="NO FEEDBACK" && u8g2.lines[2]=="P --");
@@ -152,12 +187,12 @@ int main() {
   fault=4;advance(250,3,2000);oledPoll();assert(u8g2.lines[1]=="CTRL TIMEOUT");
   reset();assert(motorCalibrationStart(10,0,0)==CAL_OK);
   advance(250,1,INT32_MAX);oledPoll();
-  assert(u8g2.lines[0]=="V2.1.0 CAL" && u8g2.lines[1]=="CAL 1");
+  assert(u8g2.lines[0]=="V2.1.1 CAL" && u8g2.lines[1]=="CAL 1");
   advance(250,2,INT32_MAX);oledPoll();assert(u8g2.lines[1]=="CAL 2");
   motorCalibrationCancel();advance(250,2,INT32_MAX);oledPoll();
   assert(u8g2.lines[2]=="CAL CONTINUES");
   cal.error=CAL_TIMEOUT;advance(250,2,INT32_MAX);oledPoll();
-  assert(u8g2.lines[0]=="V2.1.0 ERR" && u8g2.lines[1]=="CAL TIMEOUT");
+  assert(u8g2.lines[0]=="V2.1.1 ERR" && u8g2.lines[1]=="CAL TIMEOUT");
   // Movement, faults and calibration must not erase startup credentials early.
   for (int scenario=0; scenario<3; ++scenario) {
     reset();oledBegin("change-me", "192.168.4.1");
@@ -167,11 +202,11 @@ int main() {
     if (scenario==2) assert(motorCalibrationStart(11,0,0)==CAL_OK);
     const auto beforePoll=fakeUs;
     oledPoll();assert(fakeUs==beforePoll); // No blocking delay in the 6s display.
-    assert(u8g2.lines[0]=="FW 2.1.0" && u8g2.lines[2]=="PW change-me");
+    assert(u8g2.lines[0]=="FW 2.1.1" && u8g2.lines[2]=="PW change-me");
     handle(in,{},4210);assert(protocolLinkAlive()); // UDP remains usable.
     fakeUs+=5999000;oledPoll();assert(u8g2.frames==startupFrames);
     fakeUs+=1000;oledPoll();assert(u8g2.frames==startupFrames+1);
-    assert(u8g2.lines[0].find("V2.1.0 ")==0);
+    assert(u8g2.lines[0].find("V2.1.1 ")==0);
   }
   puts("PASS: CAN/UDP control, timeouts, OLED boot credentials, live link, stale position, calibration, errors, 72x40 layout");
 }

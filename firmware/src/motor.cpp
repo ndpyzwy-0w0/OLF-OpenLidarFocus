@@ -25,7 +25,7 @@ static int64_t sampleUs = 0;
 static uint32_t feedbackEpoch = 0, moveEpoch = 0;
 static bool installed = false, enabled = false, moving = false, limited = false;
 static bool watchdog = false, calibrating = false, calSeen = false, calPending = false;
-static bool txUrgent = false;
+static bool txUrgent = false, parametersDirty = false;
 static int32_t origin = 0, target = 0, minLim = 0, maxLim = 4096;
 static int16_t applied = 0;
 static uint16_t acceleration = 8; // Dial units per 50ms; persisted and adjustable.
@@ -107,9 +107,23 @@ static bool fresh() {
 }
 static bool trusted() { return fresh() && stage==3 && rawPosition>=0 && rawPosition<=4096 && !calibrating; }
 static int32_t position() { return lastGoodRaw-origin; }
+// Read the latest goal and live parameters under Guard immediately before TX.
+static int16_t desiredDial() {
+  if (!enabled || !moving || !trusted()) return 0;
+  const int64_t error=(int64_t)target-position(), magnitude=std::abs(error);
+  if (magnitude<=tolerance) return 0;
+  // speed=64 preserves the original response; other values scale both gain and ceiling.
+  const int64_t divisor=(int64_t)gain*64;
+  const int64_t v=std::max((int64_t)1,std::min((int64_t)speed,(magnitude*speed+divisor-1)/divisor));
+  return error<0 ? -v : v;
+}
 static void stopLocal(MotorCommandResult r) {
   txUrgent = txUrgent || moving;
-  moving=false; watchdog=false; target=position(); settledAt=0; result=r;
+  moving=false; watchdog=false;
+  // Keep a failed goal for diagnostics and idempotence; a heartbeat must not
+  // silently restart a movement that hit the no-progress/total timeout.
+  if (r!=MOTOR_RESULT_REJECTED) target=position();
+  settledAt=0; result=r;
 }
 static void save() {
   Preferences p; if (!p.begin("fm03",false)) return;
@@ -149,7 +163,7 @@ void motorBegin() {
   // Wi-Fi/lwIP run on core 0; keep CAN on core 1 above the UDP/OLED loop.
   xTaskCreatePinnedToCore(rxTask,"fm03_rx",4096,nullptr,4,nullptr,1);
   xTaskCreatePinnedToCore(controlTask,"fm03_control",4096,nullptr,3,nullptr,1);
-  Serial.println("FM03 CAN 1Mbps TX4 RX5; RX/control core=1; ramp=8/50ms");
+  Serial.printf("FM03 CAN 1Mbps TX4 RX5; RX/control core=1; ramp=%u/50ms\n",acceleration);
 }
 void motorPoll() {
   Guard g;
@@ -203,22 +217,22 @@ void motorPoll() {
     const int64_t magnitude=error<0 ? -error : error;
     if (sampleUs!=lastSample) {
       lastSample=sampleUs;
-      if (position()!=progressPosition) { progressPosition=position(); progressAt=now; }
+      // Progress must reduce error by more than feedback jitter. One-unit
+      // oscillation near the goal must not postpone the stall timeout forever.
+      if (magnitude+std::min<uint16_t>(tolerance,4)<std::abs((int64_t)target-progressPosition)) {
+        progressPosition=position(); progressAt=now;
+      }
       if (magnitude<=tolerance) {
         if (!settledAt) settledAt=now;
         if (now-settledAt>=400) { moving=false; result=limited ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_COMPLETED; }
       } else settledAt=0;
-    }
-    if (moving && magnitude>tolerance) {
-      int64_t v=std::max((int64_t)1,std::min((int64_t)speed,(magnitude+gain-1)/gain));
-      value=error<0 ? -v : v;
     }
   }
   // CAN 等待不能持有状态锁：UDP/OLED 读取和 STOP/ENABLE 必须随时能处理。
   g.unlock();
   // 归零流在禁用/失联时仍发送：DISARM 不能靠停止发送使电机停下。
   const bool requested = sendPacket(request,sizeof(request));
-  { Guard stateGuard; value=enabled && moving && trusted() ? smoothDial(value) : 0; }
+  { Guard stateGuard; value=smoothDial(desiredDial()); }
   if (!requested || !sendDial(value)) {
     { Guard stateGuard; fault=1; enabled=false; stopLocal(MOTOR_RESULT_REJECTED); }
     sendDial(0);
@@ -250,8 +264,16 @@ void motorSetPos(int32_t v) {
   int32_t lo=std::max(minLim,-origin), hi=std::min(maxLim,4096-origin);
   if (lo>hi) { result=MOTOR_RESULT_REJECTED; return; }
   int32_t next=std::max(lo,std::min(hi,v)); limited=next!=v;
-  if (moving && next==target) return; // 心跳不得重置无进展/总超时。
-  if (!moving) { started=progressAt=millis(); progressPosition=position(); }
+  if (next==target && (moving || result==MOTOR_RESULT_COMPLETED || result==MOTOR_RESULT_LIMITED ||
+      (result==MOTOR_RESULT_REJECTED && fault))) return;
+  // A new goal already inside tolerance does not arm another 400ms movement.
+  if (!moving && std::abs((int64_t)next-position())<=tolerance) {
+    target=next; fault=0; settledAt=0;
+    result=limited ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_COMPLETED;
+    return;
+  }
+  if (!moving) started=millis();
+  if (!moving || next!=target) { progressAt=millis(); progressPosition=position(); }
   target=next; moving=true; fault=0; settledAt=0;
   lastSample=0; moveEpoch=feedbackEpoch;
   result=limited ? MOTOR_RESULT_LIMITED : MOTOR_RESULT_ACCEPTED;
@@ -282,13 +304,21 @@ void motorSetLimits(int32_t lo,int32_t hi) {
 void motorSetSpeed(int32_t v,int32_t) { motorFm03Set(1,v); }
 void motorFm03Set(int32_t key,int32_t v) {
   Guard g;
-  if (moving || calibrating || (key==1 && (v<1 || v>256)) ||
+  if (calibrating || (key==1 && (v<1 || v>256)) ||
       ((key==2 || key==3 || key==4) && (v<1 || v>64)) || key<1 || key>4) {
     result=MOTOR_RESULT_REJECTED; return;
   }
   // 相同参数不重复写 flash，避免重复命令打断 CAN 收包。
   if ((key==1 && speed==v) || (key==2 && tolerance==v) || (key==3 && gain==v) || (key==4 && acceleration==v)) return;
-  if (key==1) speed=v; if (key==2) tolerance=v; if (key==3) gain=v; if (key==4) acceleration=v; save();
+  if (key==1) speed=v; if (key==2) tolerance=v; if (key==3) gain=v; if (key==4) acceleration=v;
+  parametersDirty=true;
+}
+// Called by the Arduino loop, never by the CAN task. Defer flash writes while
+// moving so live tuning cannot interrupt feedback or STOP handling.
+void motorPersistParameters() {
+  Guard g;
+  if (!parametersDirty || moving || calibrating) return;
+  save(); parametersDirty=false;
 }
 int32_t motorPos() { Guard g; return position(); }
 int32_t motorTarget() { Guard g; return target; }

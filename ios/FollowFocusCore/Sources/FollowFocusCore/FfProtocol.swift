@@ -232,6 +232,7 @@ public struct MotorStatus: Equatable {
 
 public struct MotorStatusV2: Equatable {
   public var status: MotorStatus
+  public var fault: UInt8
 
   public var sequence: UInt8 { status.sequence }
   public var pos: Int32 { status.pos }
@@ -244,8 +245,9 @@ public struct MotorStatusV2: Equatable {
   public var result: Int { status.result }
   public var positionTrusted: Bool { status.positionTrusted ?? false }
 
-  public init(status: MotorStatus) {
+  public init(status: MotorStatus, fault: UInt8 = 0) {
     self.status = status
+    self.fault = fault
   }
 
   public static func decode(_ bytes: [UInt8]) -> MotorStatusV2? {
@@ -264,7 +266,8 @@ public struct MotorStatusV2: Equatable {
         standby: flags & kFlagStandby != 0,
         result: Int((flags & kFlagResultMask) >> kFlagResultShift),
         positionTrusted: bytes[12] != 0
-      )
+      ),
+      fault: bytes[13]
     )
   }
 

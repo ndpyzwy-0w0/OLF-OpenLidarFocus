@@ -162,6 +162,7 @@ private final class FakeFirmware {
       }
     case kFfSetPos:
       if _enabled.current {
+        motionFault=0
         let target = min(max(p.a,_limits.current.0),_limits.current.1)
         _target.set(target)
         if !holdMotion.current { _pos.set(target) }
@@ -169,7 +170,17 @@ private final class FakeFirmware {
     case kFfHome:
       _pos.set(0)
     case kFfFm03Set:
-      break
+      if !rejectsFm03 {
+        switch p.a {
+        case kFm03MaxSpeed: maxSpeed=UInt16(p.b)
+        case kFm03Tolerance: fm03Tolerance=UInt16(p.b)
+        case kFm03Gain: fm03Gain=UInt16(p.b)
+        case kFm03Acceleration: fm03Acceleration=UInt16(p.b)
+        default: break
+        }
+      }
+      reply(fm03Dump(), to: host, port: port)
+      return
     case kFfFm03Query:
       reply(fm03Dump(), to: host, port: port)
       return
@@ -180,7 +191,7 @@ private final class FakeFirmware {
     reply(status(sequence: p.sequence), to: host, port: port)
     if p.cmd==kFfQuery || p.cmd==kFfHome {
       var v=status(sequence:p.sequence);v[1]=kFfStatusV2
-      v.append(contentsOf:[invalidateCalResult ? 0 : 1,0,0,0]);reply(v,to:host,port:port)
+      v.append(contentsOf:[invalidateCalResult ? 0 : 1,motionFault,0,0]);reply(v,to:host,port:port)
     }
   }
 
@@ -193,7 +204,7 @@ private final class FakeFirmware {
     return FfPacket(
       cmd: kFfStatus,
       sequence: sequence,
-      flags: flags | (UInt8(kResultCompleted) << kFlagResultShift),
+      flags: flags | (UInt8(motionFault == 3 ? kResultRejected : kResultCompleted) << kFlagResultShift),
       a: _pos.current,
       b: _target.current
     ).encode()
@@ -216,12 +227,15 @@ private final class FakeFirmware {
 
   var supportsAcceleration = false
   var maxSpeed: UInt16 = 64
+  var fm03Tolerance: UInt16 = 4, fm03Gain: UInt16 = 4, fm03Acceleration: UInt16 = 8
+  var rejectsFm03 = false
+  var motionFault: UInt8 = 0
 
   private func fm03Dump() -> [UInt8] {
     var raw=[UInt8](repeating:0,count:26)
     raw[0]=kFfMagic;raw[1]=kFfFm03Dump;raw[2]=1;raw[3]=3
-    writeUInt16LE(&raw,6,maxSpeed);writeUInt16LE(&raw,8,4);writeUInt16LE(&raw,10,4)
-    if supportsAcceleration { raw += [8,0] }
+    writeUInt16LE(&raw,6,maxSpeed);writeUInt16LE(&raw,8,fm03Tolerance);writeUInt16LE(&raw,10,fm03Gain)
+    if supportsAcceleration { raw += [0,0];writeUInt16LE(&raw,26,fm03Acceleration) }
     return raw
   }
 
@@ -981,7 +995,7 @@ final class SessionTests: XCTestCase {
       "手轮目标必须随20ms控制周期发送，不能被60ms限流延后")
   }
 
-  func testWheelAccelerationRequiresSupportedFirmwareAndStoppedMotor() throws {
+  func testWheelAccelerationRequiresSupportedFirmwareAndTunesInMotion() throws {
     let h=try Harness();defer { h.stop() }
     prepareWheel(h)
     h.session.setFm03(kFm03Acceleration,32)
@@ -998,8 +1012,47 @@ final class SessionTests: XCTestCase {
     h.firmware.holdMotion.set(true);h.session.turnWheel(-0.1)
     XCTAssertTrue(waitUntil { h.latest.current?.moving==true })
     h.session.setFm03(kFm03Acceleration,16)
-    pump(0.1)
-    XCTAssertEqual(h.firmware.count(kFfFm03Set),before)
+    XCTAssertTrue(waitUntil { h.latest.current?.fm03?.acceleration==16 })
+    XCTAssertEqual(h.firmware.count(kFfFm03Set),before+1)
+    XCTAssertTrue(h.latest.current?.moving ?? false)
+    XCTAssertTrue(h.session.snapshot().msg.contains("已确认"))
+  }
+
+  func testFailedWheelGoalIsTerminalAndNextTurnStartsAtActualPosition() throws {
+    let h=try Harness();defer { h.stop() }
+    prepareWheel(h)
+    h.firmware.holdMotion.set(true);h.session.turnWheel(-0.1)
+    XCTAssertTrue(waitUntil { h.latest.current?.moving==true })
+    h.firmware.motionFault=3;h.firmware.holdMotion.set(false)
+    XCTAssertTrue(waitUntil { h.latest.current?.msg.contains("拉焦未完成")==true })
+    XCTAssertEqual(h.latest.current?.slider ?? 0,3789.0/4096,accuracy:1e-9)
+    let count=h.firmware.count(kFfSetPos)
+    pump(0.9)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),count,"失败目标不能被保活重启")
+    h.session.turnWheel(-0.01)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==3748 })
+  }
+
+  func testFm03TuningRetriesLossAndOnlyConfirmsDeviceReadback() throws {
+    let h=try Harness();defer { h.stop() }
+    prepareWheel(h)
+    h.firmware.holdMotion.set(true);h.session.turnWheel(-0.1)
+    XCTAssertTrue(waitUntil { h.latest.current?.moving==true })
+    h.firmware.dropFirstCommands=[kFfFm03Set]
+    h.session.setFm03(kFm03MaxSpeed,128)
+    XCTAssertTrue(waitUntil { h.latest.current?.fm03?.maxSpeed==128 })
+    XCTAssertGreaterThanOrEqual(h.firmware.count(kFfFm03Set),2)
+    XCTAssertTrue(h.session.snapshot().msg.contains("已确认电机速度：128"))
+    let count=h.firmware.count(kFfFm03Set)
+    pump(0.6)
+    XCTAssertEqual(h.firmware.count(kFfFm03Set),count,"确认后停止重试")
+    h.firmware.rejectsFm03=true
+    h.session.setFm03(kFm03Gain,2)
+    XCTAssertTrue(waitUntil(3) { h.latest.current?.msg.contains("未获设备确认")==true })
+    XCTAssertEqual(h.latest.current?.fm03?.gain,4,"不能用本地乐观值冒充设备已应用")
+    let rejected=h.firmware.count(kFfFm03Set)
+    pump(0.6)
+    XCTAssertEqual(h.firmware.count(kFfFm03Set),rejected,"超时后停止重试")
   }
 
   func testWheelCalibratesWithoutLensAndMapsRelativeTurns() throws {

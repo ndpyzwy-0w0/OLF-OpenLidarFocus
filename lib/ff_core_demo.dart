@@ -31,7 +31,7 @@ class FfCoreDemo extends FfCore {
   String _arrival = '';
   String _stage = 'idle';
   String _pullCurve = 'smooth';
-  int _gain = 4, _acceleration = 8;
+  int _gain = 4, _acceleration = 8, _tolerance = 4;
   int _pos = 1000;
   double _speed = 64 / 4096;
   double? _distance = 1.8;
@@ -149,6 +149,7 @@ class FfCoreDemo extends FfCore {
       case 'setFm03':
         if (a?['key'] == kFm03MaxSpeed) _speed = (a?['value'] as int) / 4096;
         if (a?['key'] == kFm03Gain) _gain = a?['value'] as int;
+        if (a?['key'] == kFm03Tolerance) _tolerance = a?['value'] as int;
         if (a?['key'] == kFm03Acceleration) _acceleration = a?['value'] as int;
         _log.add('demo FM03 key=${a?['key']} value=${a?['value']}');
       case 'queryFm03':
@@ -231,7 +232,7 @@ class FfCoreDemo extends FfCore {
   }
 
   FfState _build() => FfState(
-    appVersion: '2.3.0+demo',
+    appVersion: '2.3.1+demo',
     calSupported: true,
     calStage: _stage,
     calSafeSpan: _valid ? 4096 : 0,
@@ -309,7 +310,7 @@ class FfCoreDemo extends FfCore {
       stage: 3,
       value: 0,
       maxSpeed: (_speed * 4096).round(),
-      tolerance: 4,
+      tolerance: _tolerance,
       gain: _gain,
       acceleration: _acceleration,
       rawPosition: _pos,
