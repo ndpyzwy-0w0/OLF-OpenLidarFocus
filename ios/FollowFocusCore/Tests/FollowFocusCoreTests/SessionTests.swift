@@ -1071,6 +1071,50 @@ final class SessionTests: XCTestCase {
     XCTAssertEqual(h.firmware.count(kFfSetPos),count)
   }
 
+  func testWheelSliderUsesAbsolutePositionAndTakesOverTimedPull() throws {
+    let h=try Harness();defer { h.stop() }
+    prepareWheel(h)
+    h.session.setWheelPoint("A")
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelA==3789 })
+    h.session.setWheelSensitivity(0.25);h.session.setWheelReversed(true)
+    h.session.setSlider(0.5)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==2048 }, "滑块是绝对坐标，不受手轮旋转灵敏度/反转影响")
+    h.session.setWheelPoint("B")
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelB==2048 })
+    h.session.setWheelRange(true)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelRangeEnabled==true })
+    h.session.pullWheelTo("A",duration:2)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelPulling==true })
+    h.session.setSlider(0)
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelPulling==false && h.latest.current?.pos==2048 })
+    h.session.setSlider(1)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==3789 })
+    h.session.turnWheel(0.1)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==3687 }, "切回手轮从滑块目标继续")
+    h.session.stopPressed()
+    XCTAssertTrue(waitUntil { h.latest.current?.stopLatched==true && !h.firmware.enabled })
+    let count=h.firmware.count(kFfSetPos)
+    h.session.setSlider(0.6);h.session.setSlider(.nan);pump(0.2)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),count)
+    h.session.resumeControl()
+    XCTAssertTrue(waitUntil { h.latest.current?.wheelReady==true })
+    pump(0.3)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),count,"复位不恢复滑块旧目标")
+    h.session.setSlider(0.6)
+    XCTAssertTrue(waitUntil { h.latest.current?.pos==2458 })
+  }
+
+  func testWheelSliderRejectsInputWithoutReadyFeedback() throws {
+    let h=try Harness();defer { h.stop() }
+    h.session.setControlMode(.handwheel);h.session.connect();pump(0.2)
+    h.session.setSlider(0.2);pump(0.1)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),0)
+    h.session.startAutoCalibration()
+    XCTAssertTrue(waitUntil { h.latest.current?.calStage=="seek_negative" })
+    h.session.setSlider(0.6);pump(0.1)
+    XCTAssertEqual(h.firmware.count(kFfSetPos),0)
+  }
+
   func testWheelABLimitsAndArrivalRequireActualFeedback() throws {
     let h=try Harness();defer { h.stop() }
     prepareWheel(h)

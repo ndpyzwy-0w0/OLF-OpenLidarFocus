@@ -497,9 +497,15 @@ public final class FollowFocusSession {
 
   public func setSlider(_ v: Double) {
     queue.async {
+      guard v.isFinite else { return }
+      if self.state.controlMode == .handwheel {
+        guard self.wheelCanControl() else { return }
+        self.wheelPull = nil; self.state.wheelPulling = false
+        self.setWheelTarget(min(max(v, 0), 1) * 4096)
+        return
+      }
       guard self.calPhase == .idle, !self.stopLatched, self.calPositionValid, self.requireFreshPosition() else { return }
       self.takeManual("手动焦点")
-      guard v.isFinite else { return }
       self.state.slider = min(max(v, 0), 1)
       self.sliderDirty = true
       self.stopLatched = false

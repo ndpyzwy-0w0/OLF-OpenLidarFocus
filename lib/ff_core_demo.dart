@@ -131,11 +131,15 @@ class FfCoreDemo extends FfCore {
         }
       case 'setSlider':
         if (_valid && !_stopLatched) {
-          _pos = ((a?['value'] as double? ?? 0.5) * 4096).round().clamp(
+          final target = ((a?['value'] as double? ?? 0.5) * 4096).round().clamp(
             0,
             4096,
           );
-          _stopLatched = false;
+          if (_wheel) {
+            _wheelPosition(target);
+          } else {
+            _pos = target;
+          }
         }
       case 'setAuto':
         _auto =
@@ -232,7 +236,7 @@ class FfCoreDemo extends FfCore {
   }
 
   FfState _build() => FfState(
-    appVersion: '2.3.1+demo',
+    appVersion: '2.4.0+demo',
     calSupported: true,
     calStage: _stage,
     calSafeSpan: _valid ? 4096 : 0,

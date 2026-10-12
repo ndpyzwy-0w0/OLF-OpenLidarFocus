@@ -665,6 +665,171 @@ void main() {
   );
 
   testWidgets(
+    'focus input switches without moving and slider sends live targets with haptics',
+    (tester) async {
+      tester.view.physicalSize = const Size(375, 667);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final pulses = <Object?>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            pulses.add(call.arguments);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final core = FakeCore(
+        const FfState(connected: true, wheelReady: true, slider: .5),
+      );
+      await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('滑块'));
+      await tester.pumpAndSettle();
+      expect(core.calls, isEmpty, reason: '切换控件不能发送目标或重新寻限位');
+      expect(find.byKey(const ValueKey('focus-wheel')), findsNothing);
+      final slider = find.byKey(const ValueKey('focus-slider'));
+      final gesture = await tester.startGesture(tester.getCenter(slider));
+      await gesture.moveBy(const Offset(45, 0));
+      expect(core.countOf('setSlider'), greaterThan(0), reason: '拖动中发送，不等抬手');
+      expect(core.args['setSlider']!['value'] as double, greaterThan(.5));
+      await tester.pump();
+      expect(pulses, contains('HapticFeedbackType.selectionClick'));
+      await gesture.up();
+      final sent = core.countOf('setSlider');
+      await tester.tap(find.text('手轮'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('focus-wheel')), findsOneWidget);
+      expect(core.countOf('setSlider'), sent);
+      core.push(
+        const FfState(connected: true, stopLatched: true, strokeSteps: 4096),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('滑块'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Slider>(slider).onChanged, isNull);
+      await tester.drag(slider, const Offset(60, 0));
+      expect(core.countOf('setSlider'), sent);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'focus haptic presets change density and strength and can be disabled',
+    (tester) async {
+      final pulses = <Object?>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            pulses.add(call.arguments);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      for (final style in FocusHapticStyle.values) {
+        // A fresh gesture travels 1% of a circle: only the dense preset has a detent here.
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SizedBox.square(
+              dimension: 300,
+              child: WheelDial(
+                enabled: true,
+                haptics: true,
+                hapticStyle: style,
+                actual: .5,
+                target: .5,
+                label: '50%',
+                onTurn: (_) {},
+              ),
+            ),
+          ),
+        );
+        final wheel = find.byKey(const ValueKey('focus-wheel'));
+        final box = tester.getRect(wheel);
+        final radius = box.shortestSide * .4;
+        final gesture = await tester.startGesture(
+          box.center + Offset(radius, 0),
+        );
+        await gesture.moveTo(box.center + Offset(radius * .998, radius * .063));
+        await gesture.up();
+        await tester.pump();
+      }
+      expect(pulses, ['HapticFeedbackType.lightImpact']);
+      pulses.clear();
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox.square(
+            dimension: 300,
+            child: WheelDial(
+              enabled: true,
+              haptics: true,
+              hapticStyle: FocusHapticStyle.firm,
+              actual: .5,
+              target: .5,
+              label: '50%',
+              onTurn: (_) {},
+            ),
+          ),
+        ),
+      );
+      final center = tester.getCenter(
+        find.byKey(const ValueKey('focus-wheel')),
+      );
+      final strong = await tester.startGesture(center + const Offset(120, 0));
+      await strong.moveTo(center + const Offset(110, 45));
+      await strong.up();
+      await tester.pump();
+      expect(pulses, ['HapticFeedbackType.mediumImpact']);
+      pulses.clear();
+      final core = FakeCore(
+        const FfState(wheelReady: true, wheelArrivalSequence: 0),
+      );
+      await tester.pumpWidget(MaterialApp(home: HandwheelPage(core: core)));
+      await tester.pumpAndSettle();
+      await tapVisible(tester, find.text('手轮响应与设置'));
+      await tapVisible(
+        tester,
+        find.byKey(const ValueKey('focus-haptic-style')),
+      );
+      await tester.tap(find.text('密集轻触').last);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('120 格'), findsOneWidget);
+      await tapVisible(tester, find.text('触感反馈'));
+      core.push(const FfState(wheelReady: true, wheelArrivalSequence: 1));
+      await tester.pumpAndSettle();
+      final off = tester.getCenter(find.byKey(const ValueKey('focus-wheel')));
+      await tester.dragFrom(off, const Offset(0, -80));
+      await tester.pump();
+      expect(pulses, isEmpty);
+      await tester.tap(find.text('滑块'));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byKey(const ValueKey('focus-slider')),
+        const Offset(70, 0),
+      );
+      await tester.pump();
+      expect(pulses, isEmpty);
+    },
+  );
+
+  testWidgets(
     'wheel settings send speed, acceleration, gain and curve intents',
     (tester) async {
       const fm03 = FfFm03(
@@ -859,6 +1024,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('focus-wheel')), findsOneWidget);
       expect(tester.takeException(), isNull);
+      await tester.tap(find.text('滑块'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('focus-slider')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('手轮'));
+      await tester.pumpAndSettle();
     }
   });
 

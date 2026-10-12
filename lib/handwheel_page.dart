@@ -8,6 +8,48 @@ import 'package:flutter/services.dart';
 import 'device_page.dart';
 import 'ff_core.dart';
 
+enum FocusHapticStyle {
+  standard('标准刻度', '每圈／全行程 60 格，轻巧清楚', 60, 80),
+  dense('密集轻触', '每圈／全行程 120 格，细密轻触', 120, 35),
+  firm('清晰段落', '每圈／全行程 30 格，段落感更强', 30, 100);
+
+  final String label, description;
+  final int detents, intervalMs;
+  const FocusHapticStyle(
+    this.label,
+    this.description,
+    this.detents,
+    this.intervalMs,
+  );
+
+  Future<void> pulse() => switch (this) {
+    FocusHapticStyle.standard => HapticFeedback.selectionClick(),
+    FocusHapticStyle.dense => HapticFeedback.lightImpact(),
+    FocusHapticStyle.firm => HapticFeedback.mediumImpact(),
+  };
+}
+
+// Accumulate finger travel; never queue a burst of pulses after a fast drag.
+class _FocusTicks {
+  double _travel = 0;
+  DateTime _last = DateTime.fromMillisecondsSinceEpoch(0);
+  void reset() => _travel = 0;
+  void move(double fraction, FocusHapticStyle style, bool enabled) {
+    if (!enabled) {
+      reset();
+      return;
+    }
+    _travel += fraction.abs();
+    final now = DateTime.now();
+    if (_travel >= 1 / style.detents &&
+        now.difference(_last).inMilliseconds >= style.intervalMs) {
+      unawaited(style.pulse());
+      _last = now;
+      reset();
+    }
+  }
+}
+
 class HandwheelPage extends StatefulWidget {
   final FfCore core;
   const HandwheelPage({super.key, required this.core});
@@ -21,6 +63,10 @@ class _HandwheelPageState extends State<HandwheelPage>
   FfState _s = const FfState();
   StreamSubscription<FfState>? _sub;
   bool _haptics = true;
+  FocusHapticStyle _hapticStyle = FocusHapticStyle.standard;
+  bool _sliderMode = false;
+  double? _sliderDrag;
+  final _sliderTicks = _FocusTicks();
   int? _arrivalSequence;
   double _duration = 2;
   final _parameterDrag = <int, double>{};
@@ -41,7 +87,10 @@ class _HandwheelPageState extends State<HandwheelPage>
         unawaited(HapticFeedback.heavyImpact());
       }
       _arrivalSequence = s.wheelArrivalSequence;
-      setState(() => _s = s);
+      setState(() {
+        _s = s;
+        if (!s.wheelReady) _sliderDrag = null;
+      });
     });
   }
 
@@ -127,11 +176,18 @@ class _HandwheelPageState extends State<HandwheelPage>
               return Row(
                 children: [
                   Expanded(
-                    child: Center(
-                      child: SizedBox.square(
-                        dimension: math.min(box.maxHeight, 400),
-                        child: _dial(),
-                      ),
+                    child: Column(
+                      children: [
+                        _inputSelector(),
+                        Expanded(
+                          child: Center(
+                            child: SizedBox.square(
+                              dimension: math.min(box.maxHeight - 56, 400),
+                              child: _focusInput(),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(width: 20),
@@ -156,13 +212,15 @@ class _HandwheelPageState extends State<HandwheelPage>
                   children: [
                     _status(),
                     const SizedBox(height: 8),
+                    _inputSelector(),
+                    const SizedBox(height: 8),
                     Center(
                       child: SizedBox.square(
                         dimension: math.min(
                           box.maxWidth,
                           math.min(350, box.maxHeight * .52),
                         ),
-                        child: _dial(),
+                        child: _focusInput(),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -236,9 +294,94 @@ class _HandwheelPageState extends State<HandwheelPage>
     ],
   );
 
+  Widget _inputSelector() => SegmentedButton<bool>(
+    key: const ValueKey('focus-input-mode'),
+    segments: const [
+      ButtonSegment(
+        value: false,
+        icon: Icon(Icons.rotate_right),
+        label: Text('手轮'),
+      ),
+      ButtonSegment(
+        value: true,
+        icon: Icon(Icons.linear_scale),
+        label: Text('滑块'),
+      ),
+    ],
+    selected: {_sliderMode},
+    onSelectionChanged: (values) => setState(() {
+      _sliderMode = values.single;
+      _sliderDrag = null;
+      _sliderTicks.reset();
+    }),
+  );
+
+  Widget _focusInput() => _sliderMode ? _focusSlider() : _dial();
+
+  Widget _focusSlider() {
+    final value = (_sliderDrag ?? _s.slider).clamp(0.0, 1.0);
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('目标焦点', style: TextStyle(color: Colors.white60)),
+          Text(
+            '${(value * 100).toStringAsFixed(1)}%',
+            style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w300),
+          ),
+          const SizedBox(height: 16),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 12,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 16),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 24),
+            ),
+            child: Slider(
+              key: const ValueKey('focus-slider'),
+              value: value,
+              secondaryTrackValue: _s.positionTrusted
+                  ? (_s.pos / 4096).clamp(0.0, 1.0)
+                  : null,
+              semanticFormatterCallback: (v) =>
+                  '目标焦点 ${(v * 100).toStringAsFixed(1)}%',
+              onChangeStart: _s.wheelReady ? (_) => _sliderTicks.reset() : null,
+              onChanged: _s.wheelReady
+                  ? (v) {
+                      _sliderTicks.move(
+                        v - (_sliderDrag ?? _s.slider),
+                        _hapticStyle,
+                        _haptics,
+                      );
+                      setState(() => _sliderDrag = v);
+                      unawaited(widget.core.setSlider(v));
+                    }
+                  : null,
+              onChangeEnd: _s.wheelReady
+                  ? (_) => setState(() => _sliderDrag = null)
+                  : null,
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 24),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [Text('0%'), Text('100%')],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            _s.wheelReady ? '拖动直接跟焦 · 遵循 A/B 限位' : '等待解锁与电机就绪',
+            style: const TextStyle(fontSize: 12, color: Colors.white60),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _dial() => WheelDial(
     enabled: _s.wheelReady,
     haptics: _haptics,
+    hapticStyle: _hapticStyle,
     actual: _s.positionTrusted ? _s.pos / 4096 : null,
     target: _s.slider,
     a: _s.wheelA == null ? null : _s.wheelA! / 4096,
@@ -420,10 +563,35 @@ class _HandwheelPageState extends State<HandwheelPage>
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('触感反馈'),
-              subtitle: const Text('旋转刻度轻触感，实际到达端点时强触感'),
+              subtitle: const Text('手轮与滑块共用；实际到达端点时强触感'),
               value: _haptics,
               onChanged: (v) => setState(() => _haptics = v),
             ),
+            DropdownButtonFormField<FocusHapticStyle>(
+              key: const ValueKey('focus-haptic-style'),
+              initialValue: _hapticStyle,
+              decoration: const InputDecoration(labelText: '触感效果'),
+              items: [
+                for (final style in FocusHapticStyle.values)
+                  DropdownMenuItem(value: style, child: Text(style.label)),
+              ],
+              onChanged: _haptics
+                  ? (v) {
+                      if (v != null) {
+                        setState(() {
+                          _hapticStyle = v;
+                          _sliderTicks.reset();
+                        });
+                      }
+                    }
+                  : null,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${_hapticStyle.description}；快速拖动会限制触发频率。',
+              style: const TextStyle(fontSize: 12, color: Colors.white60),
+            ),
+            const SizedBox(height: 12),
             _motorParameter(
               '启动加速',
               kFm03Acceleration,
@@ -567,6 +735,7 @@ class _HandwheelPageState extends State<HandwheelPage>
 /// Touch geometry and haptics only; coordinate mapping and limits live in Swift.
 class WheelDial extends StatefulWidget {
   final bool enabled, haptics;
+  final FocusHapticStyle hapticStyle;
   final double? actual, a, b;
   final double target;
   final String label;
@@ -575,6 +744,7 @@ class WheelDial extends StatefulWidget {
     super.key,
     required this.enabled,
     required this.haptics,
+    this.hapticStyle = FocusHapticStyle.standard,
     required this.actual,
     required this.target,
     this.a,
@@ -591,8 +761,7 @@ class _WheelDialState extends State<WheelDial> {
   int? _pointer;
   bool _centerDrag = false;
   double? _angle;
-  double _detent = 0;
-  DateTime _lastHaptic = DateTime.fromMillisecondsSinceEpoch(0);
+  final _ticks = _FocusTicks();
   double? _touchAngle(Offset p, Size size) {
     final delta = p - Offset(size.width / 2, size.height / 2);
     if (delta.distance < size.shortestSide * .18) return null;
@@ -611,7 +780,11 @@ class _WheelDialState extends State<WheelDial> {
     if (!widget.enabled) {
       _pointer = null;
       _angle = null;
-      _detent = 0;
+      _ticks.reset();
+    }
+    if (widget.hapticStyle != oldWidget.hapticStyle ||
+        widget.haptics != oldWidget.haptics) {
+      _ticks.reset();
     }
   }
 
@@ -645,7 +818,7 @@ class _WheelDialState extends State<WheelDial> {
               _pointer = e.pointer;
               _angle = _touchAngle(e.localPosition, size);
               _centerDrag = _angle == null;
-              _detent = 0;
+              _ticks.reset();
             },
             onPointerMove: (e) {
               if (!widget.enabled || e.pointer != _pointer) return;
@@ -668,15 +841,7 @@ class _WheelDialState extends State<WheelDial> {
               }
               if (turns == 0) return;
               widget.onTurn(turns);
-              _detent += turns.abs() * 2 * math.pi;
-              final now = DateTime.now();
-              if (widget.haptics &&
-                  _detent >= math.pi / 30 &&
-                  now.difference(_lastHaptic).inMilliseconds >= 80) {
-                unawaited(HapticFeedback.selectionClick());
-                _lastHaptic = now;
-                _detent = 0;
-              }
+              _ticks.move(turns, widget.hapticStyle, widget.haptics);
             },
             onPointerUp: (e) => _endTouch(e.pointer),
             onPointerCancel: (e) => _endTouch(e.pointer),
