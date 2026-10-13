@@ -1,6 +1,5 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'device_page.dart';
 import 'ff_core.dart';
@@ -89,7 +88,7 @@ class _ModePageState extends State<ModePage> {
                     IconButton(
                       tooltip: '设备管理',
                       onPressed: _manageDevice,
-                      icon: const Icon(Icons.settings_outlined, size: 28),
+                      icon: const Icon(LucideIcons.bolt, size: 28),
                     ),
                   ],
                 ),
@@ -154,7 +153,7 @@ class _ModePageState extends State<ModePage> {
                             style: TextStyle(color: colors.onSurfaceVariant),
                           ),
                           const SizedBox(width: 4),
-                          const Icon(Icons.chevron_right),
+                          const Icon(LucideIcons.chevronRight),
                         ],
                       ),
                     );
@@ -176,21 +175,14 @@ class _ModePageState extends State<ModePage> {
                 const SizedBox(height: 24),
                 _mode(
                   false,
-                  Icon(
-                    Icons.center_focus_strong,
-                    size: 56,
-                    color: colors.primary,
-                  ),
+                  Icon(LucideIcons.focus, size: 56, color: colors.primary),
                   '自动跟焦',
                   '用 iPhone LiDAR 实时测距，\n自动调整镜头焦点。',
                 ),
                 const SizedBox(height: 16),
                 _mode(
                   true,
-                  CustomPaint(
-                    size: const Size(56, 56),
-                    painter: _WheelIconPainter(colors.primary),
-                  ),
+                  Icon(LucideIcons.gauge, size: 56, color: colors.primary),
                   '手动跟焦',
                   '滑动屏幕手轮精细调焦，\n支持 A/B 点与触感反馈。',
                 ),
@@ -199,10 +191,13 @@ class _ModePageState extends State<ModePage> {
                   onTap: _showGuide,
                   child: Row(
                     children: [
-                      Icon(Icons.help_outline, color: colors.onSurfaceVariant),
+                      Icon(
+                        LucideIcons.circleHelp,
+                        color: colors.onSurfaceVariant,
+                      ),
                       const SizedBox(width: 14),
                       const Expanded(child: Text('首次使用？查看连接与标定指南')),
-                      const Icon(Icons.chevron_right),
+                      const Icon(LucideIcons.chevronRight),
                     ],
                   ),
                 ),
@@ -251,7 +246,7 @@ class _ModePageState extends State<ModePage> {
                 ),
               ),
               Icon(
-                Icons.chevron_right,
+                LucideIcons.chevronRight,
                 size: 30,
                 color: colors.onSurfaceVariant,
               ),
@@ -270,35 +265,4 @@ class _ModePageState extends State<ModePage> {
       ),
     );
   }
-}
-
-class _WheelIconPainter extends CustomPainter {
-  final Color color;
-  const _WheelIconPainter(this.color);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = size.center(Offset.zero);
-    final radius = size.shortestSide / 2 - 2;
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5
-      ..strokeCap = StrokeCap.round;
-    canvas.drawCircle(center, radius, paint);
-    for (var i = 0; i < 24; i++) {
-      final angle = i * math.pi / 12 - math.pi / 2;
-      final direction = Offset(math.cos(angle), math.sin(angle));
-      paint.strokeWidth = i == 0 ? 3 : 1.2;
-      canvas.drawLine(
-        center + direction * (radius - (i == 0 ? 12 : 5)),
-        center + direction * (radius - 3),
-        paint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(_WheelIconPainter oldDelegate) =>
-      oldDelegate.color != color;
 }

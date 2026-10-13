@@ -20,7 +20,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # build-number 当 CFBundleVersion，而主界面标题下方显示的 `v<name>+<number>` 就是
 # 读的这两个键。所以**每次改动都 bump 这一行**（改一次 +1，功能/修 bug 提升前面的
 # 数字），装到手机上就能一眼看出是不是新版。
-version: 2.5.0+16
+version: 2.5.1+17
 
 environment:
   sdk: ^3.13.3
@@ -38,6 +38,7 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  lucide_icons_flutter: ^3.1.18
 
 dev_dependencies:
   flutter_test:
