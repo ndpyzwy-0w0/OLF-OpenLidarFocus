@@ -215,6 +215,7 @@ Future<void> scrollTo(WidgetTester tester, Finder f) =>
 /// 所以统一先滚到可见再点。
 Future<void> tapVisible(WidgetTester tester, Finder f) async {
   await scrollTo(tester, f);
+  await tester.pumpAndSettle();
   await tester.tap(f);
   await tester.pumpAndSettle();
 }
@@ -384,7 +385,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('自动跟焦'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('新建镜头'));
+    await tapVisible(tester, find.text('添加镜头'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).first, '35mm');
     tester.view.viewInsets = const FakeViewPadding(bottom: 300);
@@ -491,7 +492,7 @@ void main() {
     await tester.tap(find.text('自动跟焦'));
     await tester.pumpAndSettle();
     expect(core.args['setControlMode'], {'mode': 'automatic'});
-    expect(find.text('选择镜头'), findsOneWidget);
+    expect(find.text('镜头库'), findsOneWidget);
     expect(find.text('还没有镜头，点下面新建一个。'), findsOneWidget);
     expect(find.byIcon(LucideIcons.arrowLeft), findsOneWidget);
     expect(find.byIcon(LucideIcons.plus), findsOneWidget);
@@ -1124,11 +1125,21 @@ void main() {
     await pumpLensPage(tester, core);
 
     expect(find.text('50mm F1.4'), findsOneWidget);
-    expect(find.text('85mm'), findsOneWidget);
     expect(find.textContaining('距离标定 3 点'), findsOneWidget);
-    expect(find.textContaining('待选择物距方向'), findsOneWidget);
     expect(find.textContaining('物距变近：− 方向'), findsOneWidget);
     expect(find.textContaining('行程 1.00'), findsNothing);
+    expect(find.text('首次使用请完成：'), findsOneWidget);
+    final steps = ['FM03 自动寻限位', '选择物距变近方向', '确认对焦方向', '完成至少 5 个标定点'];
+    for (var i = 1; i < steps.length; i++) {
+      expect(
+        tester.getTopLeft(find.text(steps[i])).dy,
+        greaterThan(tester.getTopLeft(find.text(steps[i - 1])).dy),
+      );
+    }
+    await scrollTo(tester, find.text('85mm'));
+    await tester.pumpAndSettle();
+    expect(find.text('85mm'), findsOneWidget);
+    expect(find.textContaining('待选择物距方向'), findsOneWidget);
   });
 
   testWidgets(
@@ -1144,7 +1155,7 @@ void main() {
       );
       await pumpLensPage(tester, core);
 
-      await tester.tap(find.text('50mm F1.4'));
+      await tapVisible(tester, find.text('进入跟焦'));
       await tester.pumpAndSettle();
 
       expect(core.called('selectLens'), isTrue, reason: '选镜头要下发到核心');
@@ -1159,7 +1170,7 @@ void main() {
       final core = FakeCore(const FfState());
       await pumpLensPage(tester, core);
 
-      await tester.tap(find.text('新建镜头'));
+      await tapVisible(tester, find.text('添加镜头'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField).first, '35mm');
       await tester.enterText(find.byType(TextField).last, 'F2');
@@ -1176,7 +1187,7 @@ void main() {
     final core = FakeCore(const FfState());
     await pumpLensPage(tester, core);
 
-    await tester.tap(find.text('新建镜头'));
+    await tapVisible(tester, find.text('添加镜头'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
@@ -1191,7 +1202,9 @@ void main() {
     final core = FakeCore(FfState(lenses: [lens()]));
     await pumpLensPage(tester, core);
 
-    await tester.tap(find.byTooltip('删除'));
+    await tester.tap(find.byTooltip('镜头操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除镜头'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
