@@ -8,6 +8,7 @@ import 'package:iphone_follow_focus/lens_page.dart';
 import 'package:iphone_follow_focus/lidar.dart';
 import 'package:iphone_follow_focus/main.dart';
 import 'package:iphone_follow_focus/handwheel_page.dart';
+import 'package:iphone_follow_focus/device_page.dart';
 
 /// 伪造的核心：只记录命令、按需推快照。
 ///
@@ -485,12 +486,71 @@ void main() {
     await tester.pumpWidget(FollowApp(core: core));
     await tester.pumpAndSettle();
     expect(find.text('自动跟焦'), findsOneWidget);
-    expect(find.text('手机跟焦手轮'), findsOneWidget);
+    expect(find.text('手动跟焦'), findsOneWidget);
     await tester.tap(find.text('自动跟焦'));
     await tester.pumpAndSettle();
     expect(core.args['setControlMode'], {'mode': 'automatic'});
     expect(find.text('选择镜头'), findsOneWidget);
     expect(find.text('还没有镜头，点下面新建一个。'), findsOneWidget);
+  });
+
+  testWidgets('home supports both system themes and live connection status', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    final core = FakeCore();
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    await tester.pumpWidget(FollowApp(core: core));
+    await tester.pumpAndSettle();
+    expect(
+      Theme.of(tester.element(find.text('选择跟焦方式'))).brightness,
+      Brightness.light,
+    );
+    expect(find.text('FM03 未连接'), findsOneWidget);
+    for (final removed in ['需支持 LiDAR', '首次使用需标定', '无需 LiDAR', '无需物距标定']) {
+      expect(find.text(removed), findsNothing);
+    }
+    core.push(const FfState(connected: true, linkAlive: true));
+    await tester.pumpAndSettle();
+    expect(find.text('FM03 已连接'), findsOneWidget);
+    core.push(const FfState(connected: true, linkAlive: false));
+    await tester.pumpAndSettle();
+    expect(find.text('FM03 连接异常'), findsOneWidget);
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    await tester.pumpAndSettle();
+    expect(
+      Theme.of(tester.element(find.text('选择跟焦方式'))).brightness,
+      Brightness.dark,
+    );
+    await tapVisible(tester, find.text('首次使用？查看连接与标定指南'));
+    expect(find.text('连接与标定指南'), findsOneWidget);
+    await tester.tap(find.text('知道了'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('管理'), -200);
+    await tester.tap(find.text('管理'));
+    await tester.pumpAndSettle();
+    expect(find.byType(DevicePage), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('home remains scrollable on small screens with large text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await tester.pumpWidget(FollowApp(core: FakeCore()));
+    await tester.pumpAndSettle();
+    await tapVisible(tester, find.text('首次使用？查看连接与标定指南'));
+    expect(find.text('连接与标定指南'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(
@@ -531,7 +591,9 @@ void main() {
       );
       await tester.pumpWidget(FollowApp(core: core));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('手机跟焦手轮'));
+      await tester.ensureVisible(find.text('手动跟焦'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('手动跟焦'));
       await tester.pumpAndSettle();
       expect(core.args['setControlMode'], {'mode': 'handwheel'});
       expect(find.byType(HandwheelPage), findsOneWidget);

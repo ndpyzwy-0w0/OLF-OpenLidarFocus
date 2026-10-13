@@ -31,13 +31,9 @@ class FollowApp extends StatelessWidget {
     return MaterialApp(
       title: '跟焦器',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF16A889),
-          brightness: Brightness.dark,
-        ),
-      ),
+      theme: _theme(Brightness.light),
+      darkTheme: _theme(Brightness.dark),
+      themeMode: ThemeMode.system,
       builder: (context, child) {
         final keyboardHeight = MediaQuery.viewInsetsOf(context).bottom;
         return Stack(
@@ -63,6 +59,25 @@ class FollowApp extends StatelessWidget {
         );
       },
       home: ModePage(core: core),
+    );
+  }
+
+  ThemeData _theme(Brightness brightness) {
+    final dark = brightness == Brightness.dark;
+    return ThemeData(
+      brightness: brightness,
+      scaffoldBackgroundColor: Color(dark ? 0xFF0B1510 : 0xFFF4F8F5),
+      colorScheme:
+          ColorScheme.fromSeed(
+            seedColor: const Color(0xFF16A889),
+            brightness: brightness,
+          ).copyWith(
+            primary: Color(dark ? 0xFF59E4C3 : 0xFF087C63),
+            surface: Color(dark ? 0xFF16221B : 0xFFFFFFFF),
+            onSurface: Color(dark ? 0xFFF4F7F4 : 0xFF17251D),
+            onSurfaceVariant: Color(dark ? 0xFFADB8B1 : 0xFF56675D),
+            outlineVariant: Color(dark ? 0xFF2B3C31 : 0xFFD8E4DC),
+          ),
     );
   }
 }
