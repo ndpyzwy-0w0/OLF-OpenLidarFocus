@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'ff_core.dart';
 
@@ -61,7 +62,7 @@ class _DevicePageState extends State<DevicePage> {
           IconButton(
             tooltip: '重新扫描',
             onPressed: _scanning ? null : _scan,
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(LucideIcons.refreshCw),
           ),
         ],
       ),
@@ -98,7 +99,7 @@ class _DevicePageState extends State<DevicePage> {
             Row(
               children: [
                 Icon(
-                  widget.linkOpen ? Icons.link : Icons.link_off,
+                  widget.linkOpen ? LucideIcons.link : LucideIcons.unlink,
                   size: 18,
                   color: widget.linkOpen ? Colors.greenAccent : null,
                 ),
@@ -136,7 +137,7 @@ class _DevicePageState extends State<DevicePage> {
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Icon(
-        active ? Icons.check_circle : Icons.router_outlined,
+        active ? LucideIcons.circleCheck : LucideIcons.router,
         color: active ? Colors.greenAccent : null,
       ),
       title: Text(d.deviceId.isEmpty ? '(回包无 device_id)' : d.deviceId),

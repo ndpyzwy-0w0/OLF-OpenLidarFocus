@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 
@@ -65,6 +66,7 @@ class _HandwheelPageState extends State<HandwheelPage>
   bool _haptics = true;
   FocusHapticStyle _hapticStyle = FocusHapticStyle.standard;
   bool _sliderMode = false;
+  bool _settingsExpanded = false;
   double? _sliderDrag;
   final _sliderTicks = _FocusTicks();
   int? _arrivalSequence;
@@ -151,7 +153,7 @@ class _HandwheelPageState extends State<HandwheelPage>
       actions: [
         IconButton(
           tooltip: '连接设备',
-          icon: const Icon(Icons.wifi),
+          icon: const Icon(LucideIcons.wifi),
           onPressed: () async {
             final device = await Navigator.of(context).push(
               MaterialPageRoute<FfDevice>(
@@ -251,7 +253,7 @@ class _HandwheelPageState extends State<HandwheelPage>
         children: [
           Chip(
             avatar: Icon(
-              Icons.circle,
+              LucideIcons.circle,
               size: 10,
               color: _s.linkAlive && _s.canOk
                   ? Colors.greenAccent
@@ -295,16 +297,17 @@ class _HandwheelPageState extends State<HandwheelPage>
   );
 
   Widget _inputSelector() => SegmentedButton<bool>(
+    selectedIcon: const Icon(LucideIcons.check),
     key: const ValueKey('focus-input-mode'),
     segments: const [
       ButtonSegment(
         value: false,
-        icon: Icon(Icons.rotate_right),
+        icon: Icon(LucideIcons.rotateCw),
         label: Text('手轮'),
       ),
       ButtonSegment(
         value: true,
-        icon: Icon(Icons.linear_scale),
+        icon: Icon(LucideIcons.moveHorizontal),
         label: Text('滑块'),
       ),
     ],
@@ -514,6 +517,7 @@ class _HandwheelPageState extends State<HandwheelPage>
         children: [
           const Text('A/B 拉焦时长'),
           DropdownButton<double>(
+            icon: const Icon(LucideIcons.chevronDown),
             value: _duration,
             items: [
               for (final n in [.5, 1.0, 2.0, 4.0, 8.0])
@@ -541,6 +545,7 @@ class _HandwheelPageState extends State<HandwheelPage>
         children: [
           const Expanded(child: Text('A/B 拉焦曲线')),
           DropdownButton<String>(
+            icon: const Icon(LucideIcons.chevronDown),
             key: const ValueKey('wheel-pull-curve'),
             value: _s.wheelPullCurve,
             items: const [
@@ -572,7 +577,7 @@ class _HandwheelPageState extends State<HandwheelPage>
                       ? () =>
                             widget.core.pullWheelTo(point, duration: _duration)
                       : null,
-                  icon: const Icon(Icons.swap_horiz),
+                  icon: const Icon(LucideIcons.arrowLeftRight),
                   label: Text('拉到 $point'),
                 ),
               ),
@@ -591,13 +596,13 @@ class _HandwheelPageState extends State<HandwheelPage>
         const SizedBox(height: 12),
         FilledButton.tonalIcon(
           onPressed: _s.connected && _s.calSupported ? _calibrate : null,
-          icon: const Icon(Icons.sync),
+          icon: const Icon(LucideIcons.refreshCw),
           label: const Text('FM03 自动寻限位'),
         ),
         if (!_s.connected)
           OutlinedButton.icon(
             onPressed: widget.core.connect,
-            icon: const Icon(Icons.wifi),
+            icon: const Icon(LucideIcons.wifi),
             label: const Text('连接电机'),
           ),
         const Padding(
@@ -612,13 +617,19 @@ class _HandwheelPageState extends State<HandwheelPage>
       Card(
         child: ExpansionTile(
           title: const Text('手轮响应与设置'),
-          leading: const Icon(Icons.tune),
+          trailing: Icon(
+            _settingsExpanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+          ),
+          onExpansionChanged: (expanded) =>
+              setState(() => _settingsExpanded = expanded),
+          leading: const Icon(LucideIcons.slidersHorizontal),
           childrenPadding: const EdgeInsets.all(16),
           children: [
             Row(
               children: [
                 const Expanded(child: Text('旋转灵敏度')),
                 DropdownButton<double>(
+                  icon: const Icon(LucideIcons.chevronDown),
                   value: [.25, .5, 1.0, 2.0].contains(_s.wheelSensitivity)
                       ? _s.wheelSensitivity
                       : null,
@@ -651,6 +662,7 @@ class _HandwheelPageState extends State<HandwheelPage>
               onChanged: (v) => setState(() => _haptics = v),
             ),
             DropdownButtonFormField<FocusHapticStyle>(
+              icon: const Icon(LucideIcons.chevronDown),
               key: const ValueKey('focus-haptic-style'),
               initialValue: _hapticStyle,
               decoration: const InputDecoration(labelText: '触感效果'),
@@ -712,7 +724,7 @@ class _HandwheelPageState extends State<HandwheelPage>
               onPressed: _s.connected && _s.calSupported && !_calRunning
                   ? _calibrate
                   : null,
-              icon: const Icon(Icons.sync),
+              icon: const Icon(LucideIcons.refreshCw),
               label: const Text('重新寻限位'),
             ),
           ],
@@ -731,7 +743,7 @@ class _HandwheelPageState extends State<HandwheelPage>
     onPressed: _s.connected && (!_paused || _s.canResume)
         ? (_paused ? widget.core.resumeControl : widget.core.stopPressed)
         : null,
-    icon: Icon(_paused ? Icons.restart_alt : Icons.stop_circle_outlined),
+    icon: Icon(_paused ? LucideIcons.rotateCcw : LucideIcons.circleStop),
     label: Text(
       _paused
           ? '复位并继续手轮'

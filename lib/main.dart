@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter/services.dart';
 
 import 'device_page.dart';
@@ -50,7 +51,7 @@ class FollowApp extends StatelessWidget {
                   child: TextButton.icon(
                     onPressed: () =>
                         FocusManager.instance.primaryFocus?.unfocus(),
-                    icon: const Icon(Icons.keyboard_hide),
+                    icon: const Icon(LucideIcons.keyboardOff),
                     label: const Text('收起键盘'),
                   ),
                 ),
@@ -66,6 +67,13 @@ class FollowApp extends StatelessWidget {
     final dark = brightness == Brightness.dark;
     return ThemeData(
       brightness: brightness,
+      actionIconTheme: ActionIconThemeData(
+        backButtonIconBuilder: (_) => const Icon(LucideIcons.arrowLeft),
+        closeButtonIconBuilder: (_) => const Icon(LucideIcons.x),
+        drawerButtonIconBuilder: (_) => const Icon(LucideIcons.menu),
+        endDrawerButtonIconBuilder: (_) =>
+            const Icon(LucideIcons.slidersHorizontal),
+      ),
       scaffoldBackgroundColor: Color(dark ? 0xFF0B1510 : 0xFFF4F8F5),
       colorScheme:
           ColorScheme.fromSeed(
@@ -125,6 +133,8 @@ class _FollowPageState extends State<FollowPage> {
 
   bool _lidarOk = false;
   bool _previewExpanded = true;
+  bool _diagnosticExpanded = false;
+  bool _fm03Expanded = false;
   bool _showGrid = false;
   bool? _webLandscape;
   bool _rotating = false;
@@ -291,9 +301,7 @@ class _FollowPageState extends State<FollowPage> {
                   onPressed: _calRunning || _s.calDirectionPending
                       ? null
                       : _openDevicePage,
-                  icon: Icon(
-                    _s.deviceId == null ? Icons.router_outlined : Icons.router,
-                  ),
+                  icon: const Icon(LucideIcons.router),
                 ),
                 Padding(
                   padding: const EdgeInsets.only(right: 12),
@@ -403,12 +411,20 @@ class _FollowPageState extends State<FollowPage> {
             ),
             FilterChip(
               label: const Text('使能'),
+              showCheckmark: false,
+              avatar: _s.enabled
+                  ? const Icon(LucideIcons.check, size: 18)
+                  : null,
               selected: _s.enabled,
               onSelected: _calRunning || _s.calDirectionPending || _paused
                   ? null
                   : (v) => widget.core.enable(v),
             ),
             FilterChip(
+              showCheckmark: false,
+              avatar: _s.auto && _s.phase == SetupPhase.follow
+                  ? const Icon(LucideIcons.check, size: 18)
+                  : null,
               // 核心决定图表是否可用，UI 只显示五点标定门槛。
               // 能不能开由核心决定（setAuto 会自己拒绝），这里只管显示。
               label: Text(
@@ -428,6 +444,8 @@ class _FollowPageState extends State<FollowPage> {
             ),
             FilterChip(
               label: const Text('人脸'),
+              showCheckmark: false,
+              avatar: _s.faces ? const Icon(LucideIcons.check, size: 18) : null,
               selected: _s.faces,
               onSelected: _lidarOk ? (v) => widget.core.setTrackFaces(v) : null,
             ),
@@ -526,7 +544,7 @@ class _FollowPageState extends State<FollowPage> {
     tooltip: _isLandscape ? '切换竖屏' : '切换横屏',
     onPressed: _rotating ? null : _toggleOrientation,
     icon: Icon(
-      _isLandscape ? Icons.stay_current_portrait : Icons.stay_current_landscape,
+      _isLandscape ? LucideIcons.smartphone : LucideIcons.rectangleHorizontal,
     ),
   );
 
@@ -540,7 +558,7 @@ class _FollowPageState extends State<FollowPage> {
             trailing: IconButton(
               tooltip: '关闭控制面板',
               onPressed: () => _scaffoldKey.currentState?.closeEndDrawer(),
-              icon: const Icon(Icons.close),
+              icon: const Icon(LucideIcons.x),
             ),
           ),
           const Divider(height: 1),
@@ -564,7 +582,7 @@ class _FollowPageState extends State<FollowPage> {
                   IconButton(
                     tooltip: '返回镜头列表',
                     onPressed: () => Navigator.maybePop(context),
-                    icon: const Icon(Icons.arrow_back_ios_new, size: 20),
+                    icon: const Icon(LucideIcons.arrowLeft, size: 20),
                   ),
                   Expanded(
                     child: Column(
@@ -593,7 +611,7 @@ class _FollowPageState extends State<FollowPage> {
                     onPressed: _lidarOk
                         ? () => widget.core.setTrackFaces(!_s.faces)
                         : null,
-                    icon: const Icon(Icons.face_retouching_natural),
+                    icon: const Icon(LucideIcons.scanFace),
                   ),
                   IconButton(
                     tooltip: '构图网格',
@@ -604,19 +622,19 @@ class _FollowPageState extends State<FollowPage> {
                           : null,
                     ),
                     onPressed: () => setState(() => _showGrid = !_showGrid),
-                    icon: const Icon(Icons.grid_on),
+                    icon: const Icon(LucideIcons.grid3x3),
                   ),
                   IconButton(
                     tooltip: '设备',
                     onPressed: _calRunning || _s.calDirectionPending
                         ? null
                         : _openDevicePage,
-                    icon: const Icon(Icons.wifi),
+                    icon: const Icon(LucideIcons.wifi),
                   ),
                   IconButton(
                     tooltip: '控制与标定',
                     onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
-                    icon: const Icon(Icons.tune),
+                    icon: const Icon(LucideIcons.slidersHorizontal),
                   ),
                 ],
               ),
@@ -674,7 +692,9 @@ class _FollowPageState extends State<FollowPage> {
                           children: [
                             _roundAction(
                               label: _paused ? '复位继续' : '停止',
-                              icon: _paused ? Icons.restart_alt : Icons.stop,
+                              icon: _paused
+                                  ? LucideIcons.rotateCcw
+                                  : LucideIcons.square,
                               color: _paused
                                   ? const Color(0xFF16A889)
                                   : const Color(0xFFAF4147),
@@ -687,8 +707,8 @@ class _FollowPageState extends State<FollowPage> {
                             _roundAction(
                               label: _s.auto ? '自动' : '手动',
                               icon: _s.auto
-                                  ? Icons.center_focus_strong
-                                  : Icons.touch_app_outlined,
+                                  ? LucideIcons.focus
+                                  : LucideIcons.hand,
                               color: _s.auto
                                   ? const Color(0xFF16A889)
                                   : const Color(0xFF303638),
@@ -1000,7 +1020,7 @@ class _FollowPageState extends State<FollowPage> {
         onPressed: _s.connected && _s.calSupported && !_calRunning
             ? _startAutoCalibration
             : null,
-        icon: const Icon(Icons.auto_fix_high),
+        icon: const Icon(LucideIcons.wandSparkles),
         label: const Text('FM03 自动寻限位'),
       ),
       if (!_s.connected)
@@ -1121,7 +1141,7 @@ class _FollowPageState extends State<FollowPage> {
                   meters: manual.isEmpty ? null : meters,
                 )
               : null,
-          icon: const Icon(Icons.add),
+          icon: const Icon(LucideIcons.plus),
           label: const Text('新增标定点'),
         ),
         Text(
@@ -1140,7 +1160,7 @@ class _FollowPageState extends State<FollowPage> {
               '${_s.lutPoints[i].meters.toStringAsFixed(2)} m → ${_s.lutPoints[i].steps} 坐标',
             ),
             trailing: IconButton(
-              icon: const Icon(Icons.delete),
+              icon: const Icon(LucideIcons.trash2),
               onPressed: () => widget.core.removeLutPoint(i),
             ),
           ),
@@ -1164,7 +1184,7 @@ class _FollowPageState extends State<FollowPage> {
   Widget _recalibrateTile() => ListTile(
     contentPadding: EdgeInsets.zero,
     dense: true,
-    leading: const Icon(Icons.restart_alt, size: 20),
+    leading: const Icon(LucideIcons.rotateCcw, size: 20),
     title: const Text('重置距离标定（长按）'),
     subtitle: const Text('长按并确认后清空图表、重新选择方向；电机内部限位由 FM03 保留。'),
     onLongPress: _confirmRecalibrate,
@@ -1237,6 +1257,11 @@ class _FollowPageState extends State<FollowPage> {
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       title: const Text('功能可用性诊断'),
+      trailing: Icon(
+        _diagnosticExpanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+      ),
+      onExpansionChanged: (expanded) =>
+          setState(() => _diagnosticExpanded = expanded),
       subtitle: Text(
         statusLive ? '链路正常' : (_s.connected ? '状态超时，请检查 Wi-Fi' : '等待设备连接'),
       ),
@@ -1246,7 +1271,7 @@ class _FollowPageState extends State<FollowPage> {
             dense: true,
             contentPadding: EdgeInsets.zero,
             leading: Icon(
-              row.ok ? Icons.check_circle : Icons.error_outline,
+              row.ok ? LucideIcons.circleCheck : LucideIcons.circleAlert,
               color: row.ok ? Colors.greenAccent : Colors.orangeAccent,
               size: 20,
             ),
@@ -1267,6 +1292,11 @@ class _FollowPageState extends State<FollowPage> {
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       title: const Text('DJI FM03 · CAN'),
+      trailing: Icon(
+        _fm03Expanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+      ),
+      onExpansionChanged: (expanded) =>
+          setState(() => _fm03Expanded = expanded),
       subtitle: Text(
         t == null
             ? '等待电机反馈'
@@ -1399,7 +1429,7 @@ class _FollowPageState extends State<FollowPage> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          Icons.center_focus_weak,
+                          LucideIcons.crosshair,
                           size: 44,
                           color: Colors.white24,
                         ),
@@ -1439,8 +1469,8 @@ class _FollowPageState extends State<FollowPage> {
             children: [
               Icon(
                 _previewExpanded
-                    ? Icons.keyboard_arrow_up
-                    : Icons.keyboard_arrow_down,
+                    ? LucideIcons.chevronUp
+                    : LucideIcons.chevronDown,
                 size: 18,
               ),
               const SizedBox(width: 4),

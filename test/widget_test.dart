@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:iphone_follow_focus/ff_core.dart';
 import 'package:iphone_follow_focus/lens_page.dart';
 import 'package:iphone_follow_focus/lidar.dart';
@@ -492,6 +493,8 @@ void main() {
     expect(core.args['setControlMode'], {'mode': 'automatic'});
     expect(find.text('选择镜头'), findsOneWidget);
     expect(find.text('还没有镜头，点下面新建一个。'), findsOneWidget);
+    expect(find.byIcon(LucideIcons.arrowLeft), findsOneWidget);
+    expect(find.byIcon(LucideIcons.plus), findsOneWidget);
   });
 
   testWidgets('home supports both system themes and live connection status', (
@@ -1188,7 +1191,7 @@ void main() {
     final core = FakeCore(FfState(lenses: [lens()]));
     await pumpLensPage(tester, core);
 
-    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.tap(find.byTooltip('删除'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();

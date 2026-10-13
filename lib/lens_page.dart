@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'ff_core.dart';
 import 'main.dart';
@@ -145,7 +146,7 @@ class _LensPageState extends State<LensPage> {
           const SizedBox(height: 12),
           FilledButton.icon(
             onPressed: _create,
-            icon: const Icon(Icons.add),
+            icon: const Icon(LucideIcons.plus),
             label: const Text('新建镜头'),
           ),
         ],
@@ -162,14 +163,14 @@ class _LensPageState extends State<LensPage> {
     return Card(
       child: ListTile(
         leading: Icon(
-          l.lutReady ? Icons.check_circle : Icons.error_outline,
+          l.lutReady ? LucideIcons.circleCheck : LucideIcons.circleAlert,
           color: l.lutReady ? Colors.greenAccent : Colors.orangeAccent,
         ),
         title: Text(l.name.isEmpty ? '(未命名)' : l.name),
         subtitle: Text(parts.join(' · ')),
         trailing: IconButton(
           tooltip: '删除',
-          icon: const Icon(Icons.delete_outline),
+          icon: const Icon(LucideIcons.trash2),
           onPressed: () => _delete(l),
         ),
         onTap: () => _open(l),
