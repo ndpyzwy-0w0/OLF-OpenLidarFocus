@@ -123,7 +123,7 @@ class _DevicePageState extends State<DevicePage> {
               Text(
                 '板子的热点名和这里的 device_id 是同一份数据（都取自 AP 接口 MAC），'
                 '所以 ${active.deviceId} 对应的热点就叫 ${active.deviceId}。',
-                style: const TextStyle(fontSize: 12),
+                style: const TextStyle(fontSize: 11),
               ),
             ],
           ],

@@ -132,7 +132,7 @@ class _LensPageState extends State<LensPage> {
         scrolledUnderElevation: 0,
         title: const Text(
           '镜头库',
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+          style: TextStyle(fontSize: 21, fontWeight: FontWeight.w700),
         ),
       ),
       body: SafeArea(
@@ -172,7 +172,7 @@ class _LensPageState extends State<LensPage> {
                   icon: const Icon(LucideIcons.plus),
                   label: const Text(
                     '添加镜头',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                   ),
                 ),
               ],
@@ -197,7 +197,7 @@ class _LensPageState extends State<LensPage> {
         children: [
           const Text(
             '首次使用请完成：',
-            style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 14),
           for (var i = 0; i < steps.length; i++)
@@ -226,7 +226,7 @@ class _LensPageState extends State<LensPage> {
                     child: Text(
                       steps[i],
                       style: TextStyle(
-                        fontSize: 16,
+                        fontSize: 14,
                         color: colors.onSurfaceVariant,
                       ),
                     ),
@@ -278,7 +278,7 @@ class _LensPageState extends State<LensPage> {
                     child: Text(
                       l.name.isEmpty ? '(未命名)' : l.name,
                       style: const TextStyle(
-                        fontSize: 22,
+                        fontSize: 20,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -314,7 +314,7 @@ class _LensPageState extends State<LensPage> {
                 Text(
                   l.params,
                   style: TextStyle(
-                    fontSize: 16,
+                    fontSize: 14,
                     color: colors.onSurfaceVariant,
                   ),
                 ),
@@ -354,7 +354,7 @@ class _LensPageState extends State<LensPage> {
               Text(
                 '距离标定 ${l.lutCount} 点 · ${l.directionConfirmed ? "物距变近：${l.dir < 0 ? "+" : "−"} 方向" : "待选择物距方向"}',
                 style: TextStyle(
-                  fontSize: 13,
+                  fontSize: 12,
                   height: 1.5,
                   color: colors.onSurfaceVariant,
                 ),
@@ -377,7 +377,7 @@ class _LensPageState extends State<LensPage> {
                           Icon(LucideIcons.crosshair, size: 20),
                           SizedBox(width: 10),
                           Flexible(
-                            child: Text('进入跟焦', style: TextStyle(fontSize: 17)),
+                            child: Text('进入跟焦', style: TextStyle(fontSize: 15)),
                           ),
                         ],
                       ),

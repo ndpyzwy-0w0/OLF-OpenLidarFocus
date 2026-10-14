@@ -330,7 +330,7 @@ class _HandwheelPageState extends State<HandwheelPage>
           const Text('目标焦点', style: TextStyle(color: Colors.white60)),
           Text(
             '${(value * 100).toStringAsFixed(1)}%',
-            style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w300),
+            style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w300),
           ),
           const SizedBox(height: 4),
           SliderTheme(
@@ -427,7 +427,7 @@ class _HandwheelPageState extends State<HandwheelPage>
           const SizedBox(height: 4),
           Text(
             _s.wheelReady ? '拖动直接跟焦 · 遵循 A/B 限位' : '等待解锁与电机就绪',
-            style: const TextStyle(fontSize: 12, color: Colors.white60),
+            style: const TextStyle(fontSize: 11, color: Colors.white60),
           ),
         ],
       ),
@@ -562,7 +562,7 @@ class _HandwheelPageState extends State<HandwheelPage>
       ),
       const Text(
         '仅控制下方“拉到 A/B”的目标节奏；“到 A/B 点”直接发送终点。转手轮实时跟随，不受时长与曲线影响。实际到位受速度与负载限制。',
-        style: TextStyle(fontSize: 12, color: Colors.white60),
+        style: TextStyle(fontSize: 11, color: Colors.white60),
       ),
       Row(
         children: [
@@ -591,7 +591,7 @@ class _HandwheelPageState extends State<HandwheelPage>
         ),
       const SizedBox(height: 16),
       const SizedBox(height: 8),
-      Text(_s.msg, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+      Text(_s.msg, style: const TextStyle(fontSize: 11, color: Colors.white70)),
       if (!_s.wheelReady && !_paused && !_calRunning) ...[
         const SizedBox(height: 12),
         FilledButton.tonalIcon(
@@ -609,7 +609,7 @@ class _HandwheelPageState extends State<HandwheelPage>
           padding: EdgeInsets.symmetric(vertical: 8),
           child: Text(
             '手轮模式无需物距表。寻限位完成后即可控制。',
-            style: TextStyle(fontSize: 12, color: Colors.white60),
+            style: TextStyle(fontSize: 11, color: Colors.white60),
           ),
         ),
       ],
@@ -646,7 +646,7 @@ class _HandwheelPageState extends State<HandwheelPage>
             ),
             const Text(
               '1×：手轮转一圈对应完整行程；0.25× 用于精细对焦。',
-              style: TextStyle(fontSize: 12, color: Colors.white60),
+              style: TextStyle(fontSize: 11, color: Colors.white60),
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -684,7 +684,7 @@ class _HandwheelPageState extends State<HandwheelPage>
             const SizedBox(height: 8),
             Text(
               '${_hapticStyle.description}；快速拖动会限制触发频率。',
-              style: const TextStyle(fontSize: 12, color: Colors.white60),
+              style: const TextStyle(fontSize: 11, color: Colors.white60),
             ),
             const SizedBox(height: 12),
             _motorParameter(
@@ -713,11 +713,11 @@ class _HandwheelPageState extends State<HandwheelPage>
             ),
             Text(
               '设备已回读：速度 ${_s.fm03?.maxSpeed ?? "--"} · 加速 ${_s.fm03?.acceleration ?? "--"} · 减速 ${_s.fm03?.gain ?? "--"} · 容差 ±${_s.fm03?.tolerance ?? "--"} · 拨轮输出 ${_s.fm03?.value ?? "--"}',
-              style: const TextStyle(fontSize: 12, color: Colors.white60),
+              style: const TextStyle(fontSize: 11, color: Colors.white60),
             ),
             const Text(
               '运动中调参需固件 2.1.1。参数以设备回读为准，停稳后保存到设备，自动模式也会使用。A/B 点在重连、离开模式或重新寻限位后清除。',
-              style: TextStyle(fontSize: 12, color: Colors.white60),
+              style: TextStyle(fontSize: 11, color: Colors.white60),
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
@@ -787,7 +787,7 @@ class _HandwheelPageState extends State<HandwheelPage>
                 }
               : null,
         ),
-        Text(hint, style: const TextStyle(fontSize: 12, color: Colors.white60)),
+        Text(hint, style: const TextStyle(fontSize: 11, color: Colors.white60)),
         const SizedBox(height: 12),
       ],
     );
@@ -800,14 +800,14 @@ class _HandwheelPageState extends State<HandwheelPage>
         children: [
           Text(
             '$name 点',
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 4),
           Text(
             coordinate == null
                 ? '未设置'
                 : '$coordinate · ${(coordinate / 4096 * 100).toStringAsFixed(1)}%',
-            style: const TextStyle(color: Colors.white60, fontSize: 12),
+            style: const TextStyle(color: Colors.white60, fontSize: 11),
           ),
           TextButton(
             onPressed: _s.wheelReady && !_s.moving && !_s.wheelPulling
@@ -955,7 +955,7 @@ class _WheelDialState extends State<WheelDial> {
                     const Text(
                       'FOCUS',
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: 11,
                         letterSpacing: 4,
                         color: Colors.white54,
                       ),
@@ -964,7 +964,7 @@ class _WheelDialState extends State<WheelDial> {
                     Text(
                       widget.label,
                       style: const TextStyle(
-                        fontSize: 36,
+                        fontSize: 30,
                         fontWeight: FontWeight.w300,
                       ),
                     ),
@@ -1046,7 +1046,7 @@ class _WheelPainter extends CustomPainter {
             text: label,
             style: TextStyle(
               color: color,
-              fontSize: 12,
+              fontSize: 11,
               fontWeight: FontWeight.bold,
             ),
           ),

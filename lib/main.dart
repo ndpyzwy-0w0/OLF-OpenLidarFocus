@@ -65,7 +65,7 @@ class FollowApp extends StatelessWidget {
 
   ThemeData _theme(Brightness brightness) {
     final dark = brightness == Brightness.dark;
-    return ThemeData(
+    final theme = ThemeData(
       brightness: brightness,
       actionIconTheme: ActionIconThemeData(
         backButtonIconBuilder: (_) => const Icon(LucideIcons.arrowLeft),
@@ -86,6 +86,13 @@ class FollowApp extends StatelessWidget {
             onSurfaceVariant: Color(dark ? 0xFFADB8B1 : 0xFF56675D),
             outlineVariant: Color(dark ? 0xFF2B3C31 : 0xFFD8E4DC),
           ),
+    );
+    return theme.copyWith(
+      typography: theme.typography.copyWith(
+        englishLike: theme.typography.englishLike.apply(fontSizeFactor: .9),
+        dense: theme.typography.dense.apply(fontSizeFactor: .9),
+        tall: theme.typography.tall.apply(fontSizeFactor: .9),
+      ),
     );
   }
 }
@@ -246,7 +253,7 @@ class _FollowPageState extends State<FollowPage> {
     if (!_s.connected) {
       return Text(
         _s.deviceId == null ? '未选设备' : '${_s.deviceId} · 未连接',
-        style: const TextStyle(fontSize: 12),
+        style: const TextStyle(fontSize: 11),
       );
     }
     if (!_s.linkAlive) {
@@ -254,14 +261,14 @@ class _FollowPageState extends State<FollowPage> {
       final secs = age == null ? '' : ' ${(age / 1000).round()}s';
       return Text(
         '${_s.deviceId ?? "已连接"} · 失去回包$secs',
-        style: const TextStyle(fontSize: 12, color: Colors.orangeAccent),
+        style: const TextStyle(fontSize: 11, color: Colors.orangeAccent),
       );
     }
     return Text(
       '${_s.enabled ? "EN" : "OFF"} '
       '${_s.moving ? "RUN" : "IDLE"} '
       '${_s.canOk ? "CAN" : ""}',
-      style: const TextStyle(fontSize: 12),
+      style: const TextStyle(fontSize: 11),
     );
   }
 
@@ -381,7 +388,7 @@ class _FollowPageState extends State<FollowPage> {
       children: [
         Text(
           '电机 ${_s.pos} → ${_s.target}    ${_s.msg}',
-          style: const TextStyle(fontSize: 13),
+          style: const TextStyle(fontSize: 12),
         ),
         Row(
           children: [
@@ -396,7 +403,7 @@ class _FollowPageState extends State<FollowPage> {
               SetupPhase.align => '② 选择方向',
               SetupPhase.calibrate => '③ 标定物距',
               SetupPhase.follow => '④ 跟焦',
-            }, style: const TextStyle(fontSize: 12)),
+            }, style: const TextStyle(fontSize: 11)),
           ],
         ),
         Wrap(
@@ -663,7 +670,7 @@ class _FollowPageState extends State<FollowPage> {
                                 Text(
                                   '物距 $distance',
                                   style: const TextStyle(
-                                    fontSize: 22,
+                                    fontSize: 20,
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
@@ -844,7 +851,7 @@ class _FollowPageState extends State<FollowPage> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(icon, size: 26),
-          Text(label, style: const TextStyle(fontSize: 12)),
+          Text(label, style: const TextStyle(fontSize: 11)),
         ],
       ),
     ),
@@ -1476,7 +1483,7 @@ class _FollowPageState extends State<FollowPage> {
               const SizedBox(width: 4),
               Text('摄像头 ${_previewExpanded ? "展开" : "已折叠"}'),
               const SizedBox(width: 10),
-              Text('距离 $distance', style: const TextStyle(fontSize: 12)),
+              Text('距离 $distance', style: const TextStyle(fontSize: 11)),
             ],
           ),
         ),

@@ -80,7 +80,7 @@ class _ModePageState extends State<ModePage> {
                       child: Text(
                         '跟焦器',
                         style: TextStyle(
-                          fontSize: 32,
+                          fontSize: 28,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -132,7 +132,7 @@ class _ModePageState extends State<ModePage> {
                                 Text(
                                   title,
                                   style: const TextStyle(
-                                    fontSize: 20,
+                                    fontSize: 18,
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
@@ -141,7 +141,7 @@ class _ModePageState extends State<ModePage> {
                                   detail,
                                   style: TextStyle(
                                     color: colors.onSurfaceVariant,
-                                    fontSize: 15,
+                                    fontSize: 13,
                                   ),
                                 ),
                               ],
@@ -162,13 +162,13 @@ class _ModePageState extends State<ModePage> {
                 const SizedBox(height: 40),
                 const Text(
                   '选择跟焦方式',
-                  style: TextStyle(fontSize: 30, fontWeight: FontWeight.w700),
+                  style: TextStyle(fontSize: 26, fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 10),
                 Text(
                   '自动追焦，或用手轮精细控制。',
                   style: TextStyle(
-                    fontSize: 17,
+                    fontSize: 15,
                     color: colors.onSurfaceVariant,
                   ),
                 ),
@@ -240,7 +240,7 @@ class _ModePageState extends State<ModePage> {
                 child: Text(
                   title,
                   style: const TextStyle(
-                    fontSize: 26,
+                    fontSize: 23,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -256,7 +256,7 @@ class _ModePageState extends State<ModePage> {
           Text(
             body,
             style: TextStyle(
-              fontSize: 17,
+              fontSize: 15,
               height: 1.5,
               color: colors.onSurfaceVariant,
             ),
