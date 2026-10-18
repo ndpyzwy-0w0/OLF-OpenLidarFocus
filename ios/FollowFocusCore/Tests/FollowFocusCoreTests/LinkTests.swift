@@ -59,6 +59,49 @@ private final class FakeBoard {
 }
 
 final class LinkTests: XCTestCase {
+  func testReadSourceReleasesItsDescriptorAfterSocketDeinit() throws {
+    let queue = DispatchQueue(label: "test.socket.release")
+    queue.suspend()
+    var socket: UdpSocket? = UdpSocket(queue: queue)
+    try socket!.open()
+    let descriptor = socket!.fd
+    socket!.startReceiving()
+    weak var released = socket
+    socket = nil
+    XCTAssertNil(released)
+    let closed = expectation(description: "descriptor closed without its owner")
+    queue.asyncAfter(deadline: .now() + 0.05) {
+      XCTAssertEqual(fcntl(descriptor, F_GETFD), -1)
+      closed.fulfill()
+    }
+    queue.resume()
+    wait(for: [closed], timeout: 1)
+  }
+
+  func testCancellingOldReadSourceDoesNotCloseReopenedSocket() throws {
+    let queue = DispatchQueue(label: "test.socket.reopen")
+    queue.suspend()
+    let socket = UdpSocket(queue: queue)
+    try socket.open()
+    let oldDescriptor = socket.fd
+    socket.startReceiving()
+    socket.close()
+    XCTAssertEqual(socket.fd, -1)
+    try socket.open()
+    let newDescriptor = socket.fd
+    XCTAssertNotEqual(oldDescriptor, newDescriptor)
+    socket.startReceiving()
+    let checked = expectation(description: "only the old descriptor closes")
+    queue.asyncAfter(deadline: .now() + 0.05) {
+      XCTAssertEqual(fcntl(oldDescriptor, F_GETFD), -1)
+      XCTAssertGreaterThanOrEqual(fcntl(newDescriptor, F_GETFD), 0)
+      socket.close()
+      checked.fulfill()
+    }
+    queue.resume()
+    wait(for: [checked], timeout: 1)
+  }
+
   private func waitUntil(
     _ timeout: TimeInterval = 2, _ condition: () -> Bool
   ) -> Bool {

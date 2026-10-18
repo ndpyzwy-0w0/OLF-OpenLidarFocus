@@ -5,6 +5,34 @@ import XCTest
 @testable import Runner
 
 class RunnerTests: XCTestCase {
+  func testLidarUIEventsAreBoundedWhileTheMainThreadIsBusy() {
+    let engine = LidarEngine()
+    var deliveries = 0
+    engine.setEventSink { _ in deliveries += 1 }
+    for _ in 0..<8 {
+      engine.emit(distance: 1)
+      Thread.sleep(forTimeInterval: 0.04)
+    }
+    let delivered = expectation(description: "queued event delivered")
+    DispatchQueue.main.async { delivered.fulfill() }
+    wait(for: [delivered], timeout: 1)
+    XCTAssertEqual(deliveries, 1)
+    engine.setEventSink(nil)
+  }
+
+  func testCancellingLidarEventsDropsQueuedSamples() {
+    let engine = LidarEngine()
+    var deliveries = 0
+    engine.setEventSink { _ in deliveries += 1 }
+    engine.emit(distance: 1)
+    engine.setEventSink(nil)
+    engine.setEventSink { _ in deliveries += 1 }
+    let drained = expectation(description: "old subscription drained")
+    DispatchQueue.main.async { drained.fulfill() }
+    wait(for: [drained], timeout: 1)
+    XCTAssertEqual(deliveries, 0)
+    engine.setEventSink(nil)
+  }
 
   func testVisionOrientationMatchesPreviewRotationWithoutRotatingPortraitAgain() {
     XCTAssertEqual(LidarEngine.visionOrientation(for: 0), .up)

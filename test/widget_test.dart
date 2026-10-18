@@ -93,6 +93,12 @@ class FakeLidar extends LidarChannel {
   }
 }
 
+class DelayedLidar extends FakeLidar {
+  final ready = Completer<bool>();
+  @override
+  Future<bool> available() => ready.future;
+}
+
 FfLens lens({
   String id = 'L1',
   String name = '50mm F1.4',
@@ -235,6 +241,21 @@ Future<void> tapVisible(WidgetTester tester, Finder f) async {
 }
 
 void main() {
+  testWidgets(
+    'leaving before LiDAR availability completes never starts capture',
+    (tester) async {
+      final lidar = DelayedLidar();
+      await pumpFollowPage(tester, FakeCore(stateFor()), lidar: lidar);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+      lidar.ready.complete(true);
+      await tester.pumpAndSettle();
+      expect(lidar.starts, 0);
+      expect(lidar.disposals, 1);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets(
     'rotation and collapse retain the native camera and capture session',
     (tester) async {

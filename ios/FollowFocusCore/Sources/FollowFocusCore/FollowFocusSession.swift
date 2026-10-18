@@ -154,8 +154,14 @@ public final class FollowFocusSession {
   /// 状态快照回调（主线程）。约 20Hz；未连接且无变化时不重复推。
   public var onState: ((FollowFocusState) -> Void)?
 
-  private let queue = DispatchQueue(label: "ff.session")
+  private let queue: DispatchQueue
   private var timer: DispatchSourceTimer?
+  private var suspended = false
+  private var connectionGeneration = 0
+  private var lastEmitAt = Date.distantPast
+  private var deliveryPending = false
+  private var cachedLut: LensLut?
+  private var cachedCurve: [LutPoint] = []
 
   private var state = FollowFocusState()
   private var lens: Lens?
@@ -210,7 +216,9 @@ public final class FollowFocusSession {
     self.store = store
     self.cal = cal
     self.memo = memo
-    self.link = MotorLink()
+    let queue = DispatchQueue(label: "ff.session")
+    self.queue = queue
+    self.link = MotorLink(queue: queue)
     link.onStatus = { [weak self] s in self?.queue.async { self?.applyStatus(s) } }
     link.onStatusV2 = { [weak self] s in self?.queue.async { self?.applyStatusV2(s) } }
     link.onFm03 = { [weak self] t in self?.queue.async { self?.applyFm03(t) } }
@@ -238,16 +246,73 @@ public final class FollowFocusSession {
 
   public func start() {
     queue.async {
+      guard !self.suspended else { return }
       // 冷启动先认回上次那台板子，省掉"重新扫描 + 选用"两坐标。
       // 放在 timer 守卫之前：重复调用 start() 时也要能补上这次恢复。
       self.restoreDeviceOnQueue()
-      guard self.timer == nil else { return }
-      let t = DispatchSource.makeTimerSource(queue: self.queue)
-      t.schedule(deadline: .now() + 0.02, repeating: 0.02, leeway: .milliseconds(5))
-      t.setEventHandler { [weak self] in self?.tick() }
-      self.timer = t
-      t.resume()
-      self.emit()
+      self.startTimerOnQueue()
+    }
+  }
+
+  private func startTimerOnQueue() {
+    guard timer == nil else { return }
+    let t = DispatchSource.makeTimerSource(queue: queue)
+    t.schedule(deadline: .now() + 0.02, repeating: 0.02, leeway: .milliseconds(5))
+    t.setEventHandler { [weak self] in self?.tick() }
+    timer = t
+    t.resume()
+    emit()
+  }
+
+  /// Suspend all polling and release UDP after requesting a safe stop.
+  public func suspend() {
+    queue.async {
+      guard !self.suspended else { return }
+      self.suspended = true
+      self.connectionGeneration += 1
+      self.stopOnQueue()
+      self.stopLatched = true
+      self.wantEnabled = false
+      self.timer?.cancel()
+      self.timer = nil
+      self.pendingFm03.removeAll()
+      self.distance = nil
+      self.filter.reset()
+      self.markDirty()
+      self.finishSuspendingOnQueue(generation: self.connectionGeneration, retries: 3)
+    }
+  }
+
+  private func finishSuspendingOnQueue(generation: Int, retries: Int) {
+    guard suspended, generation == connectionGeneration else { return }
+    // Keep STOP retries bounded; never leave a background polling loop running.
+    if retries > 0, state.enabled || state.moving {
+      link.stop()
+      link.enable(false)
+      queue.asyncAfter(deadline: .now() + 0.2) {
+        self.finishSuspendingOnQueue(generation: generation, retries: retries - 1)
+      }
+    } else {
+      link.close()
+      markDirty()
+      emit()
+    }
+  }
+
+  /// Reopen feedback only. Motion still requires an explicit reset and fresh data.
+  public func resume() {
+    queue.async {
+      guard self.suspended else { return }
+      self.suspended = false
+      if self.device != nil {
+        do {
+          try self.link.open()
+          self.positionQueries.removeAll()
+          self.positionQueries.insert(self.link.query())
+          self.link.queryFm03()
+        } catch { self.setMsg("恢复连接失败：\(error)") }
+      }
+      self.startTimerOnQueue()
     }
   }
 
@@ -268,6 +333,7 @@ public final class FollowFocusSession {
 
   public func stop() {
     queue.async {
+      self.connectionGeneration += 1
       self.cancelCalibrationOnQueue("已停止")
       self.timer?.cancel()
       self.timer = nil
@@ -282,6 +348,7 @@ public final class FollowFocusSession {
   /// LiDAR 采样入口。无效或过期测距停止自动输出，禁止记录旧距离。
   public func ingest(distanceMeters: Double?) {
     queue.async {
+      guard !self.suspended else { return }
       guard let meters = distanceMeters, meters.isFinite, (0.05...1000).contains(meters) else {
         self.distance = nil
         self.filter.reset()
@@ -306,6 +373,7 @@ public final class FollowFocusSession {
 
   public func selectDevice(_ d: FfDiscovery) {
     queue.async {
+      self.connectionGeneration += 1
       self.cancelCalibrationOnQueue("已切换设备")
       self.invalidatePosition("已切换设备，请重新寻限位")
       self.device = d
@@ -346,6 +414,7 @@ public final class FollowFocusSession {
   /// 连接。没选设备就先扫描：只发现一台直接选，否则提示先选用（候选在快照的 devices 里）。
   public func connect() {
     queue.async {
+      guard !self.suspended else { return }
       guard self.calPhase == .idle else {
         self.setMsg("标定期间不能重连，请先取消标定")
         return
@@ -354,6 +423,7 @@ public final class FollowFocusSession {
         self.openLinkOnQueue()
         return
       }
+      let generation = self.connectionGeneration
       DispatchQueue.global(qos: .userInitiated).async { [weak self] in
         guard let self else { return }
         var found: [FfDiscovery] = []
@@ -364,6 +434,7 @@ public final class FollowFocusSession {
           failure = "\(error)"
         }
         self.queue.async {
+          guard !self.suspended, generation == self.connectionGeneration else { return }
           self.discovered = found
           if let failure {
             self.socketErrorText = failure
@@ -388,6 +459,7 @@ public final class FollowFocusSession {
 
   public func disconnect() {
     queue.async {
+      self.connectionGeneration += 1
       self.cancelCalibrationOnQueue("已断开")
       self.invalidatePosition("已断开，请重新寻限位")
       self.link.close()
@@ -397,6 +469,7 @@ public final class FollowFocusSession {
   }
 
   private func openLinkOnQueue() {
+    guard !suspended else { return }
     guard let host = link.host else {
       setMsg("还没选设备：先扫描并选用")
       return
@@ -426,6 +499,7 @@ public final class FollowFocusSession {
 
   public func enable(_ on: Bool) {
     queue.async {
+      guard !self.suspended else { return }
       if self.calPhase != .idle { if !on { self.cancelCalibrationOnQueue("已禁用") }; return }
       if on && self.stopLatched && self.calPositionValid {
         self.setMsg("已停止锁定，请点击复位后继续")
@@ -442,30 +516,32 @@ public final class FollowFocusSession {
 
   /// 停机闩锁：点“停”之后不再自动重发目标，否则自动跟焦会在 20ms 内把它覆盖掉。
   public func stopPressed() {
-    queue.async {
-      if self.calPhase != .idle { self.cancelCalibrationOnQueue("停止观察；电机内部寻限位仍会继续，立即中止需断开电机电源"); return }
-      if !self.stopLatched { self.resumeAuto = self.state.auto }
-      self.stopLatched = true
-      self.wantEnabled = false
-      self.link.stop()
-      self.link.enable(false)
-      self.lastStopSent = Date()
-      self.pendingJog = 0
-      self.takeManual("停机")
-      self.stopLatched = true
-      self.lastSent = nil
-      self.sliderDirty = false
-      self.wheelPull = nil
-      self.state.wheelPulling = false
-      self.wheelArrivalTarget = nil
-      self.setMsg("已停止锁定；复位后才能继续控制")
-    }
+    queue.async { self.stopOnQueue() }
+  }
+
+  private func stopOnQueue() {
+    if calPhase != .idle { cancelCalibrationOnQueue("停止观察；电机内部寻限位仍会继续，立即中止需断开电机电源"); return }
+    if !stopLatched { resumeAuto = state.auto }
+    stopLatched = true
+    wantEnabled = false
+    link.stop()
+    link.enable(false)
+    lastStopSent = Date()
+    pendingJog = 0
+    takeManual("停机")
+    stopLatched = true
+    lastSent = nil
+    sliderDirty = false
+    wheelPull = nil
+    state.wheelPulling = false
+    wheelArrivalTarget = nil
+    setMsg("已停止锁定；复位后才能继续控制")
   }
 
   /// Explicitly unlock STOP. Resume AF only if it was active before STOP and the distance is fresh.
   public func resumeControl() {
     queue.async {
-      guard self.calPhase == .idle, self.stopLatched, self.calPositionValid,
+      guard !self.suspended, self.calPhase == .idle, self.stopLatched, self.calPositionValid,
         !self.state.moving, self.requireFreshPosition() else { return }
       if self.resumeAuto {
         guard self.phase == .follow, self.lens?.lut.matchesDirection(self.state.dir) == true,
@@ -794,6 +870,7 @@ public final class FollowFocusSession {
   /// FM03 自主双端寻限位；保留参数固定为 0。
   public func startAutoCalibration() {
     queue.async {
+      guard !self.suspended else { return }
       guard self.calPhase == .idle, self.state.calSupported, self.link.isOpen,
         self.state.controlMode == .handwheel || self.lens != nil else {
         self.setMsg("需连接 FM03 2.0 固件并选择镜头")
@@ -1453,11 +1530,23 @@ public final class FollowFocusSession {
   }
 
   private func emit() {
-    // 未连接时没有位置/时间在变，没改动就不用推，省掉一堆无用消息。
+    guard !deliveryPending else { return }
     if !link.isOpen, revision == lastEmittedRevision { return }
+    let now = Date()
+    if link.isOpen, now.timeIntervalSince(lastEmitAt) < 0.05 { return }
+    lastEmitAt = now
     lastEmittedRevision = revision
+    deliveryPending = true
     let snap = buildSnapshot()
-    DispatchQueue.main.async { [weak self] in self?.onState?(snap) }
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.onState?(snap)
+      self.queue.async {
+        self.deliveryPending = false
+        // Deliver a final change even after the control timer has stopped.
+        if !self.link.isOpen { self.emit() }
+      }
+    }
   }
 
   /// 当前快照。UI 首次绘制时直接取一次，不用等第一个事件。
@@ -1481,7 +1570,11 @@ public final class FollowFocusSession {
     s.phase = phase
     s.strokeSteps = calPositionValid ? state.calSafeSpan : 0
     s.lutPoints = lens?.lut.points ?? []
-    s.lutCurve = lens?.lut.curve ?? []
+    if cachedLut != lens?.lut {
+      cachedLut = lens?.lut
+      cachedCurve = cachedLut?.curve ?? []
+    }
+    s.lutCurve = cachedCurve
     s.lutReady = lens?.lut.ready == true && lens?.lut.matchesDirection(state.dir) == true
     s.stepsPerRev = stepsPerRev
     s.maxRevsPerSec = cal.maxRevsPerSec(microsteps)

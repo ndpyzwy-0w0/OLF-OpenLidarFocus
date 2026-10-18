@@ -429,11 +429,12 @@ List<String> _strings(Object? v) =>
 class FfCore {
   static const _methods = MethodChannel('ff.core');
   static const _events = EventChannel('ff.core/events');
-
-  /// 约 20Hz 的状态快照流。UI 只渲染最新一条。
-  Stream<FfState> states() => _events.receiveBroadcastStream().map(
+  static final _states = _events.receiveBroadcastStream().map(
     (e) => FfState.fromMap(e as Map<dynamic, dynamic>),
   );
+
+  /// 约 20Hz 的状态快照流。UI 只渲染最新一条。
+  Stream<FfState> states() => _states;
 
   /// 取一次当前快照，用于首帧绘制。
   Future<FfState> snapshot() async {

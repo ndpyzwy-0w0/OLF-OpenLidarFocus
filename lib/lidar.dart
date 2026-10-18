@@ -59,13 +59,17 @@ class LidarSample {
 class LidarChannel {
   static const _methods = MethodChannel('ff.lidar');
   static const _events = EventChannel('ff.lidar/events');
+  static final _samples = _events.receiveBroadcastStream().map(
+    (e) => LidarSample.fromMap(e as Map<dynamic, dynamic>),
+  );
 
   StreamSubscription<dynamic>? _sub;
+  bool _disposed = false;
 
   static bool get isSupported => Platform.isIOS;
 
   Future<bool> available() async {
-    if (!isSupported) return false;
+    if (_disposed || !isSupported) return false;
     try {
       return await _methods.invokeMethod<bool>('available') ?? false;
     } on MissingPluginException {
@@ -74,7 +78,7 @@ class LidarChannel {
   }
 
   Future<void> start({required bool trackFaces}) async {
-    if (!isSupported) return;
+    if (_disposed || !isSupported) return;
     await _methods.invokeMethod<void>('start', {'trackFaces': trackFaces});
   }
 
@@ -97,21 +101,22 @@ class LidarChannel {
     await _methods.invokeMethod<void>('setTrackFaces', {'on': on});
   }
 
-  Stream<LidarSample> samples() {
-    return _events.receiveBroadcastStream().map((e) {
-      return LidarSample.fromMap(e as Map<dynamic, dynamic>);
-    });
-  }
+  Stream<LidarSample> samples() => _samples;
 
   Future<void> listen(void Function(LidarSample) onSample) async {
     await _sub?.cancel();
-    if (!isSupported) return;
+    if (_disposed || !isSupported) return;
     _sub = samples().listen(onSample);
   }
 
   Future<void> dispose() async {
-    await _sub?.cancel();
-    _sub = null;
-    await stop();
+    if (_disposed) return;
+    _disposed = true;
+    try {
+      await stop();
+    } finally {
+      await _sub?.cancel();
+      _sub = null;
+    }
   }
 }

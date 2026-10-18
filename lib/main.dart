@@ -169,6 +169,15 @@ class FollowPage extends StatefulWidget {
 }
 
 class _FollowPageState extends State<FollowPage> {
+  // The camera overlays stay black even when the rest of the app is light.
+  static final _viewfinderTheme = FollowApp._theme(Brightness.dark).copyWith(
+    iconButtonTheme: IconButtonThemeData(
+      style: IconButton.styleFrom(
+        foregroundColor: Colors.white,
+        disabledForegroundColor: Colors.white60,
+      ),
+    ),
+  );
   bool get _paused => _s.stopLatched && _s.strokeSteps > 0;
   Future<void> _stopOrResume() async {
     setState(() => _sliderDrag = null);
@@ -217,8 +226,10 @@ class _FollowPageState extends State<FollowPage> {
 
   Future<void> _bootLidar() async {
     final ok = await _lidar.available();
+    if (!mounted) return;
     if (ok) {
       await _lidar.listen(_onLidar);
+      if (!mounted) return;
       await _lidar.start(trackFaces: _s.faces);
     }
     if (mounted) setState(() => _lidarOk = ok);
@@ -226,17 +237,24 @@ class _FollowPageState extends State<FollowPage> {
 
   void _onLidar(LidarSample s) {
     if (!mounted) return;
+    final face =
+        (s.faceU != null &&
+            s.faceV != null &&
+            s.faceW != null &&
+            s.faceH != null)
+        ? Rect.fromLTWH(s.faceU!, s.faceV!, s.faceW!, s.faceH!)
+        : null;
+    if (_previewQuarterTurns == s.previewQuarterTurns &&
+        _u == s.u &&
+        _v == s.v &&
+        _face == face) {
+      return;
+    }
     setState(() {
       _previewQuarterTurns = s.previewQuarterTurns;
       _u = s.u;
       _v = s.v;
-      _face =
-          (s.faceU != null &&
-              s.faceV != null &&
-              s.faceW != null &&
-              s.faceH != null)
-          ? Rect.fromLTWH(s.faceU!, s.faceV!, s.faceW!, s.faceH!)
-          : null;
+      _face = face;
     });
   }
 
@@ -327,15 +345,6 @@ class _FollowPageState extends State<FollowPage> {
         ? '--'
         : '${_s.distanceM!.toStringAsFixed(2)} m';
     final landscape = _isLandscape;
-    // The camera overlays stay black even when the rest of the app is light.
-    final viewfinderTheme = FollowApp._theme(Brightness.dark).copyWith(
-      iconButtonTheme: IconButtonThemeData(
-        style: IconButton.styleFrom(
-          foregroundColor: Colors.white,
-          disabledForegroundColor: Colors.white60,
-        ),
-      ),
-    );
     return Scaffold(
       key: _scaffoldKey,
       backgroundColor: Colors.black,
@@ -399,7 +408,7 @@ class _FollowPageState extends State<FollowPage> {
                 ),
               ),
               if (landscape)
-                Theme(data: viewfinderTheme, child: _landscapeView(distText))
+                Theme(data: _viewfinderTheme, child: _landscapeView(distText))
               else
                 SafeArea(
                   top: false,
@@ -412,7 +421,7 @@ class _FollowPageState extends State<FollowPage> {
                             child: Padding(
                               padding: const EdgeInsets.only(left: 12, top: 8),
                               child: Theme(
-                                data: viewfinderTheme,
+                                data: _viewfinderTheme,
                                 child: _previewToggle(distText),
                               ),
                             ),

@@ -38,16 +38,19 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     // LiDAR 采样直连会话：不再经 Dart 绕一圈。
     // 这里也是 Runner 侧唯一该同时碰「平台采集」和「功能层」的地方。
     let session = self.session
-    LidarEngine.shared.onDistance = { meters in session.ingest(distanceMeters: meters) }
+    LidarEngine.shared.onDistance = { [weak session] meters in session?.ingest(distanceMeters: meters) }
 
     session.start()
     NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
       name: UIApplication.didEnterBackgroundNotification, object: nil)
+    NotificationCenter.default.addObserver(self, selector: #selector(didBecomeActive),
+      name: UIApplication.didBecomeActiveNotification, object: nil)
   }
 
   deinit { NotificationCenter.default.removeObserver(self) }
 
-  @objc private func didEnterBackground() { session.stopPressed() }
+  @objc private func didEnterBackground() { session.suspend() }
+  @objc private func didBecomeActive() { session.resume() }
 
   static func register(with registrar: FlutterPluginRegistrar) {
     // 存档在这里加载：插件自己持有功能层，UI 侧不管存档路径。
@@ -278,7 +281,8 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
     sinkLock.unlock()
     guard let sink else { return }
     let map = channelObject(state)
-    DispatchQueue.main.async { sink(map) }
+    // onState is already delivered on main; avoid another unbounded queue hop.
+    sink(map)
   }
 
   /// 快照 + 壳层自己补的字段（目前只有 App 版本）。所有出口都走这里，

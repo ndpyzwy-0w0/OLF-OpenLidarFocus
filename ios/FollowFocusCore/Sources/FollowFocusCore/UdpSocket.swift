@@ -39,6 +39,7 @@ final class UdpSocket {
   deinit { close() }
 
   func open() throws {
+    close()
     let fd = socket(AF_INET, SOCK_DGRAM, 0)
     guard fd >= 0 else { throw UdpError.socketFailed(errno) }
     self.fd = fd
@@ -81,23 +82,23 @@ final class UdpSocket {
     guard source == nil, fd >= 0 else { return }
     let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
     src.setEventHandler { [weak self] in self?.drain() }
-    src.setCancelHandler { [weak self] in
-      guard let self, self.fd >= 0 else { return }
-      Darwin.close(self.fd)
-      self.fd = -1
-    }
+    // The source owns this exact descriptor, even after this socket is reopened or released.
+    let descriptor = fd
+    src.setCancelHandler { Darwin.close(descriptor) }
     source = src
     src.resume()
   }
 
   /// cancel 处理器负责关 fd，所以只在没装 source 时直接关。
   func close() {
+    let descriptor = fd
+    fd = -1
+    localPort = 0
     if let source {
       source.cancel()
       self.source = nil
-    } else if fd >= 0 {
-      Darwin.close(fd)
-      fd = -1
+    } else if descriptor >= 0 {
+      Darwin.close(descriptor)
     }
   }
 
@@ -153,7 +154,9 @@ final class UdpSocket {
   }
 
   private func drain() {
-    while let packet = tryReceive() {
+    // Yield to cancellation even if packets arrive continuously.
+    for _ in 0..<64 {
+      guard let packet = tryReceive() else { break }
       onPacket?(packet.bytes, packet.from)
     }
   }

@@ -32,8 +32,11 @@ public final class MotorLink {
 
   private var sock: UdpSocket?
   private var nextSequence: UInt8 = 0
+  private let queue: DispatchQueue
 
-  public init() {}
+  public init(queue: DispatchQueue = DispatchQueue(label: "ff.link")) {
+    self.queue = queue
+  }
 
   public var isOpen: Bool { sock != nil }
   public var localPort: UInt16? { sock?.localPort }
@@ -50,8 +53,11 @@ public final class MotorLink {
     rxPackets = 0
     probeTx = 0
     lastEchoAt = nil
-    let s = UdpSocket()
-    s.onPacket = { [weak self] bytes, _ in self?.handle(bytes) }
+    let s = UdpSocket(queue: queue)
+    s.onPacket = { [weak self, weak s] bytes, _ in
+      guard let self, let s, self.sock === s else { return }
+      self.handle(bytes)
+    }
     s.onError = { [weak self] e in self?.onSocketError?(e) }
     try s.open()
     s.startReceiving()

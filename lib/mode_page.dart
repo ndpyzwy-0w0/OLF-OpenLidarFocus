@@ -22,7 +22,11 @@ class ModePage extends StatefulWidget {
 }
 
 class _ModePageState extends State<ModePage> {
-  late final _states = widget.core.states();
+  late final _states = widget.core.states().distinct(
+    (previous, next) =>
+        previous.connected == next.connected &&
+        previous.linkAlive == next.linkAlive,
+  );
 
   Future<void> _open(bool wheel) async {
     await widget.core.setControlMode(wheel ? 'handwheel' : 'automatic');

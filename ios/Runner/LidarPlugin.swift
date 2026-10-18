@@ -15,6 +15,8 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   private var sync: AVCaptureDataOutputSynchronizer?
   private let camQueue = DispatchQueue(label: "ff.lidar.cam")
   private var configured = false
+  private var wantsCapture = false
+  private var foreground = true
   private var frameIndex = 0
   private var lastDistance: Double?
   private var lastEmit = Date.distantPast
@@ -22,6 +24,8 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   // These values are owned by camQueue. Flutter callbacks are owned by main.
   private let sinkLock = NSLock()
   private var eventSink: FlutterEventSink?
+  private var deliveryPending = false
+  private var sinkGeneration = 0
   /// 测到的距离（米）直连控制会话用。
   ///
   /// 这条回调是**功能层直连**的关键：LiDAR 采样不再经 event channel 绕到 Dart
@@ -33,6 +37,31 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   private var face: CGRect?
   private var faceOrientation: CGImagePropertyOrientation = .up
 
+  override init() {
+    super.init()
+    foreground = UIApplication.shared.applicationState != .background
+    NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
+      name: UIApplication.didEnterBackgroundNotification, object: nil)
+    NotificationCenter.default.addObserver(self, selector: #selector(didBecomeActive),
+      name: UIApplication.didBecomeActiveNotification, object: nil)
+  }
+
+  deinit { NotificationCenter.default.removeObserver(self) }
+
+  @objc private func didEnterBackground() {
+    camQueue.async {
+      self.foreground = false
+      self.stopOnCamQueue()
+    }
+  }
+
+  @objc private func didBecomeActive() {
+    camQueue.async {
+      self.foreground = true
+      if self.wantsCapture { self.startOnCamQueue() }
+    }
+  }
+
   func available() -> Bool {
     AVCaptureDevice.default(.builtInLiDARDepthCamera, for: .video, position: .back) != nil
   }
@@ -40,20 +69,34 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   func setEventSink(_ sink: FlutterEventSink?) {
     sinkLock.lock()
     eventSink = sink
+    sinkGeneration += 1
     sinkLock.unlock()
   }
 
   func start() {
-    AVCaptureDevice.requestAccess(for: .video) { ok in
-      guard ok else { return }
-      self.camQueue.async { self.startOnCamQueue() }
+    camQueue.async {
+      self.wantsCapture = true
+      AVCaptureDevice.requestAccess(for: .video) { ok in
+        guard ok else { return }
+        self.camQueue.async { self.startOnCamQueue() }
+      }
     }
   }
 
   func stop() {
     camQueue.async {
-      if self.session.isRunning { self.session.stopRunning() }
+      self.wantsCapture = false
+      self.stopOnCamQueue()
     }
+  }
+
+  private func stopOnCamQueue() {
+    if session.isRunning { session.stopRunning() }
+    lastDistance = nil
+    face = nil
+    frameIndex = 0
+    lastEmit = .distantPast
+    onDistance?(nil)
   }
 
   func setTarget(u: Double, v: Double) {
@@ -72,6 +115,8 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   }
 
   private func startOnCamQueue() {
+    guard wantsCapture, foreground,
+      AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
     if !configured {
       do { try configure() } catch { return }
     }
@@ -83,9 +128,13 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
       throw NSError(domain: "ff.lidar", code: 1)
     }
     session.beginConfiguration()
+    defer { session.commitConfiguration() }
     session.sessionPreset = .vga640x480
     let input = try AVCaptureDeviceInput(device: device)
-    if session.canAddInput(input) { session.addInput(input) }
+    guard session.canAddInput(input), session.canAddOutput(videoOut), session.canAddOutput(depthOut) else {
+      throw NSError(domain: "ff.lidar", code: 2)
+    }
+    session.addInput(input)
     videoOut.alwaysDiscardsLateVideoFrames = true
     videoOut.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
     if session.canAddOutput(videoOut) { session.addOutput(videoOut) }
@@ -100,7 +149,6 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
     let s = AVCaptureDataOutputSynchronizer(dataOutputs: [videoOut, depthOut])
     s.setDelegate(self, queue: camQueue)
     sync = s
-    session.commitConfiguration()
     configured = true
   }
 
@@ -108,28 +156,29 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
     _ synchronizer: AVCaptureDataOutputSynchronizer,
     didOutput synchronizedDataCollection: AVCaptureSynchronizedDataCollection
   ) {
-    guard
-      let vData = synchronizedDataCollection.synchronizedData(for: videoOut) as? AVCaptureSynchronizedSampleBufferData,
-      !vData.sampleBufferWasDropped,
-      let dData = synchronizedDataCollection.synchronizedData(for: depthOut) as? AVCaptureSynchronizedDepthData,
-      !dData.depthDataWasDropped
-    else { return }
+    guard wantsCapture, foreground else { return }
+    autoreleasepool {
+      guard
+        let vData = synchronizedDataCollection.synchronizedData(for: videoOut) as? AVCaptureSynchronizedSampleBufferData,
+        !vData.sampleBufferWasDropped,
+        let dData = synchronizedDataCollection.synchronizedData(for: depthOut) as? AVCaptureSynchronizedDepthData,
+        !dData.depthDataWasDropped
+      else { return }
 
-    frameIndex += 1
-    if trackFaces, frameIndex % 3 == 0, let pb = CMSampleBufferGetImageBuffer(vData.sampleBuffer) {
-      updateFace(pb)
-    } else if !trackFaces {
-      face = nil
-    }
+      frameIndex += 1
+      if trackFaces, frameIndex % 3 == 0, let pb = CMSampleBufferGetImageBuffer(vData.sampleBuffer) {
+        updateFace(pb)
+      } else if !trackFaces {
+        face = nil
+      }
 
-    let depth = dData.depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
-    let meters = medianMeters(depth.depthDataMap, u: target.x, v: target.y)
-    if let meters {
+      let depth = dData.depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+      let meters = medianMeters(depth.depthDataMap, u: target.x, v: target.y)
       lastDistance = meters
+      // 直连控制会话（功能层内部），再推给 UI 做显示。
+      onDistance?(meters)
+      emit(distance: lastDistance)
     }
-    // 直连控制会话（功能层内部），再推给 UI 做显示。
-    onDistance?(meters)
-    emit(distance: lastDistance)
   }
 
   private func updateFace(_ pb: CVPixelBuffer) {
@@ -205,6 +254,14 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   func emit(distance: Double?) {
     let now = Date()
     if now.timeIntervalSince(lastEmit) < 0.03 { return }
+    sinkLock.lock()
+    guard eventSink != nil, !deliveryPending else {
+      sinkLock.unlock()
+      return
+    }
+    deliveryPending = true
+    let generation = sinkGeneration
+    sinkLock.unlock()
     lastEmit = now
     var map: [String: Any] = [
       "u": target.x,
@@ -227,10 +284,12 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
       map["face_w"] = face.size.width
       map["face_h"] = face.size.height
     }
-    sinkLock.lock()
-    let sink = eventSink
-    sinkLock.unlock()
     DispatchQueue.main.async {
+      self.sinkLock.lock()
+      let sink = generation == self.sinkGeneration ? self.eventSink : nil
+      self.deliveryPending = false
+      self.sinkLock.unlock()
+      guard let sink else { return }
       // Samples stay in portrait coordinates. Rotate the preview and its overlay together.
       let scene = UIApplication.shared.connectedScenes
         .compactMap { $0 as? UIWindowScene }
@@ -242,7 +301,7 @@ final class LidarEngine: NSObject, AVCaptureDataOutputSynchronizerDelegate {
         self.faceOrientation = Self.visionOrientation(for: quarterTurns)
       }
       map["preview_quarter_turns"] = quarterTurns
-      sink?(map)
+      sink(map)
     }
   }
 }
@@ -351,12 +410,13 @@ final class LidarPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   }
 
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-    DispatchQueue.main.async { LidarEngine.shared.setEventSink(events) }
+    LidarEngine.shared.setEventSink(events)
     return nil
   }
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
-    DispatchQueue.main.async { LidarEngine.shared.setEventSink(nil) }
+    LidarEngine.shared.setEventSink(nil)
+    LidarEngine.shared.stop()
     return nil
   }
 }

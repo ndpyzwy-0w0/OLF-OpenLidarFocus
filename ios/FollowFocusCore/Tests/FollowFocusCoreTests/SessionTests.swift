@@ -282,6 +282,66 @@ private final class Harness {
 }
 
 final class SessionTests: XCTestCase {
+  func testSuspendStopsPollingAndRejectsLateControlCalls() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareWheel(h)
+    h.firmware.dropFirstCommands = [kFfStop, kFfEnable]
+    h.session.suspend()
+    XCTAssertTrue(waitUntil { !h.session.snapshot().connected && !h.firmware.enabled })
+    let commands = h.firmware.commands.count
+    h.session.connect()
+    h.session.enable(true)
+    h.session.startAutoCalibration()
+    h.session.setSlider(0.8)
+    h.session.ingest(distanceMeters: 2)
+    pump(0.4)
+    XCTAssertEqual(h.firmware.commands.count, commands)
+    XCTAssertNil(h.session.snapshot().distanceM)
+    XCTAssertTrue(h.session.snapshot().stopLatched)
+  }
+
+  func testResumeRestoresOnlyFeedbackUntilExplicitReset() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareWheel(h)
+    h.session.suspend()
+    XCTAssertTrue(waitUntil { !h.session.snapshot().connected && !h.firmware.enabled })
+    let moves = h.firmware.count(kFfSetPos)
+    h.session.resume()
+    XCTAssertTrue(waitUntil { h.session.snapshot().linkAlive && h.session.snapshot().canResume })
+    pump(0.3)
+    XCTAssertFalse(h.firmware.enabled)
+    XCTAssertEqual(h.firmware.count(kFfSetPos), moves)
+    XCTAssertTrue(h.session.snapshot().stopLatched)
+    h.session.resumeControl()
+    XCTAssertTrue(waitUntil { h.firmware.enabled && !h.session.snapshot().stopLatched })
+  }
+
+  func testRapidForegroundReturnCannotCloseTheNewConnection() throws {
+    let h = try Harness(); defer { h.stop() }
+    prepareWheel(h)
+    h.session.suspend()
+    h.session.resume()
+    pump(0.8)
+    XCTAssertTrue(h.session.snapshot().connected)
+    XCTAssertTrue(h.session.snapshot().linkAlive)
+    XCTAssertFalse(h.firmware.enabled)
+  }
+
+  func testSlowMainThreadDoesNotAccumulateSnapshotCallbacks() throws {
+    let h = try Harness(); defer { h.stop() }
+    h.session.connect()
+    XCTAssertTrue(waitUntil { h.session.snapshot().linkAlive })
+    pump(0.1)
+    var deliveries = 0
+    h.session.onState = { _ in deliveries += 1 }
+    Thread.sleep(forTimeInterval: 0.35)
+    pump(0.01)
+    XCTAssertLessThanOrEqual(deliveries, 2)
+    pump(0.15)
+    XCTAssertGreaterThan(deliveries, 1)
+    XCTAssertLessThanOrEqual(deliveries, 6)
+  }
+
   private func prepareAuto(_ h: Harness) {
     h.session.selectDevice(FfDiscovery(deviceId: "FF-TEST01", mac: "", kind: 1,
       protocolVersion: 2, udpPort: Int(h.firmware.port), fwMajor: 2,
@@ -520,9 +580,11 @@ final class SessionTests: XCTestCase {
   func testDelayedUntrustedReplyFromScanCannotEraseCompletedResult() throws {
     let h = try Harness(); defer { h.stop() }
     prepareAuto(h)
+    h.firmware.holdCalibration.set(true)
     h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil { h.latest.current?.calStage == "seek_negative" })
     let oldSequence = try XCTUnwrap(h.firmware.last(kFfQuery)?.sequence)
+    h.firmware.holdCalibration.set(false)
     XCTAssertTrue(waitUntil(4) { h.latest.current?.calDirectionPending == true })
     let stale = MotorStatusV2(status: MotorStatus(sequence: oldSequence, pos: 0,
       target: 0, enabled: true, moving: false, canOk: true, limited: false,
@@ -1109,6 +1171,7 @@ final class SessionTests: XCTestCase {
     h.session.setControlMode(.handwheel);h.session.connect();pump(0.2)
     h.session.setSlider(0.2);pump(0.1)
     XCTAssertEqual(h.firmware.count(kFfSetPos),0)
+    h.firmware.holdCalibration.set(true)
     h.session.startAutoCalibration()
     XCTAssertTrue(waitUntil { h.latest.current?.calStage=="seek_negative" })
     h.session.setSlider(0.6);pump(0.1)
@@ -1204,6 +1267,7 @@ final class SessionTests: XCTestCase {
     h.session.ingest(distanceMeters: 2)
     h.session.setAuto(true)
     XCTAssertTrue(waitUntil { h.firmware.count(kFfSetPos) > 0 })
+    XCTAssertTrue(waitUntil { h.latest.current?.auto == true })
     XCTAssertTrue(waitUntil { h.latest.current?.auto == false && h.latest.current?.distanceM == nil })
     let count = h.store.lenses.first!.lut.points.count
     h.session.addLutPoint()
