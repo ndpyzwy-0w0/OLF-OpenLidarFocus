@@ -63,7 +63,7 @@ class FollowApp extends StatelessWidget {
     );
   }
 
-  ThemeData _theme(Brightness brightness) {
+  static ThemeData _theme(Brightness brightness) {
     final dark = brightness == Brightness.dark;
     final theme = ThemeData(
       brightness: brightness,
@@ -278,6 +278,15 @@ class _FollowPageState extends State<FollowPage> {
         ? '--'
         : '${_s.distanceM!.toStringAsFixed(2)} m';
     final landscape = _isLandscape;
+    // The camera overlays stay black even when the rest of the app is light.
+    final viewfinderTheme = FollowApp._theme(Brightness.dark).copyWith(
+      iconButtonTheme: IconButtonThemeData(
+        style: IconButton.styleFrom(
+          foregroundColor: Colors.white,
+          disabledForegroundColor: Colors.white60,
+        ),
+      ),
+    );
     return Scaffold(
       key: _scaffoldKey,
       backgroundColor: Colors.black,
@@ -341,7 +350,7 @@ class _FollowPageState extends State<FollowPage> {
                 ),
               ),
               if (landscape)
-                _landscapeView(distText)
+                Theme(data: viewfinderTheme, child: _landscapeView(distText))
               else
                 SafeArea(
                   top: false,
@@ -353,7 +362,10 @@ class _FollowPageState extends State<FollowPage> {
                             alignment: Alignment.topLeft,
                             child: Padding(
                               padding: const EdgeInsets.only(left: 12, top: 8),
-                              child: _previewToggle(distText),
+                              child: Theme(
+                                data: viewfinderTheme,
+                                child: _previewToggle(distText),
+                              ),
                             ),
                           ),
                         )
@@ -844,6 +856,8 @@ class _FollowPageState extends State<FollowPage> {
       style: FilledButton.styleFrom(
         backgroundColor: color,
         foregroundColor: Colors.white,
+        disabledForegroundColor: Colors.white60,
+        disabledBackgroundColor: color.withValues(alpha: .45),
         padding: EdgeInsets.zero,
         shape: const CircleBorder(),
       ),

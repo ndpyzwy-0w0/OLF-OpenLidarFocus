@@ -186,6 +186,7 @@ Future<void> pumpFollowPage(
   WidgetTester tester,
   FakeCore core, {
   LidarChannel? lidar,
+  Brightness brightness = Brightness.light,
 }) async {
   tester.view.physicalSize = const Size(430, 932);
   tester.view.devicePixelRatio = 1;
@@ -193,6 +194,7 @@ Future<void> pumpFollowPage(
   addTearDown(tester.view.resetDevicePixelRatio);
   await tester.pumpWidget(
     MaterialApp(
+      theme: ThemeData(brightness: brightness),
       home: FollowPage(
         key: UniqueKey(),
         core: core,
@@ -339,6 +341,60 @@ void main() {
       reason: 'Leaving the page restores system rotation',
     );
   });
+
+  for (final brightness in Brightness.values) {
+    testWidgets('viewfinder contrast stays readable in $brightness', (
+      tester,
+    ) async {
+      final core = FakeCore(
+        stateFor(phase: SetupPhase.stroke, lutReady: false, distanceM: '2.34'),
+      );
+      await pumpFollowPage(tester, core, brightness: brightness);
+
+      Color textColor(String text) => Color.alphaBlend(
+        tester
+            .widget<RichText>(
+              find.descendant(
+                of: find.text(text),
+                matching: find.byType(RichText),
+              ),
+            )
+            .text
+            .style!
+            .color!,
+        Colors.black,
+      );
+
+      expect(textColor('摄像头 展开').computeLuminance(), greaterThan(.5));
+      tester.view.physicalSize = const Size(932, 430);
+      await tester.pumpAndSettle();
+      for (final text in ['50mm F1.4', '物距 2.34 m', '1000 → 1000', '0 / 5+']) {
+        expect(
+          textColor(text).computeLuminance(),
+          greaterThan(.5),
+          reason: text,
+        );
+      }
+      expect(textColor('手动').computeLuminance(), greaterThan(.25));
+      expect(
+        Theme.of(tester.element(find.byTooltip('控制与标定'))).brightness,
+        Brightness.dark,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, '手动'))
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.byTooltip('控制与标定'));
+      await tester.pumpAndSettle();
+      expect(
+        Theme.of(tester.element(find.text('跟焦控制与标定'))).brightness,
+        brightness,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('small landscape supports setup, keyboard and disabled auto', (
     tester,
