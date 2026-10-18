@@ -22,46 +22,13 @@ void main() {
   runApp(FollowApp(core: core));
 }
 
-class FollowApp extends StatelessWidget {
+class FollowApp extends StatefulWidget {
   final FfCore core;
 
   const FollowApp({super.key, required this.core});
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '跟焦器',
-      debugShowCheckedModeBanner: false,
-      theme: _theme(Brightness.light),
-      darkTheme: _theme(Brightness.dark),
-      themeMode: ThemeMode.system,
-      builder: (context, child) {
-        final keyboardHeight = MediaQuery.viewInsetsOf(context).bottom;
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            child!,
-            if (keyboardHeight > 0)
-              Positioned(
-                right: 12,
-                bottom: keyboardHeight + 8,
-                child: Material(
-                  color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(20),
-                  child: TextButton.icon(
-                    onPressed: () =>
-                        FocusManager.instance.primaryFocus?.unfocus(),
-                    icon: const Icon(LucideIcons.keyboardOff),
-                    label: const Text('收起键盘'),
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-      home: ModePage(core: core),
-    );
-  }
+  State<FollowApp> createState() => _FollowAppState();
 
   static ThemeData _theme(Brightness brightness) {
     final dark = brightness == Brightness.dark;
@@ -92,6 +59,88 @@ class FollowApp extends StatelessWidget {
         englishLike: theme.typography.englishLike.apply(fontSizeFactor: .9),
         dense: theme.typography.dense.apply(fontSizeFactor: .9),
         tall: theme.typography.tall.apply(fontSizeFactor: .9),
+      ),
+    );
+  }
+}
+
+class _FollowAppState extends State<FollowApp> {
+  ThemeMode? _themeMode;
+  final _messengerKey = GlobalKey<ScaffoldMessengerState>();
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadThemeMode());
+  }
+
+  Future<void> _loadThemeMode() async {
+    try {
+      final saved = await widget.core.loadThemeMode();
+      if (mounted && _themeMode == null) {
+        setState(() {
+          _themeMode =
+              ThemeMode.values
+                  .where((mode) => mode.name == saved)
+                  .firstOrNull ??
+              ThemeMode.system;
+        });
+      }
+    } on PlatformException {
+      // A missing or unreadable preference falls back to the system appearance.
+    }
+  }
+
+  Future<void> _setThemeMode(ThemeMode mode) async {
+    setState(() => _themeMode = mode);
+    try {
+      await widget.core.saveThemeMode(mode.name);
+    } on PlatformException {
+      if (mounted) {
+        _messengerKey.currentState?.showSnackBar(
+          const SnackBar(content: Text('外观已切换，但保存失败，重启后可能恢复默认。')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: '跟焦器',
+      scaffoldMessengerKey: _messengerKey,
+      debugShowCheckedModeBanner: false,
+      theme: FollowApp._theme(Brightness.light),
+      darkTheme: FollowApp._theme(Brightness.dark),
+      themeMode: _themeMode ?? ThemeMode.system,
+      builder: (context, child) {
+        final keyboardHeight = MediaQuery.viewInsetsOf(context).bottom;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            child!,
+            if (keyboardHeight > 0)
+              Positioned(
+                right: 12,
+                bottom: keyboardHeight + 8,
+                child: Material(
+                  color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(20),
+                  child: TextButton.icon(
+                    onPressed: () =>
+                        FocusManager.instance.primaryFocus?.unfocus(),
+                    icon: const Icon(LucideIcons.keyboardOff),
+                    label: const Text('收起键盘'),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+      home: ModePage(
+        core: widget.core,
+        themeMode: _themeMode ?? ThemeMode.system,
+        onThemeChanged: _setThemeMode,
       ),
     );
   }

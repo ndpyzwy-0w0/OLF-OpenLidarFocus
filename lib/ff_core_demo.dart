@@ -17,6 +17,11 @@ class FfCoreDemo extends FfCore {
       ]),
   ];
   String _id = 'demo';
+  String? _themeMode;
+  @override
+  Future<String?> loadThemeMode() async => _themeMode;
+  @override
+  Future<void> saveThemeMode(String mode) async => _themeMode = mode;
   final _none = _DemoLens('', '', '');
   _DemoLens get _cur => _lenses.where((l) => l.id == _id).firstOrNull ?? _none;
   bool _connected = true, _enabled = true, _valid = true, _following = true;

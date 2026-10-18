@@ -13,8 +13,8 @@ import 'package:iphone_follow_focus/device_page.dart';
 
 /// 伪造的核心：只记录命令、按需推快照。
 ///
-/// 只覆盖 [FfCore.invoke] 这一个出口，所以**不碰平台通道**，也不需要在测试里
-/// mock `ff.core`。这样测试断言的是“UI 发出了什么命令”，而不是 UI 里复制了一份逻辑 ——
+/// 控制命令只覆盖 [FfCore.invoke]，外观偏好用内存模拟，所以**不碰平台通道**。
+/// 测试断言的是“UI 发出了什么命令”，而不是 UI 里复制了一份逻辑 ——
 /// UI 里本来就不该有逻辑。
 class FakeCore extends FfCore {
   final calls = <String>[];
@@ -23,8 +23,20 @@ class FakeCore extends FfCore {
 
   FfState state;
   List<FfDevice> devicesToReturn = const [];
+  String? savedThemeMode;
+  bool failThemeSave = false;
 
   FakeCore([this.state = const FfState()]);
+
+  @override
+  Future<String?> loadThemeMode() async => savedThemeMode;
+
+  @override
+  Future<void> saveThemeMode(String mode) async {
+    if (failThemeSave) throw PlatformException(code: 'save_failed');
+    await invoke('setThemeMode', {'mode': mode});
+    savedThemeMode = mode;
+  }
 
   @override
   Stream<FfState> states() async* {
@@ -594,6 +606,80 @@ void main() {
     await tester.tap(find.text('管理'));
     await tester.pumpAndSettle();
     expect(find.byType(DevicePage), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('appearance can override the system and restore a saved choice', (
+    tester,
+  ) async {
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    final core = FakeCore()..savedThemeMode = 'dark';
+    await tester.pumpWidget(FollowApp(core: core));
+    await tester.pumpAndSettle();
+    Brightness appearance() =>
+        Theme.of(tester.element(find.text('选择跟焦方式'))).brightness;
+    Future<void> choose(String label) async {
+      await tester.tap(find.byTooltip('切换外观'));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.widgetWithText(CheckedPopupMenuItem<ThemeMode>, label),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    expect(appearance(), Brightness.dark);
+    await choose('浅色模式');
+    expect(appearance(), Brightness.light);
+    expect(core.savedThemeMode, 'light');
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    await tester.pumpAndSettle();
+    expect(appearance(), Brightness.light);
+    await tester.pumpWidget(FollowApp(key: UniqueKey(), core: core));
+    await tester.pumpAndSettle();
+    expect(
+      appearance(),
+      Brightness.light,
+      reason: 'restore after app recreation',
+    );
+    await choose('跟随系统');
+    expect(core.savedThemeMode, 'system');
+    expect(appearance(), Brightness.dark);
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    await tester.pumpAndSettle();
+    expect(appearance(), Brightness.light);
+    await choose('深色模式');
+    expect(appearance(), Brightness.dark);
+    expect(core.savedThemeMode, 'dark');
+    await tester.tap(find.text('自动跟焦'));
+    await tester.pumpAndSettle();
+    expect(
+      Theme.of(tester.element(find.text('镜头库'))).brightness,
+      Brightness.dark,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an invalid appearance falls back and save errors are visible', (
+    tester,
+  ) async {
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    final core = FakeCore()..savedThemeMode = 'invalid';
+    await tester.pumpWidget(FollowApp(core: core));
+    await tester.pumpAndSettle();
+    expect(
+      Theme.of(tester.element(find.text('选择跟焦方式'))).brightness,
+      Brightness.light,
+    );
+    core.failThemeSave = true;
+    await tester.tap(find.byTooltip('切换外观'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.widgetWithText(CheckedPopupMenuItem<ThemeMode>, '深色模式'),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('外观已切换，但保存失败，重启后可能恢复默认。'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

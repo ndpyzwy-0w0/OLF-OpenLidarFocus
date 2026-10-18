@@ -445,6 +445,12 @@ class FfCore {
   Future<void> start() => invoke('start');
   Future<void> stop() => invoke('stop');
 
+  // 界面偏好由 iOS 壳保存，不进入电机控制会话。
+  Future<String?> loadThemeMode() =>
+      _methods.invokeMethod<String>('getThemeMode');
+  Future<void> saveThemeMode(String mode) =>
+      invoke('setThemeMode', {'mode': mode});
+
   // 设备
   Future<List<FfDevice>> discover() async {
     final list = await _methods.invokeMethod<List<dynamic>>('discover');

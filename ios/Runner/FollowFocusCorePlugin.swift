@@ -65,6 +65,16 @@ final class FollowFocusCorePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     let a = args(call)
     switch call.method {
+    // 界面外观只存本机偏好，不参与控制回路。
+    case "getThemeMode":
+      result(UserDefaults.standard.string(forKey: "appearanceMode"))
+    case "setThemeMode":
+      guard let mode = string(a, "mode"), ["system", "light", "dark"].contains(mode) else {
+        result(FlutterError(code: "bad_args", message: "未知外观模式", details: nil))
+        return
+      }
+      UserDefaults.standard.set(mode, forKey: "appearanceMode")
+      result(nil)
     // 生命周期
     case "start":
       session.start()

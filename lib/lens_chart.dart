@@ -24,6 +24,8 @@ class LensChart extends StatelessWidget {
               points,
               curve,
               Theme.of(context).colorScheme.primary,
+              Theme.of(context).colorScheme.onSurfaceVariant,
+              Theme.of(context).colorScheme.outlineVariant,
             ),
           ),
         ),
@@ -35,14 +37,20 @@ class LensChart extends StatelessWidget {
 
 class _ChartPainter extends CustomPainter {
   final List<FfLutPoint> points, curve;
-  final Color color;
-  _ChartPainter(this.points, this.curve, this.color);
+  final Color color, labelColor, gridColor;
+  _ChartPainter(
+    this.points,
+    this.curve,
+    this.color,
+    this.labelColor,
+    this.gridColor,
+  );
 
   void _label(Canvas canvas, String text, Offset offset) {
     final painter = TextPainter(
       text: TextSpan(
         text: text,
-        style: const TextStyle(color: Colors.white70, fontSize: 10),
+        style: TextStyle(color: labelColor, fontSize: 10),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
@@ -53,7 +61,7 @@ class _ChartPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final plot = Rect.fromLTWH(42, 12, size.width - 54, size.height - 42);
     final grid = Paint()
-      ..color = Colors.white24
+      ..color = gridColor
       ..strokeWidth = 1;
     for (var i = 0; i <= 4; i++) {
       final y = plot.bottom - plot.height * i / 4;
@@ -101,5 +109,9 @@ class _ChartPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_ChartPainter old) =>
-      old.points != points || old.curve != curve || old.color != color;
+      old.points != points ||
+      old.curve != curve ||
+      old.color != color ||
+      old.labelColor != labelColor ||
+      old.gridColor != gridColor;
 }

@@ -8,7 +8,14 @@ import 'lens_page.dart';
 
 class ModePage extends StatefulWidget {
   final FfCore core;
-  const ModePage({super.key, required this.core});
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeChanged;
+  const ModePage({
+    super.key,
+    required this.core,
+    required this.themeMode,
+    required this.onThemeChanged,
+  });
 
   @override
   State<ModePage> createState() => _ModePageState();
@@ -84,6 +91,28 @@ class _ModePageState extends State<ModePage> {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
+                    ),
+                    PopupMenuButton<ThemeMode>(
+                      tooltip: '切换外观',
+                      initialValue: widget.themeMode,
+                      onSelected: widget.onThemeChanged,
+                      icon: Icon(switch (widget.themeMode) {
+                        ThemeMode.system => LucideIcons.monitor,
+                        ThemeMode.light => LucideIcons.sun,
+                        ThemeMode.dark => LucideIcons.moon,
+                      }),
+                      itemBuilder: (_) => [
+                        for (final mode in ThemeMode.values)
+                          CheckedPopupMenuItem(
+                            value: mode,
+                            checked: widget.themeMode == mode,
+                            child: Text(switch (mode) {
+                              ThemeMode.system => '跟随系统',
+                              ThemeMode.light => '浅色模式',
+                              ThemeMode.dark => '深色模式',
+                            }),
+                          ),
+                      ],
                     ),
                     IconButton(
                       tooltip: '设备管理',
