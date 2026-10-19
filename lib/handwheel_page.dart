@@ -9,6 +9,12 @@ import 'package:flutter/services.dart';
 import 'device_page.dart';
 import 'ff_core.dart';
 
+Color _focusPointColor(ColorScheme colors, bool isA) {
+  final dark = colors.brightness == Brightness.dark;
+  if (isA) return Color(dark ? 0xFFFFBF69 : 0xFF8A4600);
+  return Color(dark ? 0xFF79B8FF : 0xFF1C5FA7);
+}
+
 enum FocusHapticStyle {
   standard('标准刻度', '每圈／全行程 60 格，轻巧清楚', 60, 80),
   dense('密集轻触', '每圈／全行程 120 格，细密轻触', 120, 35),
@@ -61,6 +67,9 @@ class HandwheelPage extends StatefulWidget {
 
 class _HandwheelPageState extends State<HandwheelPage>
     with WidgetsBindingObserver {
+  ColorScheme get _colors => Theme.of(context).colorScheme;
+  TextStyle get _hintStyle =>
+      TextStyle(fontSize: 11, color: _colors.onSurfaceVariant);
   FfState _s = const FfState();
   StreamSubscription<FfState>? _sub;
   bool _haptics = true;
@@ -137,17 +146,13 @@ class _HandwheelPageState extends State<HandwheelPage>
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    backgroundColor: const Color(0xFF101516),
     appBar: AppBar(
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text('手机跟焦手轮'),
           if (_s.appVersion.isNotEmpty)
-            Text(
-              'v${_s.appVersion}',
-              style: const TextStyle(fontSize: 11, color: Colors.white60),
-            ),
+            Text('v${_s.appVersion}', style: _hintStyle),
         ],
       ),
       actions: [
@@ -256,8 +261,8 @@ class _HandwheelPageState extends State<HandwheelPage>
               LucideIcons.circle,
               size: 10,
               color: _s.linkAlive && _s.canOk
-                  ? Colors.greenAccent
-                  : Colors.orangeAccent,
+                  ? _colors.primary
+                  : _focusPointColor(_colors, true),
             ),
             label: Text(
               _s.linkAlive ? (_s.canOk ? 'CAN 在线' : '等待 CAN 反馈') : '未连接设备',
@@ -291,7 +296,7 @@ class _HandwheelPageState extends State<HandwheelPage>
         _s.positionTrusted
             ? '实际 ${_s.pos} → 目标 ${_s.target} · 误差 ${(_s.target - _s.pos).abs()} / ±${_s.fm03?.tolerance ?? 4}'
             : '实际位置 --',
-        style: const TextStyle(color: Colors.white70),
+        style: TextStyle(color: _colors.onSurfaceVariant),
       ),
     ],
   );
@@ -327,7 +332,7 @@ class _HandwheelPageState extends State<HandwheelPage>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text('目标焦点', style: TextStyle(color: Colors.white60)),
+          Text('目标焦点', style: TextStyle(color: _colors.onSurfaceVariant)),
           Text(
             '${(value * 100).toStringAsFixed(1)}%',
             style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w300),
@@ -383,14 +388,14 @@ class _HandwheelPageState extends State<HandwheelPage>
                       _sliderMarker(
                         'A',
                         _s.wheelA!,
-                        const Color(0xFFFFBF69),
+                        _focusPointColor(_colors, true),
                         box.maxWidth,
                       ),
                     if (_s.wheelB != null)
                       _sliderMarker(
                         'B',
                         _s.wheelB!,
-                        const Color(0xFF79B8FF),
+                        _focusPointColor(_colors, false),
                         box.maxWidth,
                       ),
                   ],
@@ -413,21 +418,21 @@ class _HandwheelPageState extends State<HandwheelPage>
                     ? 'A 未设置'
                     : 'A ${(_s.wheelA! / 4096 * 100).toStringAsFixed(1)}%',
                 key: const ValueKey('slider-a-value'),
-                style: const TextStyle(color: Color(0xFFFFBF69)),
+                style: TextStyle(color: _focusPointColor(_colors, true)),
               ),
               Text(
                 _s.wheelB == null
                     ? 'B 未设置'
                     : 'B ${(_s.wheelB! / 4096 * 100).toStringAsFixed(1)}%',
                 key: const ValueKey('slider-b-value'),
-                style: const TextStyle(color: Color(0xFF79B8FF)),
+                style: TextStyle(color: _focusPointColor(_colors, false)),
               ),
             ],
           ),
           const SizedBox(height: 4),
           Text(
             _s.wheelReady ? '拖动直接跟焦 · 遵循 A/B 限位' : '等待解锁与电机就绪',
-            style: const TextStyle(fontSize: 11, color: Colors.white60),
+            style: _hintStyle,
           ),
         ],
       ),
@@ -560,9 +565,9 @@ class _HandwheelPageState extends State<HandwheelPage>
           ),
         ],
       ),
-      const Text(
+      Text(
         '仅控制下方“拉到 A/B”的目标节奏；“到 A/B 点”直接发送终点。转手轮实时跟随，不受时长与曲线影响。实际到位受速度与负载限制。',
-        style: TextStyle(fontSize: 11, color: Colors.white60),
+        style: _hintStyle,
       ),
       Row(
         children: [
@@ -591,7 +596,7 @@ class _HandwheelPageState extends State<HandwheelPage>
         ),
       const SizedBox(height: 16),
       const SizedBox(height: 8),
-      Text(_s.msg, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+      Text(_s.msg, style: _hintStyle),
       if (!_s.wheelReady && !_paused && !_calRunning) ...[
         const SizedBox(height: 12),
         FilledButton.tonalIcon(
@@ -605,12 +610,9 @@ class _HandwheelPageState extends State<HandwheelPage>
             icon: const Icon(LucideIcons.wifi),
             label: const Text('连接电机'),
           ),
-        const Padding(
-          padding: EdgeInsets.symmetric(vertical: 8),
-          child: Text(
-            '手轮模式无需物距表。寻限位完成后即可控制。',
-            style: TextStyle(fontSize: 11, color: Colors.white60),
-          ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Text('手轮模式无需物距表。寻限位完成后即可控制。', style: _hintStyle),
         ),
       ],
       const SizedBox(height: 16),
@@ -644,10 +646,7 @@ class _HandwheelPageState extends State<HandwheelPage>
                 ),
               ],
             ),
-            const Text(
-              '1×：手轮转一圈对应完整行程；0.25× 用于精细对焦。',
-              style: TextStyle(fontSize: 11, color: Colors.white60),
-            ),
+            Text('1×：手轮转一圈对应完整行程；0.25× 用于精细对焦。', style: _hintStyle),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('反转手轮方向'),
@@ -682,10 +681,7 @@ class _HandwheelPageState extends State<HandwheelPage>
                   : null,
             ),
             const SizedBox(height: 8),
-            Text(
-              '${_hapticStyle.description}；快速拖动会限制触发频率。',
-              style: const TextStyle(fontSize: 11, color: Colors.white60),
-            ),
+            Text('${_hapticStyle.description}；快速拖动会限制触发频率。', style: _hintStyle),
             const SizedBox(height: 12),
             _motorParameter(
               '启动加速',
@@ -713,11 +709,11 @@ class _HandwheelPageState extends State<HandwheelPage>
             ),
             Text(
               '设备已回读：速度 ${_s.fm03?.maxSpeed ?? "--"} · 加速 ${_s.fm03?.acceleration ?? "--"} · 减速 ${_s.fm03?.gain ?? "--"} · 容差 ±${_s.fm03?.tolerance ?? "--"} · 拨轮输出 ${_s.fm03?.value ?? "--"}',
-              style: const TextStyle(fontSize: 11, color: Colors.white60),
+              style: _hintStyle,
             ),
-            const Text(
+            Text(
               '运动中调参需固件 2.1.1。参数以设备回读为准，停稳后保存到设备，自动模式也会使用。A/B 点在重连、离开模式或重新寻限位后清除。',
-              style: TextStyle(fontSize: 11, color: Colors.white60),
+              style: _hintStyle,
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
@@ -735,9 +731,10 @@ class _HandwheelPageState extends State<HandwheelPage>
 
   Widget _stopButton() => FilledButton.icon(
     style: FilledButton.styleFrom(
-      backgroundColor: _paused
-          ? const Color(0xFF16745E)
-          : const Color(0xFFAB4249),
+      backgroundColor: _paused ? _colors.primary : const Color(0xFFAB4249),
+      foregroundColor: _paused ? _colors.onPrimary : Colors.white,
+      disabledForegroundColor: _colors.onSurfaceVariant,
+      disabledBackgroundColor: _colors.surfaceContainerHighest,
       padding: const EdgeInsets.all(16),
     ),
     onPressed: _s.connected && (!_paused || _s.canResume)
@@ -787,7 +784,7 @@ class _HandwheelPageState extends State<HandwheelPage>
                 }
               : null,
         ),
-        Text(hint, style: const TextStyle(fontSize: 11, color: Colors.white60)),
+        Text(hint, style: _hintStyle),
         const SizedBox(height: 12),
       ],
     );
@@ -807,7 +804,7 @@ class _HandwheelPageState extends State<HandwheelPage>
             coordinate == null
                 ? '未设置'
                 : '$coordinate · ${(coordinate / 4096 * 100).toStringAsFixed(1)}%',
-            style: const TextStyle(color: Colors.white60, fontSize: 11),
+            style: _hintStyle,
           ),
           TextButton(
             onPressed: _s.wheelReady && !_s.moving && !_s.wheelPulling
@@ -887,6 +884,7 @@ class _WheelDialState extends State<WheelDial> {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, box) {
       final size = Size(box.maxWidth, box.maxHeight);
+      final colors = Theme.of(context).colorScheme;
       return Semantics(
         label: '跟焦手轮',
         value: widget.label,
@@ -947,17 +945,18 @@ class _WheelDialState extends State<WheelDial> {
                 widget.a,
                 widget.b,
                 widget.enabled,
+                colors,
               ),
               child: Center(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text(
+                    Text(
                       'FOCUS',
                       style: TextStyle(
                         fontSize: 11,
                         letterSpacing: 4,
-                        color: Colors.white54,
+                        color: colors.onSurfaceVariant,
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -971,9 +970,9 @@ class _WheelDialState extends State<WheelDial> {
                     const SizedBox(height: 12),
                     Text(
                       widget.enabled ? '轮缘旋转 · 中心上下微调' : '等待解锁与电机就绪',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 11,
-                        color: Colors.white54,
+                        color: colors.onSurfaceVariant,
                       ),
                     ),
                   ],
@@ -991,7 +990,15 @@ class _WheelPainter extends CustomPainter {
   final double? actual, a, b;
   final double target;
   final bool enabled;
-  _WheelPainter(this.actual, this.target, this.a, this.b, this.enabled);
+  final ColorScheme colors;
+  _WheelPainter(
+    this.actual,
+    this.target,
+    this.a,
+    this.b,
+    this.enabled,
+    this.colors,
+  );
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1001,8 +1008,8 @@ class _WheelPainter extends CustomPainter {
       center,
       r,
       Paint()
-        ..shader = const RadialGradient(
-          colors: [Color(0xFF263332), Color(0xFF161E20)],
+        ..shader = RadialGradient(
+          colors: [colors.surfaceContainer, colors.surfaceContainerLow],
         ).createShader(Rect.fromCircle(center: center, radius: r)),
     );
     canvas.drawCircle(
@@ -1011,7 +1018,7 @@ class _WheelPainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2
-        ..color = const Color(0xFF384847),
+        ..color = colors.outlineVariant,
     );
     for (var i = 0; i < 60; i++) {
       final theta = i * math.pi / 30 - math.pi / 2;
@@ -1021,7 +1028,7 @@ class _WheelPainter extends CustomPainter {
         center + unit * (r - 4),
         Paint()
           ..strokeWidth = i % 5 == 0 ? 2 : 1
-          ..color = enabled ? const Color(0xFF9CAFA9) : Colors.white24,
+          ..color = enabled ? colors.onSurfaceVariant : colors.outline,
       );
     }
     final ring = Rect.fromCircle(center: center, radius: r + 6);
@@ -1034,7 +1041,7 @@ class _WheelPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeWidth = 3
         ..strokeCap = StrokeCap.round
-        ..color = enabled ? const Color(0xFF53D6B7) : Colors.white24,
+        ..color = enabled ? colors.primary : colors.outline,
     );
     void marker(double value, Color color, String? label) {
       final theta = value * 2 * math.pi - math.pi / 2;
@@ -1059,9 +1066,9 @@ class _WheelPainter extends CustomPainter {
       }
     }
 
-    if (a != null) marker(a!, const Color(0xFFFFBF69), 'A');
-    if (b != null) marker(b!, const Color(0xFF79B8FF), 'B');
-    if (actual != null) marker(actual!, Colors.white, null);
+    if (a != null) marker(a!, _focusPointColor(colors, true), 'A');
+    if (b != null) marker(b!, _focusPointColor(colors, false), 'B');
+    if (actual != null) marker(actual!, colors.onSurface, null);
   }
 
   @override
@@ -1070,5 +1077,6 @@ class _WheelPainter extends CustomPainter {
       target != old.target ||
       a != old.a ||
       b != old.b ||
-      enabled != old.enabled;
+      enabled != old.enabled ||
+      colors != old.colors;
 }

@@ -1250,6 +1250,111 @@ void main() {
     },
   );
 
+  for (final brightness in Brightness.values) {
+    testWidgets('handwheel theme and text contrast follow $brightness', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final core = FakeCore(
+        const FfState(appVersion: '2.6.2+24', msg: '主题对比度测试'),
+      )..savedThemeMode = brightness.name;
+      await tester.pumpWidget(FollowApp(core: core));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('手动跟焦'));
+      await tester.tap(find.text('手动跟焦'));
+      await tester.pumpAndSettle();
+      final theme = Theme.of(tester.element(find.byType(HandwheelPage)));
+      final background = tester
+          .widget<Material>(
+            find
+                .ancestor(
+                  of: find.byKey(const ValueKey('focus-wheel')),
+                  matching: find.byType(Material),
+                )
+                .first,
+          )
+          .color;
+      expect(background, theme.scaffoldBackgroundColor);
+      void readable(String label) {
+        final finder = find.text(label);
+        final text = tester.widget<RichText>(
+          find.descendant(of: finder, matching: find.byType(RichText)),
+        );
+        final material = tester.widget<Material>(
+          find.ancestor(of: finder, matching: find.byType(Material)).first,
+        );
+        final bg = material.color ?? theme.scaffoldBackgroundColor;
+        final fg = Color.alphaBlend(text.text.style!.color!, bg);
+        final light = fg.computeLuminance(), dark = bg.computeLuminance();
+        final ratio = light > dark
+            ? (light + .05) / (dark + .05)
+            : (dark + .05) / (light + .05);
+        expect(ratio, greaterThanOrEqualTo(4.5), reason: label);
+      }
+
+      for (final label in [
+        'v2.6.2+24',
+        '实际位置 --',
+        'FOCUS',
+        '等待解锁与电机就绪',
+        '停止并锁定',
+      ]) {
+        readable(label);
+      }
+      expect(tester.widget<WheelDial>(find.byType(WheelDial)).enabled, isFalse);
+      await tester.tap(find.text('滑块'));
+      await tester.pumpAndSettle();
+      for (final label in ['目标焦点', 'A 未设置', 'B 未设置']) {
+        readable(label);
+      }
+      await tapVisible(tester, find.text('手轮响应与设置'));
+      readable('主题对比度测试');
+      readable('1×：手轮转一圈对应完整行程；0.25× 用于精细对焦。');
+      tester.view.physicalSize = const Size(844, 390);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      core.push(const FfState(connected: true));
+      await tester.pumpAndSettle();
+      readable('停止并锁定');
+    });
+  }
+
+  testWidgets(
+    'handwheel repaints on a live system theme change without moving',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+      final core = FakeCore();
+      await tester.pumpWidget(FollowApp(core: core));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('手动跟焦'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('手动跟焦'));
+      await tester.pumpAndSettle();
+      final wheelState = tester.state(find.byType(WheelDial));
+      final paint = find.descendant(
+        of: find.byKey(const ValueKey('focus-wheel')),
+        matching: find.byType(CustomPaint),
+      );
+      final before = tester.widget<CustomPaint>(paint).painter!;
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+      await tester.pumpAndSettle();
+      final after = tester.widget<CustomPaint>(paint).painter!;
+      expect(after.shouldRepaint(before), isTrue);
+      expect(tester.state(find.byType(WheelDial)), same(wheelState));
+      expect(core.called('turnWheel'), isFalse);
+      expect(core.called('setSlider'), isFalse);
+      expect(core.called('startAutoCalibration'), isFalse);
+    },
+  );
+
   testWidgets('handwheel layout fits portrait and landscape on a small phone', (
     tester,
   ) async {
